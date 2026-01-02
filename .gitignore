@@ -1,0 +1,21 @@
+# Binary
+/tk
+*.test
+
+# Lock files
+*.lock
+
+# Test coverage
+coverage.out
+
+ticket.old
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.nvimlog
