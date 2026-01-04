@@ -17,7 +17,7 @@ const (
 // Run is the main entry point. Returns exit code.
 //
 //nolint:cyclop,funlen // main dispatch function
-func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, _ []string) int {
+func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env []string) int {
 	if len(args) < minArgs {
 		printUsage(out)
 
@@ -91,6 +91,8 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, _ []string
 		return cmdReady(out, errOut, cfg, workDir, flags.remaining[1:])
 	case "repair":
 		return cmdRepair(out, errOut, cfg, workDir, flags.remaining[1:])
+	case "editor":
+		return cmdEditor(out, errOut, cfg, workDir, flags.remaining[1:], env)
 	case "print-config":
 		return cmdPrintConfig(out, errOut, cfg)
 	default:
@@ -256,5 +258,6 @@ Commands:`)
 	fprintln(writer, unblockHelp)
 	fprintln(writer, readyHelp)
 	fprintln(writer, repairHelp)
+	fprintln(writer, editorHelp)
 	fprintln(writer, `  print-config           Show resolved configuration`)
 }

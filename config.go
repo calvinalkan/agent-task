@@ -12,6 +12,7 @@ import (
 // Config holds all configuration options.
 type Config struct {
 	TicketDir string `json:"ticket_dir"` //nolint:tagliatelle // snake_case for config file
+	Editor    string `json:"editor,omitempty"`
 }
 
 // DefaultConfig returns the default configuration.
@@ -116,6 +117,10 @@ func parseConfig(data []byte) (Config, map[string]bool, error) {
 func mergeConfig(base, overlay Config) Config {
 	if overlay.TicketDir != "" {
 		base.TicketDir = overlay.TicketDir
+	}
+
+	if overlay.Editor != "" {
+		base.Editor = overlay.Editor
 	}
 
 	return base

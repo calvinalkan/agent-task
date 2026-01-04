@@ -44,4 +44,5 @@ var (
 	errAlreadyBlockedBy           = errors.New("ticket is already blocked by")
 	errCannotBlockSelf            = errors.New("ticket cannot block itself")
 	errBlockedByNotFound          = errors.New("blocked-by field not found")
+	errNoEditorFound              = errors.New("no editor found (set config.editor, $EDITOR, or install vi/nano)")
 )
