@@ -627,3 +627,78 @@ func TestConfig_GlobalConfig_PartialMerge(t *testing.T) {
 	assertStdoutContains(t, stdout, `"ticket_dir": "custom-tickets"`)
 	assertStdoutContains(t, stdout, `"editor": "vim"`)
 }
+
+// Tests for print-config sources output.
+
+func TestPrintConfig_ShowsDefaultsOnly(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir() // Empty, no config
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	assertStdoutContains(t, stdout, "# Sources:")
+	assertStdoutContains(t, stdout, "#   (using defaults only)")
+}
+
+func TestPrintConfig_ShowsGlobalSource(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	globalPath := filepath.Join(xdgDir, "tk", "config.json")
+	writeFile(t, globalPath, `{"editor": "nvim"}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	assertStdoutContains(t, stdout, "# Sources:")
+	assertStdoutContains(t, stdout, "#   global: "+globalPath)
+}
+
+func TestPrintConfig_ShowsProjectSource(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir() // Empty, no global config
+
+	projectPath := filepath.Join(dir, ".tk.json")
+	writeFile(t, projectPath, `{"ticket_dir": "my-tickets"}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	assertStdoutContains(t, stdout, "# Sources:")
+	assertStdoutContains(t, stdout, "#   project: "+projectPath)
+}
+
+func TestPrintConfig_ShowsBothSources(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	globalPath := filepath.Join(xdgDir, "tk", "config.json")
+	writeFile(t, globalPath, `{"editor": "nvim"}`)
+
+	projectPath := filepath.Join(dir, ".tk.json")
+	writeFile(t, projectPath, `{"ticket_dir": "my-tickets"}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	assertStdoutContains(t, stdout, "# Sources:")
+	assertStdoutContains(t, stdout, "#   global: "+globalPath)
+	assertStdoutContains(t, stdout, "#   project: "+projectPath)
+}

@@ -46,7 +46,7 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env []stri
 	// Load and validate config
 	cliOverrides := Config{TicketDir: flags.ticketDir}
 
-	cfg, err := LoadConfig(workDir, flags.configPath, cliOverrides, flags.hasTicketDirOverride, env)
+	cfg, sources, err := LoadConfig(workDir, flags.configPath, cliOverrides, flags.hasTicketDirOverride, env)
 	if err != nil {
 		fprintln(errOut, "error:", err)
 		printUsage(errOut)
@@ -94,7 +94,7 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env []stri
 	case "editor":
 		return cmdEditor(out, errOut, cfg, workDir, flags.remaining[1:], env)
 	case "print-config":
-		return cmdPrintConfig(out, errOut, cfg)
+		return cmdPrintConfig(out, errOut, cfg, sources)
 	default:
 		fprintln(errOut, "unknown command:", cmd)
 		printUsage(errOut)
@@ -211,7 +211,7 @@ func parseFlag(args []string, idx int, flags *globalFlags) (int, error) {
 	return consumedNone, nil
 }
 
-func cmdPrintConfig(out io.Writer, errOut io.Writer, cfg Config) int {
+func cmdPrintConfig(out io.Writer, errOut io.Writer, cfg Config, sources ConfigSources) int {
 	formatted, err := FormatConfig(cfg)
 	if err != nil {
 		fprintln(errOut, "error:", err)
@@ -220,6 +220,22 @@ func cmdPrintConfig(out io.Writer, errOut io.Writer, cfg Config) int {
 	}
 
 	fprintln(out, formatted)
+
+	// Print sources
+	fprintln(out, "")
+	fprintln(out, "# Sources:")
+
+	if sources.Global != "" {
+		fprintln(out, "#   global:", sources.Global)
+	}
+
+	if sources.Project != "" {
+		fprintln(out, "#   project:", sources.Project)
+	}
+
+	if sources.Global == "" && sources.Project == "" {
+		fprintln(out, "#   (using defaults only)")
+	}
 
 	return 0
 }

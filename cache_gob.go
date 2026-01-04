@@ -1,5 +1,10 @@
 package main
 
+// This file contains gob-based cache implementation.
+// Currently unused - the binary mmap cache (cache_binary.go) is used instead.
+// Kept for potential Windows support, since syscall.Mmap is not available on Windows.
+// TODO: Add build tags to use this on Windows if needed.
+
 import (
 	"encoding/gob"
 	"errors"
