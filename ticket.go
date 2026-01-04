@@ -574,10 +574,9 @@ type ListTicketsOptions struct {
 
 // listTicketsState holds state for parallel ticket listing.
 type listTicketsState struct {
-	cache        *TicketCache
-	cacheMu      sync.RWMutex
-	cacheChanged bool
-	results      []TicketResult
+	cache   *BinaryCache
+	cacheMu sync.RWMutex
+	results []TicketResult
 }
 
 // ListTickets reads all ticket files from a directory and returns parsed summaries.
@@ -598,20 +597,25 @@ func ListTickets(ticketDir string, opts ListTicketsOptions) ([]TicketResult, err
 	}
 
 	// Load cache
-	cache, cacheErr := LoadCache(ticketDir)
+	cache, cacheErr := LoadBinaryCache(ticketDir)
 	cacheWasCold := cacheErr != nil
 
 	if cacheWasCold {
-		// Cache missing or corrupt - start fresh
-		cache = &TicketCache{Entries: make(map[string]CacheEntry)}
+		// Cache missing, corrupt, or version mismatch - start fresh
+		cache = NewBinaryCache()
 
-		// If corrupt, delete in background
-		if errors.Is(cacheErr, errCacheCorrupt) {
+		// If old format or corrupt, delete in background
+		if cacheErr != nil && !errors.Is(cacheErr, errCacheNotFound) {
 			go func() {
 				_ = DeleteCache(ticketDir)
 			}()
 		}
 	}
+	defer func() {
+		if cache != nil {
+			_ = cache.Close()
+		}
+	}()
 
 	// If cache was cold, we must process ALL files to build cache
 	// Then apply offset/limit in memory at the end
@@ -665,9 +669,8 @@ func ListTickets(ticketDir string, opts ListTicketsOptions) ([]TicketResult, err
 	waitGroup.Wait()
 
 	// Save cache if changed
-	if state.cacheChanged {
-		cleanCache(state.cache, ticketDir)
-		_ = SaveCache(ticketDir, state.cache)
+	if state.cache.HasChanges() {
+		_ = SaveBinaryCache(ticketDir, state.cache)
 	}
 
 	results := state.results[:resultIdx]
@@ -732,18 +735,28 @@ func processTicketEntry(
 
 	mtime := info.ModTime()
 
-	// Check cache first (read lock - multiple readers OK)
+	// Check cache mtime first (fast - only reads index, not data)
 	state.cacheMu.RLock()
-	cached, cacheHit := state.cache.Entries[filename]
+	cachedMtime := state.cache.LookupMtime(filename)
 	state.cacheMu.RUnlock()
 
-	if cacheHit && cached.Mtime.Equal(mtime) {
-		// Cache hit - no file open needed
-		summary := cached.Summary
-		summary.Path = path // ensure path is set
-		state.results[idx] = TicketResult{Path: path, Summary: &summary}
+	if !cachedMtime.IsZero() && cachedMtime.Equal(mtime) {
+		// Mtime matches - now load full cached data
+		state.cacheMu.RLock()
+		cached := state.cache.Lookup(filename)
+		state.cacheMu.RUnlock()
 
-		return
+		if cached != nil {
+			summary := cached.Summary
+			summary.Path = path
+			state.results[idx] = TicketResult{Path: path, Summary: &summary}
+			// Mark as valid so it's preserved on save
+			state.cacheMu.Lock()
+			state.cache.MarkValid(filename)
+			state.cacheMu.Unlock()
+
+			return
+		}
 	}
 
 	// Cache miss - parse file
@@ -752,27 +765,9 @@ func processTicketEntry(
 	state.results[idx] = TicketResult{Path: path, Err: parseErr}
 	if parseErr == nil {
 		state.results[idx].Summary = &summary
-		updateCache(state, filename, mtime, summary)
-	}
-}
-
-// updateCache updates the cache with a parsed ticket summary.
-func updateCache(state *listTicketsState, filename string, mtime time.Time, summary TicketSummary) {
-	state.cacheMu.Lock()
-	state.cache.Entries[filename] = CacheEntry{Mtime: mtime, Summary: summary}
-	state.cacheChanged = true
-	state.cacheMu.Unlock()
-}
-
-// cleanCache removes entries for files that no longer exist.
-func cleanCache(cache *TicketCache, ticketDir string) {
-	for filename := range cache.Entries {
-		path := filepath.Join(ticketDir, filename)
-
-		_, statErr := os.Stat(path)
-		if os.IsNotExist(statErr) {
-			delete(cache.Entries, filename)
-		}
+		state.cacheMu.Lock()
+		state.cache.Update(filename, CacheEntry{Mtime: mtime, Summary: summary})
+		state.cacheMu.Unlock()
 	}
 }
 

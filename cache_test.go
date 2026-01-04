@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestCacheLoadSave(t *testing.T) {
+func TestGobCacheLoadSave(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -65,7 +65,7 @@ func TestCacheLoadSave(t *testing.T) {
 	}
 }
 
-func TestCacheCorrupted(t *testing.T) {
+func TestGobCacheCorrupted(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -90,7 +90,7 @@ func TestCacheCorrupted(t *testing.T) {
 	}
 }
 
-func TestCacheMissing(t *testing.T) {
+func TestGobCacheMissing(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -293,10 +293,10 @@ func TestDeleteCache(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	// Create a cache file
-	cache := &TicketCache{Entries: make(map[string]CacheEntry)}
+	// Create a cache file using binary cache
+	cache := NewBinaryCache()
 
-	err := SaveCache(tmpDir, cache)
+	err := SaveBinaryCache(tmpDir, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,6 +745,114 @@ priority: 2
 	for _, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
 		if !ids[id] {
 			t.Errorf("expected %s in results", id)
+		}
+	}
+}
+
+func TestCachePartialReadWithUpdatePreservesAllEntries(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Create 5 ticket files
+	for i, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		content := `---
+id: ` + id + `
+status: open
+blocked-by: []
+created: 2024-01-0` + string(rune('1'+i)) + `T00:00:00Z
+type: feature
+priority: 2
+---
+# Ticket ` + id + `
+`
+		err := os.WriteFile(filepath.Join(tmpDir, id+".md"), []byte(content), filePerms)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// First call - cold cache, builds full cache with all 5 tickets
+	results1, err := ListTickets(tmpDir, ListTicketsOptions{NeedAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results1) != 5 {
+		t.Fatalf("expected 5 results on cold cache, got %d", len(results1))
+	}
+
+	// Second call - warm cache with limit=2 (partial read)
+	results2, err := ListTickets(tmpDir, ListTicketsOptions{
+		NeedAll: false,
+		Limit:   2,
+		Offset:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results2) != 2 {
+		t.Fatalf("expected 2 results with limit=2, got %d", len(results2))
+	}
+
+	// Modify one of the first 2 tickets (triggers cache update on partial read)
+	time.Sleep(10 * time.Millisecond) // ensure mtime changes
+
+	modifiedContent := `---
+id: a-001
+status: closed
+blocked-by: []
+created: 2024-01-01T00:00:00Z
+closed: 2024-01-02T00:00:00Z
+type: feature
+priority: 2
+---
+# Modified a-001
+`
+	err = os.WriteFile(filepath.Join(tmpDir, "a-001.md"), []byte(modifiedContent), filePerms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Third call - partial read again, should detect change and update cache
+	results3, err := ListTickets(tmpDir, ListTicketsOptions{
+		NeedAll: false,
+		Limit:   2,
+		Offset:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results3) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results3))
+	}
+
+	// Verify the modification was picked up
+	if results3[0].Summary.Status != "closed" {
+		t.Errorf("expected a-001 status=closed, got %s", results3[0].Summary.Status)
+	}
+
+	// Verify cache still has all 5 entries after partial update
+	// (This is an implementation detail check, but necessary to verify
+	// that partial reads don't lose cache entries)
+	cache, loadErr := LoadBinaryCache(tmpDir)
+	if loadErr != nil {
+		t.Fatalf("failed to load cache: %v", loadErr)
+	}
+	defer cache.Close()
+
+	if cache.entryCount != 5 {
+		t.Errorf("cache should have 5 entries after partial update, got %d", cache.entryCount)
+	}
+
+	// Also verify we can lookup all entries
+	for _, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		filename := id + ".md"
+		entry := cache.Lookup(filename)
+		if entry == nil {
+			t.Errorf("cache entry for %s was lost", filename)
 		}
 	}
 }
