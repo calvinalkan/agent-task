@@ -349,6 +349,11 @@ func TestLsInvalidTicketFile(t *testing.T) {
 				"created: 2026-01-04T00:00:00Z\nblocked-by: abc-123\n---\n# Title\n",
 			wantStderr: "invalid field value: blocked-by (missing brackets)",
 		},
+		{
+			name:       "frontmatter exceeds line limit",
+			content:    "---\n" + strings.Repeat("field: value\n", 110),
+			wantStderr: "frontmatter exceeds maximum line limit",
+		},
 	}
 
 	for _, testCase := range tests {

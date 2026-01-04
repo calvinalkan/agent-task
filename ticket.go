@@ -537,13 +537,18 @@ type TicketResult struct {
 	Err     error
 }
 
+// MaxFrontmatterLines is the maximum number of lines allowed in frontmatter.
+// If the closing delimiter is not found within this limit, parsing fails.
+const MaxFrontmatterLines = 100
+
 // Validation errors for ticket parsing.
 var (
-	errMissingField        = errors.New("missing required field")
-	errInvalidFieldValue   = errors.New("invalid field value")
-	errNoFrontmatter       = errors.New("no frontmatter found")
-	errUnclosedFrontmatter = errors.New("unclosed frontmatter")
-	errNoTitle             = errors.New("no title found")
+	errMissingField          = errors.New("missing required field")
+	errInvalidFieldValue     = errors.New("invalid field value")
+	errNoFrontmatter         = errors.New("no frontmatter found")
+	errUnclosedFrontmatter   = errors.New("unclosed frontmatter")
+	errFrontmatterTooLong    = errors.New("frontmatter exceeds maximum line limit")
+	errNoTitle               = errors.New("no title found")
 )
 
 // Valid ticket statuses.
@@ -552,23 +557,11 @@ var (
 var validStatuses = []string{StatusOpen, StatusInProgress, StatusClosed}
 
 func isValidTicketStatus(status string) bool {
-	for _, s := range validStatuses {
-		if s == status {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(validStatuses, status)
 }
 
 func isValidTicketType(ticketType string) bool {
-	for _, t := range validTypes {
-		if t == ticketType {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(validTypes, ticketType)
 }
 
 // ListTickets reads all ticket files from a directory and returns parsed summaries.
@@ -583,7 +576,7 @@ func ListTickets(ticketDir string) ([]TicketResult, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("cannot read ticket directory: %w", err)
+		return nil, fmt.Errorf("reading ticket directory: %w", err)
 	}
 
 	// Filter to .md files only
@@ -628,11 +621,6 @@ func ListTickets(ticketDir string) ([]TicketResult, error) {
 
 	waitGroup.Wait()
 
-	// Sort by path (which sorts by ID since filenames are IDs)
-	slices.SortFunc(results, func(a, b TicketResult) int {
-		return strings.Compare(a.Path, b.Path)
-	})
-
 	return results, nil
 }
 
@@ -654,6 +642,7 @@ func ParseTicketFrontmatter(path string) (TicketSummary, error) {
 	inFrontmatter := false
 	frontmatterStarted := false
 	frontmatterEnded := false
+	lineCount := 0
 
 	// Fields to extract
 	var summary TicketSummary
@@ -669,6 +658,12 @@ func ParseTicketFrontmatter(path string) (TicketSummary, error) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		lineCount++
+
+		// Check for runaway frontmatter (missing closing delimiter)
+		if inFrontmatter && lineCount > MaxFrontmatterLines {
+			return TicketSummary{}, errFrontmatterTooLong
+		}
 
 		// Handle frontmatter delimiters
 		if line == frontmatterDelimiter {
