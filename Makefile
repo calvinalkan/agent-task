@@ -20,6 +20,8 @@ vet:
 
 clean:
 	rm -f $(BINARY)
+	find tickets -name "*.lock" -type f -delete 2>/dev/null || true
+	find tickets -name ".cache" -type f -delete 2>/dev/null || true
 
 install:
 	$(GO) install .
