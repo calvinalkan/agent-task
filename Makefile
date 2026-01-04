@@ -7,7 +7,7 @@ build:
 	$(GO) build -o $(BINARY) .
 
 test:
-	$(GO) test -race ./...
+	XDG_CONFIG_HOME=/dev/null $(GO) test -race ./...
 
 lint:
 	golangci-lint run

@@ -138,10 +138,13 @@ func TestEditorCommand(t *testing.T) {
 
 		ticketID := strings.TrimSpace(createStdout.String())
 
-		// No config editor set
+		// No config editor set - also disable global config by setting XDG_CONFIG_HOME to temp dir
 		var stdout, stderr bytes.Buffer
 
-		env := []string{"EDITOR=" + mockEditor}
+		env := []string{
+			"EDITOR=" + mockEditor,
+			"XDG_CONFIG_HOME=" + tmpDir, // Prevents loading ~/.config/tk/config.json
+		}
 
 		exitCode = Run(nil, &stdout, &stderr, []string{"tk", "-C", tmpDir, "editor", ticketID}, env)
 
@@ -220,7 +223,10 @@ func TestEditorCommand(t *testing.T) {
 
 		var stdout, stderr bytes.Buffer
 
-		env := []string{"EDITOR=" + mockEditor}
+		env := []string{
+			"EDITOR=" + mockEditor,
+			"XDG_CONFIG_HOME=" + tmpDir, // Prevents loading ~/.config/tk/config.json
+		}
 
 		exitCode = Run(nil, &stdout, &stderr, []string{"tk", "-C", tmpDir, "editor", ticketID}, env)
 
