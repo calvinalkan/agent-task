@@ -93,31 +93,26 @@ func WithLock(path string, handler func() error) error {
 // If handler returns an error, no write is performed and the error is returned.
 // The lock is always released when this function returns.
 func WithTicketLock(path string, handler func(content []byte) ([]byte, error)) error {
-	lock, lockErr := acquireLock(path)
-	if lockErr != nil {
-		return fmt.Errorf("acquiring lock: %w", lockErr)
-	}
+	return WithLock(path, func() error {
+		content, readErr := os.ReadFile(path) //nolint:gosec // path is validated by caller
+		if readErr != nil {
+			return fmt.Errorf("reading ticket: %w", readErr)
+		}
 
-	defer lock.release()
+		newContent, handleErr := handler(content)
+		if handleErr != nil {
+			return handleErr // check failed, no write
+		}
 
-	content, readErr := os.ReadFile(path) //nolint:gosec // path is validated by caller
-	if readErr != nil {
-		return fmt.Errorf("reading ticket: %w", readErr)
-	}
+		if newContent == nil {
+			return nil // read-only operation
+		}
 
-	newContent, handleErr := handler(content)
-	if handleErr != nil {
-		return handleErr // check failed, no write
-	}
+		writeErr := atomic.WriteFile(path, strings.NewReader(string(newContent)))
+		if writeErr != nil {
+			return fmt.Errorf("writing ticket: %w", writeErr)
+		}
 
-	if newContent == nil {
-		return nil // read-only operation
-	}
-
-	writeErr := atomic.WriteFile(path, strings.NewReader(string(newContent)))
-	if writeErr != nil {
-		return fmt.Errorf("writing ticket: %w", writeErr)
-	}
-
-	return nil
+		return nil
+	})
 }
