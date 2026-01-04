@@ -167,9 +167,14 @@ func outputTickets(
 	// Apply offset/limit only when status filter was used
 	// (otherwise ListTickets already applied them)
 	if statusFilter != "" {
-		if offset >= len(filtered) {
-			filtered = nil
-		} else {
+		// Check for out-of-bounds offset
+		if offset > 0 && offset >= len(filtered) {
+			fprintln(errOut, "error: offset out of bounds")
+
+			return true
+		}
+
+		if offset > 0 {
 			filtered = filtered[offset:]
 		}
 

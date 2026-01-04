@@ -718,19 +718,25 @@ func TestLsLimitOffset(t *testing.T) {
 			wantExit:  0,
 		},
 		{
-			name:       "offset beyond total shows nothing",
+			name:       "offset beyond total errors",
 			ticketIDs:  []string{"a-001", "b-002"},
 			args:       []string{"tk", "ls", "--offset=10"},
-			wantExit:   0,
-			wantStdout: nil,
-			notStdout:  []string{"a-001", "b-002", "... and"},
+			wantExit:   1,
+			wantStderr: []string{"offset out of bounds"},
 		},
 		{
-			name:      "offset equals total shows nothing",
-			ticketIDs: []string{"a-001", "b-002"},
-			args:      []string{"tk", "ls", "--offset=2"},
-			wantExit:  0,
-			notStdout: []string{"a-001", "b-002", "... and"},
+			name:       "offset equals total errors",
+			ticketIDs:  []string{"a-001", "b-002"},
+			args:       []string{"tk", "ls", "--offset=2"},
+			wantExit:   1,
+			wantStderr: []string{"offset out of bounds"},
+		},
+		{
+			name:       "offset way beyond total errors",
+			ticketIDs:  []string{"a-001", "b-002"},
+			args:       []string{"tk", "ls", "--offset=200000"},
+			wantExit:   1,
+			wantStderr: []string{"offset out of bounds"},
 		},
 		{
 			name:       "negative limit error",
@@ -845,6 +851,37 @@ func TestLsLimitWithStatusFilter(t *testing.T) {
 
 	if strings.Contains(out, "d-004") {
 		t.Error("stdout should NOT contain d-004 (beyond limit)")
+	}
+}
+
+func TestLsStatusFilterOffsetOutOfBounds(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	ticketDir := filepath.Join(tmpDir, ".tickets")
+
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create 3 open tickets
+	createTestTicket(t, ticketDir, "a-001", "open", "Open 1", nil)
+	createTestTicket(t, ticketDir, "b-002", "open", "Open 2", nil)
+	createTestTicket(t, ticketDir, "c-003", "open", "Open 3", nil)
+
+	var stdout, stderr bytes.Buffer
+
+	// Filter by open (3 tickets), but offset=10 (out of bounds)
+	args := []string{"tk", "-C", tmpDir, "ls", "--status=open", "--offset=10"}
+	exitCode := Run(nil, &stdout, &stderr, args, nil)
+
+	if exitCode != 1 {
+		t.Errorf("exit code = %d, want 1\nstdout: %s", exitCode, stdout.String())
+	}
+
+	if !strings.Contains(stderr.String(), "offset out of bounds") {
+		t.Errorf("stderr should contain 'offset out of bounds'\nstderr: %s", stderr.String())
 	}
 }
 

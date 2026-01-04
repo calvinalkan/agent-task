@@ -549,6 +549,7 @@ var (
 	errUnclosedFrontmatter = errors.New("unclosed frontmatter")
 	errFrontmatterTooLong  = errors.New("frontmatter exceeds maximum line limit")
 	errNoTitle             = errors.New("no title found")
+	errOffsetOutOfBounds   = errors.New("offset out of bounds")
 )
 
 // Valid ticket statuses.
@@ -670,6 +671,22 @@ func ListTickets(ticketDir string, opts ListTicketsOptions) ([]TicketResult, err
 	}
 
 	results := state.results[:resultIdx]
+
+	// Check for out-of-bounds offset (only when not NeedAll, since status filter handles its own offset)
+	if !opts.NeedAll && opts.Offset > 0 {
+		// For warm cache path: resultIdx is 0 if offset was beyond available files
+		// For cold cache path: check against total results before applying offset
+		totalCount := len(results)
+		if cacheWasCold {
+			// Cold cache: all files in results, check before applying offset
+			if opts.Offset >= totalCount {
+				return nil, errOffsetOutOfBounds
+			}
+		} else if resultIdx == 0 {
+			// Warm cache: if we processed 0 files with offset > 0, offset was out of bounds
+			return nil, errOffsetOutOfBounds
+		}
+	}
 
 	// If cache was cold and we processed all files, apply offset/limit now
 	if cacheWasCold && !opts.NeedAll {

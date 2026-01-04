@@ -327,3 +327,424 @@ func TestDeleteCache(t *testing.T) {
 		t.Fatalf("DeleteCache on missing file should not error: %v", err)
 	}
 }
+
+func TestCacheNewFileAdded(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Create initial ticket file
+	ticket1Content := `---
+id: existing001
+status: open
+blocked-by: []
+created: 2024-01-01T00:00:00Z
+type: feature
+priority: 2
+---
+# Existing Ticket
+`
+
+	err := os.WriteFile(filepath.Join(tmpDir, "existing001.md"), []byte(ticket1Content), filePerms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First call - populates cache with one ticket
+	results1, err := ListTickets(tmpDir, ListTicketsOptions{NeedAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results1) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results1))
+	}
+
+	// Add a new ticket file
+	ticket2Content := `---
+id: new002
+status: open
+blocked-by: []
+created: 2024-01-02T00:00:00Z
+type: bug
+priority: 1
+---
+# New Ticket
+`
+
+	err = os.WriteFile(filepath.Join(tmpDir, "new002.md"), []byte(ticket2Content), filePerms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call - should detect new file and include it
+	results2, err := ListTickets(tmpDir, ListTicketsOptions{NeedAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results2) != 2 {
+		t.Fatalf("expected 2 results after adding file, got %d", len(results2))
+	}
+
+	// Verify both tickets are present
+	ids := make(map[string]bool)
+	for _, r := range results2 {
+		ids[r.Summary.ID] = true
+	}
+
+	if !ids["existing001"] {
+		t.Error("expected existing001 in results")
+	}
+
+	if !ids["new002"] {
+		t.Error("expected new002 in results")
+	}
+}
+
+func TestCacheCorruptedRecovery(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Create ticket files
+	for _, id := range []string{"ticket001", "ticket002"} {
+		content := `---
+id: ` + id + `
+status: open
+blocked-by: []
+created: 2024-01-01T00:00:00Z
+type: feature
+priority: 2
+---
+# Ticket ` + id + `
+`
+
+		err := os.WriteFile(filepath.Join(tmpDir, id+".md"), []byte(content), filePerms)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// First call - populates cache
+	results1, err := ListTickets(tmpDir, ListTicketsOptions{NeedAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results1) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results1))
+	}
+
+	// Corrupt the cache file
+	cachePath := filepath.Join(tmpDir, cacheFileName)
+
+	err = os.WriteFile(cachePath, []byte("corrupted gob data!!!"), filePerms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call - should recover from corruption and return correct results
+	results2, err := ListTickets(tmpDir, ListTicketsOptions{NeedAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results2) != 2 {
+		t.Fatalf("expected 2 results after corruption recovery, got %d", len(results2))
+	}
+
+	// Verify both tickets are present
+	ids := make(map[string]bool)
+	for _, r := range results2 {
+		ids[r.Summary.ID] = true
+	}
+
+	if !ids["ticket001"] {
+		t.Error("expected ticket001 in results")
+	}
+
+	if !ids["ticket002"] {
+		t.Error("expected ticket002 in results")
+	}
+
+	// Third call - should work normally (cache was rebuilt)
+	results3, err := ListTickets(tmpDir, ListTicketsOptions{NeedAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results3) != 2 {
+		t.Fatalf("expected 2 results on third call, got %d", len(results3))
+	}
+}
+
+func TestCacheColdWithOffsetCachesAll(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Create 5 ticket files
+	for i, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		content := `---
+id: ` + id + `
+status: open
+blocked-by: []
+created: 2024-01-0` + string(rune('1'+i)) + `T00:00:00Z
+type: feature
+priority: 2
+---
+# Ticket ` + id + `
+`
+
+		err := os.WriteFile(filepath.Join(tmpDir, id+".md"), []byte(content), filePerms)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Ensure no cache exists
+	_ = DeleteCache(tmpDir)
+
+	// First call with offset=2 (cold cache) - should return tickets 3,4,5
+	results1, err := ListTickets(tmpDir, ListTicketsOptions{
+		NeedAll: false,
+		Limit:   0, // no limit
+		Offset:  2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results1) != 3 {
+		t.Fatalf("expected 3 results with offset=2, got %d", len(results1))
+	}
+
+	// Verify we got tickets after offset
+	ids1 := make(map[string]bool)
+	for _, r := range results1 {
+		ids1[r.Summary.ID] = true
+	}
+
+	if ids1["a-001"] || ids1["b-002"] {
+		t.Error("offset=2 should skip a-001 and b-002")
+	}
+
+	// Second call without offset - should return all 5 (proves all were cached)
+	results2, err := ListTickets(tmpDir, ListTicketsOptions{
+		NeedAll: false,
+		Limit:   0,
+		Offset:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results2) != 5 {
+		t.Fatalf("expected 5 results without offset, got %d (cache should have all tickets)", len(results2))
+	}
+}
+
+func TestCacheMixedChanges(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Create initial tickets A, B, C, D
+	for _, id := range []string{"a-001", "b-002", "c-003", "d-004"} {
+		content := `---
+id: ` + id + `
+status: open
+blocked-by: []
+created: 2024-01-01T00:00:00Z
+type: feature
+priority: 2
+---
+# Original ` + id + `
+`
+
+		err := os.WriteFile(filepath.Join(tmpDir, id+".md"), []byte(content), filePerms)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// First call - populates cache with A, B, C, D
+	results1, err := ListTickets(tmpDir, ListTicketsOptions{NeedAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results1) != 4 {
+		t.Fatalf("expected 4 results, got %d", len(results1))
+	}
+
+	// Now make multiple changes:
+	// - A: unchanged (cache hit)
+	// - B: modify (cache miss)
+	// - C: delete
+	// - E: add new
+
+	// Modify B
+	time.Sleep(10 * time.Millisecond) // ensure mtime changes
+
+	modifiedB := `---
+id: b-002
+status: closed
+blocked-by: []
+created: 2024-01-01T00:00:00Z
+closed: 2024-01-02T00:00:00Z
+type: feature
+priority: 2
+---
+# Modified b-002
+`
+
+	err = os.WriteFile(filepath.Join(tmpDir, "b-002.md"), []byte(modifiedB), filePerms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete C
+	err = os.Remove(filepath.Join(tmpDir, "c-003.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add E
+	newE := `---
+id: e-005
+status: open
+blocked-by: []
+created: 2024-01-05T00:00:00Z
+type: bug
+priority: 1
+---
+# New e-005
+`
+
+	err = os.WriteFile(filepath.Join(tmpDir, "e-005.md"), []byte(newE), filePerms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call - should handle all changes correctly
+	results2, err := ListTickets(tmpDir, ListTicketsOptions{NeedAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have A, B, D, E (4 tickets)
+	if len(results2) != 4 {
+		t.Fatalf("expected 4 results after mixed changes, got %d", len(results2))
+	}
+
+	// Build map for verification
+	resultMap := make(map[string]*TicketSummary)
+	for _, r := range results2 {
+		resultMap[r.Summary.ID] = r.Summary
+	}
+
+	// Verify A is present (unchanged, cache hit)
+	if _, ok := resultMap["a-001"]; !ok {
+		t.Error("a-001 should be present (unchanged)")
+	}
+
+	// Verify B is present with updated data (modified, cache miss)
+	if b, ok := resultMap["b-002"]; !ok {
+		t.Error("b-002 should be present (modified)")
+	} else {
+		if b.Status != "closed" {
+			t.Errorf("b-002 should have status=closed, got %s", b.Status)
+		}
+
+		if b.Title != "Modified b-002" {
+			t.Errorf("b-002 should have updated title, got %s", b.Title)
+		}
+	}
+
+	// Verify C is gone (deleted)
+	if _, ok := resultMap["c-003"]; ok {
+		t.Error("c-003 should NOT be present (deleted)")
+	}
+
+	// Verify D is present (unchanged, cache hit)
+	if _, ok := resultMap["d-004"]; !ok {
+		t.Error("d-004 should be present (unchanged)")
+	}
+
+	// Verify E is present (new file)
+	if e, ok := resultMap["e-005"]; !ok {
+		t.Error("e-005 should be present (new)")
+	} else if e.Title != "New e-005" {
+		t.Errorf("e-005 should have correct title, got %s", e.Title)
+	}
+}
+
+func TestCacheColdWithLimitCachesAll(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Create 5 ticket files
+	for i, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		content := `---
+id: ` + id + `
+status: open
+blocked-by: []
+created: 2024-01-0` + string(rune('1'+i)) + `T00:00:00Z
+type: feature
+priority: 2
+---
+# Ticket ` + id + `
+`
+
+		err := os.WriteFile(filepath.Join(tmpDir, id+".md"), []byte(content), filePerms)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Ensure no cache exists
+	_ = DeleteCache(tmpDir)
+
+	// First call with limit=2 (cold cache)
+	results1, err := ListTickets(tmpDir, ListTicketsOptions{
+		NeedAll: false,
+		Limit:   2,
+		Offset:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results1) != 2 {
+		t.Fatalf("expected 2 results with limit=2, got %d", len(results1))
+	}
+
+	// Second call without limit - should return all 5 (proves all were cached)
+	results2, err := ListTickets(tmpDir, ListTicketsOptions{
+		NeedAll: false,
+		Limit:   0, // no limit
+		Offset:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results2) != 5 {
+		t.Fatalf("expected 5 results without limit, got %d (cache should have all tickets)", len(results2))
+	}
+
+	// Verify all ticket IDs are present
+	ids := make(map[string]bool)
+	for _, r := range results2 {
+		ids[r.Summary.ID] = true
+	}
+
+	for _, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		if !ids[id] {
+			t.Errorf("expected %s in results", id)
+		}
+	}
+}
