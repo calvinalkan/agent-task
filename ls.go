@@ -12,6 +12,13 @@ import (
 
 const defaultLimit = 100
 
+// lsOptions holds parsed ls command options.
+type lsOptions struct {
+	status string
+	limit  int
+	offset int
+}
+
 func cmdLs(out io.Writer, errOut io.Writer, cfg Config, workDir string, args []string) int {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
@@ -20,6 +27,42 @@ func cmdLs(out io.Writer, errOut io.Writer, cfg Config, workDir string, args []s
 		return 0
 	}
 
+	opts, parseCode := parseLsFlags(errOut, args)
+	if parseCode != 0 {
+		return parseCode
+	}
+
+	// Resolve ticket directory
+	ticketDir := cfg.TicketDir
+	if !filepath.IsAbs(ticketDir) {
+		ticketDir = filepath.Join(workDir, ticketDir)
+	}
+
+	// List tickets with options
+	listOpts := ListTicketsOptions{
+		NeedAll: opts.status != "", // need all if filtering by status
+		Limit:   opts.limit,
+		Offset:  opts.offset,
+	}
+
+	results, err := ListTickets(ticketDir, listOpts)
+	if err != nil {
+		fprintln(errOut, "error:", err)
+
+		return 1
+	}
+
+	// Output tickets and track errors
+	hasErrors := outputTickets(out, errOut, results, opts.status, opts.limit, opts.offset)
+
+	if hasErrors {
+		return 1
+	}
+
+	return 0
+}
+
+func parseLsFlags(errOut io.Writer, args []string) (lsOptions, int) {
 	flagSet := flag.NewFlagSet("ls", flag.ContinueOnError)
 	flagSet.SetOutput(io.Discard)
 
@@ -31,7 +74,7 @@ func cmdLs(out io.Writer, errOut io.Writer, cfg Config, workDir string, args []s
 	if parseErr != nil {
 		fprintln(errOut, "error:", parseErr)
 
-		return 1
+		return lsOptions{}, 1
 	}
 
 	// Validate status if provided
@@ -40,7 +83,7 @@ func cmdLs(out io.Writer, errOut io.Writer, cfg Config, workDir string, args []s
 		if validateErr != nil {
 			fprintln(errOut, "error:", validateErr)
 
-			return 1
+			return lsOptions{}, 1
 		}
 	}
 
@@ -48,38 +91,21 @@ func cmdLs(out io.Writer, errOut io.Writer, cfg Config, workDir string, args []s
 	if *limit < 0 {
 		fprintln(errOut, "error: --limit must be non-negative")
 
-		return 1
+		return lsOptions{}, 1
 	}
 
 	// Validate offset
 	if *offset < 0 {
 		fprintln(errOut, "error: --offset must be non-negative")
 
-		return 1
+		return lsOptions{}, 1
 	}
 
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
-	// List tickets
-	results, err := ListTickets(ticketDir)
-	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
-	}
-
-	// Output tickets and track errors
-	hasErrors := outputTickets(out, errOut, results, *status, *limit, *offset)
-
-	if hasErrors {
-		return 1
-	}
-
-	return 0
+	return lsOptions{
+		status: *status,
+		limit:  *limit,
+		offset: *offset,
+	}, 0
 }
 
 func printLsHelp(out io.Writer) {
@@ -116,7 +142,9 @@ func outputTickets(
 ) bool {
 	hasErrors := false
 
-	// First pass: filter by status and collect errors
+	// Filter by status and collect errors
+	// Note: offset/limit already applied by ListTickets when no status filter
+	// When status filter is used, we need to apply offset/limit here after filtering
 	filtered := make([]*TicketSummary, 0, len(results))
 
 	for _, result := range results {
@@ -136,34 +164,24 @@ func outputTickets(
 		filtered = append(filtered, result.Summary)
 	}
 
-	total := len(filtered)
+	// Apply offset/limit only when status filter was used
+	// (otherwise ListTickets already applied them)
+	if statusFilter != "" {
+		if offset >= len(filtered) {
+			filtered = nil
+		} else {
+			filtered = filtered[offset:]
+		}
 
-	// Apply offset
-	if offset >= total {
-		filtered = nil
-	} else {
-		filtered = filtered[offset:]
-	}
-
-	// Apply limit
-	truncated := false
-	remaining := 0
-
-	if limit < len(filtered) {
-		remaining = len(filtered) - limit
-		filtered = filtered[:limit]
-		truncated = true
+		if limit > 0 && limit < len(filtered) {
+			filtered = filtered[:limit]
+		}
 	}
 
 	// Output filtered tickets
 	for _, summary := range filtered {
 		line := formatTicketLine(summary)
 		fprintln(out, line)
-	}
-
-	// Print summary if truncated
-	if truncated {
-		_, _ = fmt.Fprintf(out, "... and %d more (%d total)\n", remaining, total)
 	}
 
 	return hasErrors

@@ -5,6 +5,9 @@
 # Lock files
 *.lock
 
+# Ticket cache
+.tickets/.cache
+
 # Test coverage
 coverage.out
 

@@ -685,7 +685,7 @@ func TestLsLimitOffset(t *testing.T) {
 			ticketIDs:  []string{"a-001", "b-002", "c-003"},
 			args:       []string{"tk", "ls", "--limit=2"},
 			wantExit:   0,
-			wantStdout: []string{"a-001", "b-002", "... and 1 more (3 total)"},
+			wantStdout: []string{"a-001", "b-002"},
 			notStdout:  []string{"c-003"},
 		},
 		{
@@ -701,24 +701,21 @@ func TestLsLimitOffset(t *testing.T) {
 			ticketIDs:  []string{"a-001", "b-002", "c-003"},
 			args:       []string{"tk", "ls", "--limit=1", "--offset=1"},
 			wantExit:   0,
-			wantStdout: []string{"b-002", "... and 1 more (3 total)"},
+			wantStdout: []string{"b-002"},
 			notStdout:  []string{"a-001", "c-003"},
 		},
 		{
-			name:       "limit 0 shows none with summary",
+			name:       "limit 0 shows all",
 			ticketIDs:  []string{"a-001", "b-002"},
 			args:       []string{"tk", "ls", "--limit=0"},
 			wantExit:   0,
-			wantStdout: []string{"... and 2 more (2 total)"},
-			notStdout:  []string{"a-001", "b-002 ["},
+			wantStdout: []string{"a-001", "b-002"},
 		},
 		{
-			name:       "limit 0 no tickets no summary",
-			ticketIDs:  nil,
-			args:       []string{"tk", "ls", "--limit=0"},
-			wantExit:   0,
-			wantStdout: nil,
-			notStdout:  []string{"... and"},
+			name:      "limit 0 no tickets",
+			ticketIDs: nil,
+			args:      []string{"tk", "ls", "--limit=0"},
+			wantExit:  0,
 		},
 		{
 			name:       "offset beyond total shows nothing",
@@ -840,7 +837,6 @@ func TestLsLimitWithStatusFilter(t *testing.T) {
 	out := stdout.String()
 	assertContains(t, out, "a-001")
 	assertContains(t, out, "c-003")
-	assertContains(t, out, "... and 1 more (3 total)")
 
 	// Should NOT show closed or third open
 	if strings.Contains(out, "b-002") {
@@ -867,4 +863,282 @@ func TestLsHelpShowsLimitOffset(t *testing.T) {
 	assertContains(t, out, "--limit")
 	assertContains(t, out, "--offset")
 	assertContains(t, out, "100")
+}
+
+// TestLsColdCacheBuildsFullCache verifies that on cold cache with --limit,
+// the full cache is still built (all files processed), then limit applied in memory.
+func TestLsColdCacheBuildsFullCache(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	ticketDir := filepath.Join(tmpDir, ".tickets")
+
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create 5 tickets
+	for _, ticketID := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		createTestTicket(t, ticketDir, ticketID, "open", "Ticket "+ticketID, nil)
+	}
+
+	// Ensure no cache exists
+	cachePath := filepath.Join(ticketDir, ".cache")
+	_ = os.Remove(cachePath)
+
+	// Run with limit=2 (cold cache)
+	var stdout, stderr bytes.Buffer
+
+	args := []string{"tk", "-C", tmpDir, "ls", "--limit=2"}
+	exitCode := Run(nil, &stdout, &stderr, args, nil)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", exitCode, stderr.String())
+	}
+
+	// Should only show 2 tickets
+	out := stdout.String()
+	assertContains(t, out, "a-001")
+	assertContains(t, out, "b-002")
+
+	if strings.Contains(out, "c-003") {
+		t.Error("stdout should NOT contain c-003 (beyond limit)")
+	}
+
+	// Cache should now exist and contain ALL 5 tickets
+	cache, loadErr := LoadCache(ticketDir)
+	if loadErr != nil {
+		t.Fatalf("cache should exist after first run: %v", loadErr)
+	}
+
+	if len(cache.Entries) != 5 {
+		t.Errorf("cache should have 5 entries, got %d", len(cache.Entries))
+	}
+
+	// Verify all ticket IDs are in cache
+	for _, ticketID := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		filename := ticketID + ".md"
+		if _, ok := cache.Entries[filename]; !ok {
+			t.Errorf("cache should contain %s", filename)
+		}
+	}
+}
+
+// TestLsWarmCacheWithLimit verifies that on warm cache with --limit,
+// subsequent runs still return correct results.
+func TestLsWarmCacheWithLimit(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	ticketDir := filepath.Join(tmpDir, ".tickets")
+
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create 5 tickets
+	for _, ticketID := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		createTestTicket(t, ticketDir, ticketID, "open", "Ticket "+ticketID, nil)
+	}
+
+	// First run - builds cache
+	var stdout1, stderr1 bytes.Buffer
+
+	args := []string{"tk", "-C", tmpDir, "ls", "--limit=2"}
+	exitCode := Run(nil, &stdout1, &stderr1, args, nil)
+
+	if exitCode != 0 {
+		t.Fatalf("first run: exit code = %d, want 0\nstderr: %s", exitCode, stderr1.String())
+	}
+
+	// Second run - uses warm cache
+	var stdout2, stderr2 bytes.Buffer
+
+	exitCode = Run(nil, &stdout2, &stderr2, args, nil)
+
+	if exitCode != 0 {
+		t.Fatalf("second run: exit code = %d, want 0\nstderr: %s", exitCode, stderr2.String())
+	}
+
+	// Both runs should produce same output
+	if stdout1.String() != stdout2.String() {
+		t.Errorf("warm cache should produce same output\nfirst:  %s\nsecond: %s",
+			stdout1.String(), stdout2.String())
+	}
+
+	// Output should have first 2 tickets
+	out := stdout2.String()
+	assertContains(t, out, "a-001")
+	assertContains(t, out, "b-002")
+
+	if strings.Contains(out, "c-003") {
+		t.Error("stdout should NOT contain c-003")
+	}
+}
+
+// TestLsWarmCacheWithOffset verifies offset works correctly with warm cache.
+func TestLsWarmCacheWithOffset(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	ticketDir := filepath.Join(tmpDir, ".tickets")
+
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create 5 tickets
+	for _, ticketID := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
+		createTestTicket(t, ticketDir, ticketID, "open", "Ticket "+ticketID, nil)
+	}
+
+	// First run - builds cache (no limit to ensure all cached)
+	var stdout1, stderr1 bytes.Buffer
+
+	args1 := []string{"tk", "-C", tmpDir, "ls", "--limit=0"}
+	exitCode := Run(nil, &stdout1, &stderr1, args1, nil)
+
+	if exitCode != 0 {
+		t.Fatalf("first run: exit code = %d\nstderr: %s", exitCode, stderr1.String())
+	}
+
+	// Second run - with offset, uses warm cache
+	var stdout2, stderr2 bytes.Buffer
+
+	args2 := []string{"tk", "-C", tmpDir, "ls", "--offset=2", "--limit=2"}
+	exitCode = Run(nil, &stdout2, &stderr2, args2, nil)
+
+	if exitCode != 0 {
+		t.Fatalf("second run: exit code = %d\nstderr: %s", exitCode, stderr2.String())
+	}
+
+	out := stdout2.String()
+
+	// Should skip a-001, b-002 and show c-003, d-004
+	if strings.Contains(out, "a-001") {
+		t.Error("stdout should NOT contain a-001 (before offset)")
+	}
+
+	if strings.Contains(out, "b-002") {
+		t.Error("stdout should NOT contain b-002 (before offset)")
+	}
+
+	assertContains(t, out, "c-003")
+	assertContains(t, out, "d-004")
+
+	if strings.Contains(out, "e-005") {
+		t.Error("stdout should NOT contain e-005 (beyond limit)")
+	}
+}
+
+// TestLsCacheInvalidatedOnFileChange verifies cache is invalidated when file changes.
+func TestLsCacheInvalidatedOnFileChange(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	ticketDir := filepath.Join(tmpDir, ".tickets")
+
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create ticket
+	createTestTicket(t, ticketDir, "test-001", "open", "Original Title", nil)
+
+	// First run - builds cache
+	var stdout1, stderr1 bytes.Buffer
+
+	args := []string{"tk", "-C", tmpDir, "ls"}
+	exitCode := Run(nil, &stdout1, &stderr1, args, nil)
+
+	if exitCode != 0 {
+		t.Fatalf("first run failed: %s", stderr1.String())
+	}
+
+	assertContains(t, stdout1.String(), "Original Title")
+
+	// Modify the ticket file directly
+	time.Sleep(10 * time.Millisecond) // ensure mtime changes
+
+	ticketPath := filepath.Join(ticketDir, "test-001.md")
+	content := `---
+id: test-001
+status: open
+blocked-by: []
+created: 2024-01-01T00:00:00Z
+type: feature
+priority: 2
+---
+# Modified Title
+`
+
+	writeErr := os.WriteFile(ticketPath, []byte(content), 0o600)
+	if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	// Second run - should detect mtime change and re-parse
+	var stdout2, stderr2 bytes.Buffer
+
+	exitCode = Run(nil, &stdout2, &stderr2, args, nil)
+
+	if exitCode != 0 {
+		t.Fatalf("second run failed: %s", stderr2.String())
+	}
+
+	assertContains(t, stdout2.String(), "Modified Title")
+
+	if strings.Contains(stdout2.String(), "Original Title") {
+		t.Error("should show modified title, not original")
+	}
+}
+
+// TestLsCacheWithStatusFilter verifies that --status filter processes all files.
+func TestLsCacheWithStatusFilter(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	ticketDir := filepath.Join(tmpDir, ".tickets")
+
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create mixed status tickets
+	createTestTicket(t, ticketDir, "a-001", "open", "Open 1", nil)
+	createTestTicket(t, ticketDir, "b-002", "closed", "Closed 1", nil)
+	createTestTicket(t, ticketDir, "c-003", "open", "Open 2", nil)
+
+	// Run with status filter
+	var stdout, stderr bytes.Buffer
+
+	args := []string{"tk", "-C", tmpDir, "ls", "--status=open"}
+	exitCode := Run(nil, &stdout, &stderr, args, nil)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d\nstderr: %s", exitCode, stderr.String())
+	}
+
+	out := stdout.String()
+	assertContains(t, out, "a-001")
+	assertContains(t, out, "c-003")
+
+	if strings.Contains(out, "b-002") {
+		t.Error("stdout should NOT contain b-002 (closed)")
+	}
+
+	// Cache should contain ALL tickets (not just filtered ones)
+	cache, loadErr := LoadCache(ticketDir)
+	if loadErr != nil {
+		t.Fatalf("cache should exist: %v", loadErr)
+	}
+
+	if len(cache.Entries) != 3 {
+		t.Errorf("cache should have 3 entries, got %d", len(cache.Entries))
+	}
 }

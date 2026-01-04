@@ -543,12 +543,12 @@ const MaxFrontmatterLines = 100
 
 // Validation errors for ticket parsing.
 var (
-	errMissingField          = errors.New("missing required field")
-	errInvalidFieldValue     = errors.New("invalid field value")
-	errNoFrontmatter         = errors.New("no frontmatter found")
-	errUnclosedFrontmatter   = errors.New("unclosed frontmatter")
-	errFrontmatterTooLong    = errors.New("frontmatter exceeds maximum line limit")
-	errNoTitle               = errors.New("no title found")
+	errMissingField        = errors.New("missing required field")
+	errInvalidFieldValue   = errors.New("invalid field value")
+	errNoFrontmatter       = errors.New("no frontmatter found")
+	errUnclosedFrontmatter = errors.New("unclosed frontmatter")
+	errFrontmatterTooLong  = errors.New("frontmatter exceeds maximum line limit")
+	errNoTitle             = errors.New("no title found")
 )
 
 // Valid ticket statuses.
@@ -564,11 +564,28 @@ func isValidTicketType(ticketType string) bool {
 	return slices.Contains(validTypes, ticketType)
 }
 
+// ListTicketsOptions configures ListTickets behavior.
+type ListTicketsOptions struct {
+	NeedAll bool // true if caller needs all tickets (e.g., has status filter)
+	Limit   int  // max tickets to return (0 = no limit)
+	Offset  int  // skip first N tickets
+}
+
+// listTicketsState holds state for parallel ticket listing.
+type listTicketsState struct {
+	cache        *TicketCache
+	cacheMu      sync.RWMutex
+	cacheChanged bool
+	results      []TicketResult
+}
+
 // ListTickets reads all ticket files from a directory and returns parsed summaries.
-// Uses parallel file reading for performance.
+// Uses parallel file reading for performance with mtime-based caching.
 // Returns (nil, err) if directory cannot be read.
 // Returns (results, nil) if directory was read - individual results may have errors.
-func ListTickets(ticketDir string) ([]TicketResult, error) {
+//
+//nolint:cyclop,funlen // iteration logic requires multiple conditions
+func ListTickets(ticketDir string, opts ListTicketsOptions) ([]TicketResult, error) {
 	entries, err := os.ReadDir(ticketDir)
 	if os.IsNotExist(err) {
 		// Directory doesn't exist = no tickets
@@ -579,49 +596,167 @@ func ListTickets(ticketDir string) ([]TicketResult, error) {
 		return nil, fmt.Errorf("reading ticket directory: %w", err)
 	}
 
-	// Filter to .md files only
-	var mdFiles []string
+	// Load cache
+	cache, cacheErr := LoadCache(ticketDir)
+	cacheWasCold := cacheErr != nil
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
+	if cacheWasCold {
+		// Cache missing or corrupt - start fresh
+		cache = &TicketCache{Entries: make(map[string]CacheEntry)}
 
-		if strings.HasSuffix(entry.Name(), ".md") {
-			mdFiles = append(mdFiles, filepath.Join(ticketDir, entry.Name()))
+		// If corrupt, delete in background
+		if errors.Is(cacheErr, errCacheCorrupt) {
+			go func() {
+				_ = DeleteCache(ticketDir)
+			}()
 		}
 	}
 
-	if len(mdFiles) == 0 {
-		return []TicketResult{}, nil
-	}
+	// If cache was cold, we must process ALL files to build cache
+	// Then apply offset/limit in memory at the end
+	// If cache is warm and NeedAll=false, we can skip files
+	canSkipFiles := !cacheWasCold && !opts.NeedAll
 
-	// Parse files in parallel
-	results := make([]TicketResult, len(mdFiles))
+	state := &listTicketsState{
+		cache:   cache,
+		results: make([]TicketResult, len(entries)),
+	}
 
 	var waitGroup sync.WaitGroup
 
-	for fileIdx, filePath := range mdFiles {
+	mdCount := 0
+	resultIdx := 0
+
+	for _, entry := range entries {
+		// Skip directories and non-.md files (.cache, .lock files, etc)
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+
+		// Only skip files if cache is warm and NeedAll=false
+		if canSkipFiles {
+			// Skip for offset
+			if mdCount < opts.Offset {
+				mdCount++
+
+				continue
+			}
+
+			// Stop at limit (limit=0 means no limit)
+			if opts.Limit > 0 && mdCount >= opts.Offset+opts.Limit {
+				break
+			}
+		}
+
+		mdCount++
+
+		idx := resultIdx // capture index for goroutine
+		resultIdx++
+
+		path := filepath.Join(ticketDir, entry.Name())
+		filename := entry.Name()
+
 		waitGroup.Add(1)
 
-		go func(idx int, path string) {
-			defer waitGroup.Done()
-
-			summary, parseErr := ParseTicketFrontmatter(path)
-
-			results[idx] = TicketResult{
-				Path: path,
-				Err:  parseErr,
-			}
-			if parseErr == nil {
-				results[idx].Summary = &summary
-			}
-		}(fileIdx, filePath)
+		go processTicketEntry(state, &waitGroup, idx, path, filename, entry)
 	}
 
 	waitGroup.Wait()
 
+	// Save cache if changed
+	if state.cacheChanged {
+		cleanCache(state.cache, ticketDir)
+		_ = SaveCache(ticketDir, state.cache)
+	}
+
+	results := state.results[:resultIdx]
+
+	// If cache was cold and we processed all files, apply offset/limit now
+	if cacheWasCold && !opts.NeedAll {
+		results = applyOffsetLimit(results, opts.Offset, opts.Limit)
+	}
+
 	return results, nil
+}
+
+// applyOffsetLimit applies offset and limit to results slice.
+// limit=0 means no limit (show all).
+func applyOffsetLimit(results []TicketResult, offset, limit int) []TicketResult {
+	if offset >= len(results) {
+		return []TicketResult{}
+	}
+
+	results = results[offset:]
+
+	if limit > 0 && limit < len(results) {
+		results = results[:limit]
+	}
+
+	return results
+}
+
+// processTicketEntry processes a single ticket file entry.
+func processTicketEntry(
+	state *listTicketsState,
+	waitGroup *sync.WaitGroup,
+	idx int,
+	path, filename string,
+	entry os.DirEntry,
+) {
+	defer waitGroup.Done()
+
+	// Get file info for mtime
+	info, infoErr := entry.Info()
+	if infoErr != nil {
+		state.results[idx] = TicketResult{Path: path, Err: infoErr}
+
+		return
+	}
+
+	mtime := info.ModTime()
+
+	// Check cache first (read lock - multiple readers OK)
+	state.cacheMu.RLock()
+	cached, cacheHit := state.cache.Entries[filename]
+	state.cacheMu.RUnlock()
+
+	if cacheHit && cached.Mtime.Equal(mtime) {
+		// Cache hit - no file open needed
+		summary := cached.Summary
+		summary.Path = path // ensure path is set
+		state.results[idx] = TicketResult{Path: path, Summary: &summary}
+
+		return
+	}
+
+	// Cache miss - parse file
+	summary, parseErr := ParseTicketFrontmatter(path)
+
+	state.results[idx] = TicketResult{Path: path, Err: parseErr}
+	if parseErr == nil {
+		state.results[idx].Summary = &summary
+		updateCache(state, filename, mtime, summary)
+	}
+}
+
+// updateCache updates the cache with a parsed ticket summary.
+func updateCache(state *listTicketsState, filename string, mtime time.Time, summary TicketSummary) {
+	state.cacheMu.Lock()
+	state.cache.Entries[filename] = CacheEntry{Mtime: mtime, Summary: summary}
+	state.cacheChanged = true
+	state.cacheMu.Unlock()
+}
+
+// cleanCache removes entries for files that no longer exist.
+func cleanCache(cache *TicketCache, ticketDir string) {
+	for filename := range cache.Entries {
+		path := filepath.Join(ticketDir, filename)
+
+		_, statErr := os.Stat(path)
+		if os.IsNotExist(statErr) {
+			delete(cache.Entries, filename)
+		}
+	}
 }
 
 // ParseTicketFrontmatter parses a ticket file and extracts the summary.

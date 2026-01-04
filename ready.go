@@ -26,8 +26,8 @@ func cmdReady(out io.Writer, errOut io.Writer, cfg Config, workDir string, args 
 		ticketDir = filepath.Join(workDir, ticketDir)
 	}
 
-	// List all tickets
-	results, err := ListTickets(ticketDir)
+	// List all tickets (need all for blocker resolution)
+	results, err := ListTickets(ticketDir, ListTicketsOptions{NeedAll: true})
 	if err != nil {
 		fprintln(errOut, "error:", err)
 

@@ -111,7 +111,7 @@ func repairSingleTicket(out io.Writer, errOut io.Writer, ticketDir, ticketID str
 }
 
 func repairAllTickets(out io.Writer, errOut io.Writer, ticketDir string, dryRun bool) int {
-	results, err := ListTickets(ticketDir)
+	results, err := ListTickets(ticketDir, ListTicketsOptions{NeedAll: true})
 	if err != nil {
 		fprintln(errOut, "error:", err)
 
