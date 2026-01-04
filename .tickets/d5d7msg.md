@@ -1,6 +1,7 @@
 ---
 id: d5d7msg
-status: open
+status: closed
+closed: 2026-01-04T14:51:24Z
 blocked-by: []
 created: 2026-01-04T14:34:14Z
 type: task

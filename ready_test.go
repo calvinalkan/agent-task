@@ -213,8 +213,8 @@ func TestReadyBlockedByClosed(t *testing.T) {
 		t.Errorf("stdout = %q, want to contain unblocked ticket %q", stdout.String(), blockedID)
 	}
 
-	// Closed blocker should not appear
-	if strings.Contains(stdout.String(), blockerID) {
+	// Closed blocker should not appear (check for ID followed by space to avoid prefix match)
+	if strings.Contains(stdout.String(), blockerID+" ") {
 		t.Errorf("stdout = %q, should not contain closed blocker %q", stdout.String(), blockerID)
 	}
 }

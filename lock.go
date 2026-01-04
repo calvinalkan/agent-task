@@ -74,6 +74,19 @@ func (l *fileLock) release() {
 	}
 }
 
+// WithLock executes a function while holding an exclusive lock on the given path.
+// The lock is released when the function returns.
+func WithLock(path string, handler func() error) error {
+	lock, lockErr := acquireLock(path)
+	if lockErr != nil {
+		return fmt.Errorf("acquiring lock: %w", lockErr)
+	}
+
+	defer lock.release()
+
+	return handler()
+}
+
 // WithTicketLock provides atomic access to a ticket file with file locking.
 // The function handler receives the current file content and returns the new content.
 // If handler returns nil content, no write is performed (read-only operation).

@@ -156,17 +156,8 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg Config, workDir string, args
 		actualAssignee = getGitUserName()
 	}
 
-	// Generate unique ID
-	ticketID, err := GenerateUniqueID(ticketDir)
-	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
-	}
-
-	// Create ticket
+	// Create ticket (ID will be generated atomically)
 	ticket := Ticket{
-		ID:          ticketID,
 		Status:      "open",
 		BlockedBy:   *blockedBy,
 		Created:     time.Now(),
@@ -179,7 +170,7 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg Config, workDir string, args
 		Acceptance:  *acceptance,
 	}
 
-	_, writeErr := WriteTicket(ticketDir, ticket)
+	ticketID, _, writeErr := WriteTicketAtomic(ticketDir, ticket)
 	if writeErr != nil {
 		fprintln(errOut, "error:", writeErr)
 

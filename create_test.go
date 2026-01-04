@@ -207,19 +207,7 @@ func TestCreateCommand(t *testing.T) {
 					t.Fatal("expected ID in stdout")
 				}
 
-				// Verify file was created
-				files, err := os.ReadDir(ticketDir)
-				if err != nil {
-					t.Fatalf("failed to read ticket dir: %v", err)
-				}
-
-				if len(files) != 1 {
-					t.Fatalf("expected 1 file, got %d", len(files))
-				}
-
-				if testCase.checkFile != nil {
-					testCase.checkFile(t, ticketDir, ticketID)
-				}
+				verifyTicketCreated(t, ticketDir, ticketID, testCase.checkFile)
 			}
 		})
 	}
@@ -512,6 +500,32 @@ func assertNotContains(t *testing.T, content, substr string) {
 
 	if strings.Contains(content, substr) {
 		t.Errorf("content should NOT contain %q\ncontent:\n%s", substr, content)
+	}
+}
+
+func verifyTicketCreated(t *testing.T, ticketDir, ticketID string, checkFile func(*testing.T, string, string)) {
+	t.Helper()
+
+	// Count only .md files, ignore .lock files
+	files, err := os.ReadDir(ticketDir)
+	if err != nil {
+		t.Fatalf("failed to read ticket dir: %v", err)
+	}
+
+	mdFiles := 0
+
+	for _, f := range files {
+		if strings.HasSuffix(f.Name(), ".md") {
+			mdFiles++
+		}
+	}
+
+	if mdFiles != 1 {
+		t.Fatalf("expected 1 .md file, got %d", mdFiles)
+	}
+
+	if checkFile != nil {
+		checkFile(t, ticketDir, ticketID)
 	}
 }
 

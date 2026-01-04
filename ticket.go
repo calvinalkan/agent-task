@@ -75,31 +75,59 @@ func generateTimestampComponent() string {
 	return crockfordEncoding.EncodeToString(buf)
 }
 
-const maxIDRetries = 1000
+const maxSuffixLength = 4
 
 // GenerateUniqueID generates an ID that doesn't exist in the ticket directory.
-// Retries if collision occurs (waits for next second).
+// On collision, appends letter suffixes (a, b, ..., z, za, zb, ...).
 func GenerateUniqueID(ticketDir string) (string, error) {
-	var lastID string
+	base := GenerateID()
 
-	for range maxIDRetries {
-		ticketID := GenerateID()
-		path := filepath.Join(ticketDir, ticketID+".md")
-
-		_, statErr := os.Stat(path)
-		if os.IsNotExist(statErr) {
-			return ticketID, nil
-		}
-
-		// Same ID means same second - wait a tiny bit for clock to advance
-		if ticketID == lastID {
-			time.Sleep(time.Millisecond)
-		}
-
-		lastID = ticketID
+	// Try base ID first
+	if !TicketExists(ticketDir, base) {
+		return base, nil
 	}
 
-	return "", errIDGenerationFailed
+	// Append letter suffixes: a, b, ..., z, za, zb, ..., zz, zza, ...
+	suffix := ""
+
+	for {
+		suffix = nextSuffix(suffix)
+		candidate := base + suffix
+
+		if !TicketExists(ticketDir, candidate) {
+			return candidate, nil
+		}
+
+		// Safety limit to prevent infinite loop
+		if len(suffix) > maxSuffixLength {
+			return "", errIDGenerationFailed
+		}
+	}
+}
+
+// nextSuffix increments a suffix like base-26: "" -> "a", "a" -> "b", ..., "z" -> "za".
+func nextSuffix(suffix string) string {
+	if suffix == "" {
+		return "a"
+	}
+
+	// Convert to rune slice for easier manipulation
+	runes := []rune(suffix)
+
+	// Increment from the rightmost character
+	for idx := len(runes) - 1; idx >= 0; idx-- {
+		if runes[idx] < 'z' {
+			runes[idx]++
+
+			return string(runes)
+		}
+
+		// Current char is 'z', reset to 'a' and continue carry
+		runes[idx] = 'a'
+	}
+
+	// All chars were 'z', append 'a' (e.g., "z" -> "za", "zz" -> "zza")
+	return suffix + "a"
 }
 
 // IsValidType checks if the type is valid.
@@ -196,6 +224,46 @@ func WriteTicket(ticketDir string, ticket Ticket) (string, error) {
 	}
 
 	return path, nil
+}
+
+// WriteTicketAtomic generates a unique ID and writes the ticket atomically.
+// Uses file locking to prevent race conditions when multiple tickets are created
+// in the same second. Returns the generated ID and file path.
+func WriteTicketAtomic(ticketDir string, ticket Ticket) (string, string, error) {
+	// Ensure directory exists first (before locking)
+	mkdirErr := os.MkdirAll(ticketDir, dirPerms)
+	if mkdirErr != nil {
+		return "", "", fmt.Errorf("failed to create ticket directory: %w", mkdirErr)
+	}
+
+	// Generate base ID and lock on it to serialize concurrent creates
+	baseID := GenerateID()
+	lockPath := filepath.Join(ticketDir, baseID+".md")
+
+	var ticketID, ticketPath string
+
+	lockErr := WithLock(lockPath, func() error {
+		// Inside lock: find unique ID (base or with suffix)
+		var genErr error
+
+		ticketID, genErr = GenerateUniqueID(ticketDir)
+		if genErr != nil {
+			return genErr
+		}
+
+		ticket.ID = ticketID
+
+		var writeErr error
+
+		ticketPath, writeErr = WriteTicket(ticketDir, ticket)
+
+		return writeErr
+	})
+	if lockErr != nil {
+		return "", "", lockErr
+	}
+
+	return ticketID, ticketPath, nil
 }
 
 // TicketExists checks if a ticket ID exists in the ticket directory.
