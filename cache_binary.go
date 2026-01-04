@@ -16,7 +16,7 @@ import (
 // Binary cache format constants.
 const (
 	cacheMagic       = "TKC1"
-	cacheVersionNum  = 2
+	cacheVersionNum  = 3
 	cacheHeaderSize  = 32
 	indexEntrySize   = 48
 	maxFilenameLen   = 32
@@ -285,6 +285,10 @@ func (bc *BinaryCache) readDataEntry(entry indexEntryData) TicketSummary {
 	}
 
 	// Read fields in order
+	// SchemaVersion (1 byte)
+	schemaVersion := int(data[pos])
+	pos++
+
 	id := readString1()
 	title := readString2()
 	ticketType := readString1()
@@ -310,16 +314,17 @@ func (bc *BinaryCache) readDataEntry(entry indexEntryData) TicketSummary {
 	status := statusByteToString(entry.status)
 
 	return TicketSummary{
-		ID:        id,
-		Status:    status,
-		Title:     title,
-		Type:      ticketType,
-		Priority:  priority,
-		Created:   created,
-		Closed:    closed,
-		Assignee:  assignee,
-		BlockedBy: blockedBy,
-		Path:      path,
+		SchemaVersion: schemaVersion,
+		ID:            id,
+		Status:        status,
+		Title:         title,
+		Type:          ticketType,
+		Priority:      priority,
+		Created:       created,
+		Closed:        closed,
+		Assignee:      assignee,
+		BlockedBy:     blockedBy,
+		Path:          path,
 	}
 }
 
@@ -423,6 +428,9 @@ func writeBinaryCache(path string, entries map[string]CacheEntry) error {
 		s := entry.Summary
 
 		// Write fields in order (must match read order)
+		// SchemaVersion (1 byte)
+		dataBuf.WriteByte(byte(s.SchemaVersion))
+
 		writeString1(s.ID)
 		writeString2(s.Title)
 		writeString1(s.Type)

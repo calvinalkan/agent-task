@@ -17,18 +17,19 @@ import (
 
 // Ticket represents a ticket with all its fields.
 type Ticket struct {
-	ID          string
-	Status      string
-	BlockedBy   []string
-	Created     time.Time
-	Type        string
-	Priority    int
-	Assignee    string
-	ExternalRef string
-	Title       string
-	Description string
-	Design      string
-	Acceptance  string
+	SchemaVersion int
+	ID            string
+	Status        string
+	BlockedBy     []string
+	Created       time.Time
+	Type          string
+	Priority      int
+	Assignee      string
+	ExternalRef   string
+	Title         string
+	Description   string
+	Design        string
+	Acceptance    string
 }
 
 // validTypes are the allowed ticket types.
@@ -146,6 +147,7 @@ func FormatTicket(ticket Ticket) string {
 
 	// YAML frontmatter
 	builder.WriteString("---\n")
+	builder.WriteString(fmt.Sprintf("schema_version: %d\n", ticket.SchemaVersion))
 	builder.WriteString("id: " + ticket.ID + "\n")
 	builder.WriteString("status: " + ticket.Status + "\n")
 	builder.WriteString("blocked-by: " + formatBlockedBy(ticket.BlockedBy) + "\n")
@@ -518,16 +520,17 @@ func RemoveTicketFieldLocked(path, field string) error {
 
 // TicketSummary contains the essential fields from a ticket's frontmatter.
 type TicketSummary struct {
-	ID        string
-	Status    string
-	BlockedBy []string
-	Created   string // Keep as string for simplicity
-	Type      string
-	Priority  int
-	Assignee  string
-	Closed    string // Optional, only if status=closed
-	Title     string
-	Path      string
+	SchemaVersion int
+	ID            string
+	Status        string
+	BlockedBy     []string
+	Created       string // Keep as string for simplicity
+	Type          string
+	Priority      int
+	Assignee      string
+	Closed        string // Optional, only if status=closed
+	Title         string
+	Path          string
 }
 
 // TicketResult holds the result of parsing a single ticket file.
@@ -797,6 +800,7 @@ func ParseTicketFrontmatter(path string) (TicketSummary, error) {
 	summary.Path = path
 
 	// Track which required fields we've seen
+	hasSchemaVersion := false
 	hasID := false
 	hasStatus := false
 	hasType := false
@@ -835,6 +839,27 @@ func ParseTicketFrontmatter(path string) (TicketSummary, error) {
 				value := line[idx+2:]
 
 				switch key {
+				case "schema_version":
+					if value == "" {
+						return TicketSummary{}, fmt.Errorf("%w: schema_version (empty)", errInvalidFieldValue)
+					}
+
+					schemaVersion, parseErr := parseInt(value)
+					if parseErr != nil {
+						return TicketSummary{}, fmt.Errorf("%w: schema_version %q", errInvalidFieldValue, value)
+					}
+
+					if schemaVersion < 1 {
+						return TicketSummary{}, fmt.Errorf("%w: schema_version must be positive", errInvalidFieldValue)
+					}
+
+					if schemaVersion != 1 {
+						return TicketSummary{}, fmt.Errorf("%w: %d (only version 1 supported)", errUnsupportedSchemaVersion, schemaVersion)
+					}
+
+					summary.SchemaVersion = schemaVersion
+					hasSchemaVersion = true
+
 				case "id":
 					if value == "" {
 						return TicketSummary{}, fmt.Errorf("%w: id (empty)", errInvalidFieldValue)
@@ -953,6 +978,10 @@ func ParseTicketFrontmatter(path string) (TicketSummary, error) {
 	}
 
 	// Validate required fields
+	if !hasSchemaVersion {
+		return TicketSummary{}, errMissingSchemaVersion
+	}
+
 	if !hasID {
 		return TicketSummary{}, fmt.Errorf("%w: id", errMissingField)
 	}

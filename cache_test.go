@@ -114,6 +114,7 @@ func TestCacheHitOnUnchangedFile(t *testing.T) {
 
 	// Create a ticket file
 	ticketContent := `---
+schema_version: 1
 id: cache001
 status: open
 blocked-by: []
@@ -175,6 +176,7 @@ func TestCacheMissOnModifiedFile(t *testing.T) {
 
 	// Create a ticket file
 	ticketContent := `---
+schema_version: 1
 id: modify001
 status: open
 blocked-by: []
@@ -207,6 +209,7 @@ priority: 2
 
 	// Modify the file
 	modifiedContent := `---
+schema_version: 1
 id: modify001
 status: open
 blocked-by: []
@@ -241,6 +244,7 @@ func TestCacheCleanupDeletedFiles(t *testing.T) {
 	// Create two ticket files
 	for _, ticketID := range []string{"del001", "del002"} {
 		content := `---
+schema_version: 1
 id: ` + ticketID + `
 status: open
 blocked-by: []
@@ -335,6 +339,7 @@ func TestCacheNewFileAdded(t *testing.T) {
 
 	// Create initial ticket file
 	ticket1Content := `---
+schema_version: 1
 id: existing001
 status: open
 blocked-by: []
@@ -362,6 +367,7 @@ priority: 2
 
 	// Add a new ticket file
 	ticket2Content := `---
+schema_version: 1
 id: new002
 status: open
 blocked-by: []
@@ -410,6 +416,7 @@ func TestCacheCorruptedRecovery(t *testing.T) {
 	// Create ticket files
 	for _, id := range []string{"ticket001", "ticket002"} {
 		content := `---
+schema_version: 1
 id: ` + id + `
 status: open
 blocked-by: []
@@ -487,6 +494,7 @@ func TestCacheColdWithOffsetCachesAll(t *testing.T) {
 	// Create 5 ticket files
 	for i, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
 		content := `---
+schema_version: 1
 id: ` + id + `
 status: open
 blocked-by: []
@@ -553,6 +561,7 @@ func TestCacheMixedChanges(t *testing.T) {
 	// Create initial tickets A, B, C, D
 	for _, id := range []string{"a-001", "b-002", "c-003", "d-004"} {
 		content := `---
+schema_version: 1
 id: ` + id + `
 status: open
 blocked-by: []
@@ -589,6 +598,7 @@ priority: 2
 	time.Sleep(10 * time.Millisecond) // ensure mtime changes
 
 	modifiedB := `---
+schema_version: 1
 id: b-002
 status: closed
 blocked-by: []
@@ -613,6 +623,7 @@ priority: 2
 
 	// Add E
 	newE := `---
+schema_version: 1
 id: e-005
 status: open
 blocked-by: []
@@ -689,6 +700,7 @@ func TestCacheColdWithLimitCachesAll(t *testing.T) {
 	// Create 5 ticket files
 	for i, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
 		content := `---
+schema_version: 1
 id: ` + id + `
 status: open
 blocked-by: []
@@ -757,6 +769,7 @@ func TestCachePartialReadWithUpdatePreservesAllEntries(t *testing.T) {
 	// Create 5 ticket files
 	for i, id := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
 		content := `---
+schema_version: 1
 id: ` + id + `
 status: open
 blocked-by: []
@@ -800,6 +813,7 @@ priority: 2
 	time.Sleep(10 * time.Millisecond) // ensure mtime changes
 
 	modifiedContent := `---
+schema_version: 1
 id: a-001
 status: closed
 blocked-by: []

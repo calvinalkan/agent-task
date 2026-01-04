@@ -239,79 +239,115 @@ func TestLsInvalidTicketFile(t *testing.T) {
 		wantStderr string
 	}{
 		{
+			name: "missing schema_version",
+			content: "---\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
+			wantStderr: "missing required field: schema_version",
+		},
+		{
+			name: "empty schema_version",
+			content: "---\nschema_version: \nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
+			wantStderr: "invalid field value: schema_version (empty)",
+		},
+		{
+			name: "invalid schema_version non-integer",
+			content: "---\nschema_version: abc\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
+			wantStderr: "invalid field value: schema_version",
+		},
+		{
+			name: "schema_version zero",
+			content: "---\nschema_version: 0\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
+			wantStderr: "invalid field value: schema_version must be positive",
+		},
+		{
+			name: "schema_version negative",
+			content: "---\nschema_version: -1\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
+			wantStderr: "invalid field value: schema_version",
+		},
+		{
+			name: "unsupported schema_version",
+			content: "---\nschema_version: 2\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
+			wantStderr: "unsupported schema_version: 2",
+		},
+		{
 			name: "missing id",
-			content: "---\nstatus: open\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nstatus: open\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "missing required field: id",
 		},
 		{
 			name: "missing status",
-			content: "---\nid: test-001\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "missing required field: status",
 		},
 		{
 			name: "missing type",
-			content: "---\nid: test-001\nstatus: open\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "missing required field: type",
 		},
 		{
 			name: "missing priority",
-			content: "---\nid: test-001\nstatus: open\ntype: task\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "missing required field: priority",
 		},
 		{
 			name:       "missing created",
-			content:    "---\nid: test-001\nstatus: open\ntype: task\npriority: 2\n---\n# Title\n",
+			content:    "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 2\n---\n# Title\n",
 			wantStderr: "missing required field: created",
 		},
 		{
 			name: "missing title",
-			content: "---\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n",
 			wantStderr: "no title found",
 		},
 		{
 			name: "invalid status",
-			content: "---\nid: test-001\nstatus: pending\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: pending\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "invalid field value: status",
 		},
 		{
 			name: "invalid type",
-			content: "---\nid: test-001\nstatus: open\ntype: story\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: story\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "invalid field value: type",
 		},
 		{
 			name: "priority out of range high",
-			content: "---\nid: test-001\nstatus: open\ntype: task\npriority: 5\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 5\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "invalid field value: priority",
 		},
 		{
 			name: "priority out of range low",
-			content: "---\nid: test-001\nstatus: open\ntype: task\npriority: 0\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 0\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "invalid field value: priority",
 		},
 		{
 			name: "invalid created timestamp",
-			content: "---\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04\n---\n# Title\n",
 			wantStderr: "invalid field value: created",
 		},
 		{
 			name: "closed without timestamp",
-			content: "---\nid: test-001\nstatus: closed\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: closed\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "closed ticket missing closed timestamp",
 		},
 		{
 			name: "closed timestamp on open ticket",
-			content: "---\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\nclosed: 2026-01-04T01:00:00Z\n---\n# Title\n",
 			wantStderr: "closed timestamp on non-closed ticket",
 		},
@@ -322,30 +358,30 @@ func TestLsInvalidTicketFile(t *testing.T) {
 		},
 		{
 			name:       "unclosed frontmatter",
-			content:    "---\nid: test-001\nstatus: open\n# Title\n",
+			content:    "---\nschema_version: 1\nid: test-001\nstatus: open\n# Title\n",
 			wantStderr: "unclosed frontmatter",
 		},
 		{
 			name: "empty id",
-			content: "---\nid: \nstatus: open\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: \nstatus: open\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "invalid field value: id (empty)",
 		},
 		{
 			name: "empty status",
-			content: "---\nid: test-001\nstatus: \ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: \ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\n---\n# Title\n",
 			wantStderr: "invalid field value: status (empty)",
 		},
 		{
 			name: "empty assignee if present",
-			content: "---\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\nassignee: \n---\n# Title\n",
 			wantStderr: "invalid field value: assignee (empty)",
 		},
 		{
 			name: "blocked-by missing brackets",
-			content: "---\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+			content: "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\nblocked-by: abc-123\n---\n# Title\n",
 			wantStderr: "invalid field value: blocked-by (missing brackets)",
 		},
@@ -407,7 +443,7 @@ func TestLsMixedValidInvalid(t *testing.T) {
 	createTestTicket(t, ticketDir, "valid-001", "open", "Valid ticket", nil)
 
 	// Create one invalid ticket (missing type)
-	invalidContent := "---\nid: invalid-002\nstatus: open\npriority: 2\ncreated: 2026-01-04T00:00:00Z\n---\n# Invalid\n"
+	invalidContent := "---\nschema_version: 1\nid: invalid-002\nstatus: open\npriority: 2\ncreated: 2026-01-04T00:00:00Z\n---\n# Invalid\n"
 
 	err = os.WriteFile(filepath.Join(ticketDir, "invalid-002.md"), []byte(invalidContent), 0o600)
 	if err != nil {
@@ -598,7 +634,7 @@ func TestLsValidBlockedByFormat(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			content := "---\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
+			content := "---\nschema_version: 1\nid: test-001\nstatus: open\ntype: task\npriority: 2\n" +
 				"created: 2026-01-04T00:00:00Z\nblocked-by: " + testCase.blockedBy + "\n---\n# Title\n"
 
 			err = os.WriteFile(filepath.Join(ticketDir, "test-001.md"), []byte(content), 0o600)
@@ -641,6 +677,7 @@ func createTestTicket(t *testing.T, ticketDir, ticketID, status, title string, b
 	}
 
 	content := "---\n" +
+		"schema_version: 1\n" +
 		"id: " + ticketID + "\n" +
 		"status: " + status + "\n" +
 		"blocked-by: " + blockedByStr + "\n" +
@@ -1103,6 +1140,7 @@ func TestLsCacheInvalidatedOnFileChange(t *testing.T) {
 
 	ticketPath := filepath.Join(ticketDir, "test-001.md")
 	content := `---
+schema_version: 1
 id: test-001
 status: open
 blocked-by: []

@@ -158,16 +158,17 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg Config, workDir string, args
 
 	// Create ticket (ID will be generated atomically)
 	ticket := Ticket{
-		Status:      "open",
-		BlockedBy:   *blockedBy,
-		Created:     time.Now(),
-		Type:        *ticketType,
-		Priority:    *priority,
-		Assignee:    actualAssignee,
-		Title:       title,
-		Description: *description,
-		Design:      *design,
-		Acceptance:  *acceptance,
+		SchemaVersion: 1,
+		Status:        "open",
+		BlockedBy:     *blockedBy,
+		Created:       time.Now(),
+		Type:          *ticketType,
+		Priority:      *priority,
+		Assignee:      actualAssignee,
+		Title:         title,
+		Description:   *description,
+		Design:        *design,
+		Acceptance:    *acceptance,
 	}
 
 	ticketID, _, writeErr := WriteTicketAtomic(ticketDir, ticket)

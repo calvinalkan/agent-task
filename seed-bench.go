@@ -78,19 +78,24 @@ func writeTicket(dir string, i int) {
 	// Vary priority
 	priority := (i % 4) + 1
 
+	// Vary type for realistic distribution
+	types := []string{"bug", "feature", "task", "epic", "chore"}
+	ticketType := types[i%len(types)]
+
 	content := fmt.Sprintf(`---
+schema_version: 1
 id: %s
 status: %s
 %sblocked-by: []
 created: 2026-01-04T12:00:00Z
-type: task
+type: %s
 priority: %d
 assignee: Test User
 ---
 # Test ticket %d
 
 Description for ticket %d.
-`, id, status, closedLine, priority, i, i)
+`, id, status, closedLine, ticketType, priority, i, i)
 
 	os.WriteFile(path, []byte(content), 0644)
 }
