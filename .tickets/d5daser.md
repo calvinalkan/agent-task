@@ -1,4 +1,5 @@
 ---
+schema_version: 1
 id: d5daser
 status: closed
 closed: 2026-01-04T18:22:25Z

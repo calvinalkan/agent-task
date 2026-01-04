@@ -1,4 +1,5 @@
 ---
+schema_version: 1
 id: d5d7msg
 status: closed
 closed: 2026-01-04T14:51:24Z

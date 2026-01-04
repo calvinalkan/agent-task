@@ -1,4 +1,5 @@
 ---
+schema_version: 1
 id: d5damfg
 status: open
 blocked-by: [d5dae6r]
