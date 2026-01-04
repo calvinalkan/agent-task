@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tailscale/hujson"
 )
@@ -25,50 +26,56 @@ func DefaultConfig() Config {
 // ConfigFileName is the default config file name.
 const ConfigFileName = ".tk.json"
 
+// getGlobalConfigPath returns the path to the global config file.
+// Uses $XDG_CONFIG_HOME/tk/config.json if set, otherwise ~/.config/tk/config.json.
+// Returns empty string if home directory cannot be determined.
+func getGlobalConfigPath(env []string) string {
+	// Check for XDG_CONFIG_HOME in the provided env slice first
+	for _, e := range env {
+		if after, ok := strings.CutPrefix(e, "XDG_CONFIG_HOME="); ok {
+			return filepath.Join(after, "tk", "config.json")
+		}
+	}
+
+	// Fall back to os.Getenv
+	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
+		return filepath.Join(xdgConfig, "tk", "config.json")
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		return filepath.Join(home, ".config", "tk", "config.json")
+	}
+
+	return ""
+}
+
 // LoadConfig loads configuration with the following precedence (highest wins):
 // 1. Defaults
-// 2. Config file at default location (if exists)
-// 3. Explicit config file via configPath (if non-empty)
-// 4. CLI overrides.
-func LoadConfig(workDir, configPath string, cliOverrides Config, hasTicketDirOverride bool) (Config, error) {
+// 2. Global user config (~/.config/tk/config.json or $XDG_CONFIG_HOME/tk/config.json)
+// 3. Project config file at default location (.tk.json, if exists)
+// 4. Explicit config file via configPath (if non-empty)
+// 5. CLI overrides.
+func LoadConfig(
+	workDir, configPath string, cliOverrides Config, hasTicketDirOverride bool, env []string,
+) (Config, error) {
 	cfg := DefaultConfig()
 
-	// Determine which config file to load
-	var cfgFile string
-	if configPath != "" {
-		// Explicit config file - must exist
-		cfgFile = configPath
-		if !filepath.IsAbs(cfgFile) {
-			cfgFile = filepath.Join(workDir, cfgFile)
-		}
-
-		_, statErr := os.Stat(cfgFile)
-		if statErr != nil {
-			return Config{}, fmt.Errorf("%w: %s", errConfigFileNotFound, configPath)
-		}
-	} else {
-		// Default config file - optional
-		cfgFile = filepath.Join(workDir, ConfigFileName)
+	// Load global config if it exists
+	globalCfg, err := loadGlobalConfig(env)
+	if err != nil {
+		return Config{}, err
 	}
 
-	// Load config file if it exists
-	data, readErr := os.ReadFile(cfgFile) //nolint:gosec // cfgFile is intentionally user-controlled
-	if readErr == nil {
-		fileCfg, explicitEmpty, parseErr := parseConfig(data)
-		if parseErr != nil {
-			return Config{}, fmt.Errorf("%w %s: %w", errConfigInvalid, cfgFile, parseErr)
-		}
+	cfg = mergeConfig(cfg, globalCfg)
 
-		// If ticket_dir was explicitly set to empty string in file, that's an error
-		if explicitEmpty["ticket_dir"] {
-			return Config{}, fmt.Errorf("%w %s: %w", errConfigInvalid, cfgFile, errTicketDirEmpty)
-		}
-
-		cfg = mergeConfig(cfg, fileCfg)
-	} else if configPath != "" {
-		// Explicit config was specified but couldn't be read
-		return Config{}, fmt.Errorf("%w: %s", errConfigFileRead, configPath)
+	// Load project/explicit config file
+	projectCfg, err := loadProjectConfig(workDir, configPath)
+	if err != nil {
+		return Config{}, err
 	}
+
+	cfg = mergeConfig(cfg, projectCfg)
 
 	// Apply CLI overrides
 	if hasTicketDirOverride {
@@ -82,6 +89,87 @@ func LoadConfig(workDir, configPath string, cliOverrides Config, hasTicketDirOve
 	}
 
 	return cfg, nil
+}
+
+// loadGlobalConfig loads the global user config file if it exists.
+func loadGlobalConfig(env []string) (Config, error) {
+	globalCfgPath := getGlobalConfigPath(env)
+	if globalCfgPath == "" {
+		return Config{}, nil
+	}
+
+	globalCfg, explicitEmpty, err := loadConfigFile(globalCfgPath, false)
+	if err != nil {
+		return Config{}, err
+	}
+
+	if explicitEmpty["ticket_dir"] {
+		return Config{}, fmt.Errorf("%w %s: %w", errConfigInvalid, globalCfgPath, errTicketDirEmpty)
+	}
+
+	return globalCfg, nil
+}
+
+// loadProjectConfig loads the project config file (.tk.json) or an explicit config file.
+func loadProjectConfig(workDir, configPath string) (Config, error) {
+	var cfgFile string
+
+	var mustExist bool
+
+	if configPath != "" {
+		// Explicit config file - must exist
+		cfgFile = configPath
+		if !filepath.IsAbs(cfgFile) {
+			cfgFile = filepath.Join(workDir, cfgFile)
+		}
+
+		mustExist = true
+
+		// Check existence first to provide a clear "not found" error
+		_, statErr := os.Stat(cfgFile)
+		if statErr != nil {
+			return Config{}, fmt.Errorf("%w: %s", errConfigFileNotFound, configPath)
+		}
+	} else {
+		// Default project config file - optional
+		cfgFile = filepath.Join(workDir, ConfigFileName)
+		mustExist = false
+	}
+
+	fileCfg, explicitEmpty, err := loadConfigFile(cfgFile, mustExist)
+	if err != nil {
+		return Config{}, err
+	}
+
+	if explicitEmpty["ticket_dir"] {
+		return Config{}, fmt.Errorf("%w %s: %w", errConfigInvalid, cfgFile, errTicketDirEmpty)
+	}
+
+	return fileCfg, nil
+}
+
+// loadConfigFile loads a config file. If mustExist is false, missing files return zero config.
+// Returns the config, a map of explicitly empty fields, and any error.
+func loadConfigFile(path string, mustExist bool) (Config, map[string]bool, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is intentionally user-controlled
+	if err != nil {
+		if os.IsNotExist(err) && !mustExist {
+			return Config{}, nil, nil
+		}
+
+		if mustExist {
+			return Config{}, nil, fmt.Errorf("%w: %s", errConfigFileRead, path)
+		}
+
+		return Config{}, nil, nil
+	}
+
+	cfg, explicitEmpty, parseErr := parseConfig(data)
+	if parseErr != nil {
+		return Config{}, nil, fmt.Errorf("%w %s: %w", errConfigInvalid, path, parseErr)
+	}
+
+	return cfg, explicitEmpty, nil
 }
 
 func parseConfig(data []byte) (Config, map[string]bool, error) {

@@ -46,7 +46,7 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env []stri
 	// Load and validate config
 	cliOverrides := Config{TicketDir: flags.ticketDir}
 
-	cfg, err := LoadConfig(workDir, flags.configPath, cliOverrides, flags.hasTicketDirOverride)
+	cfg, err := LoadConfig(workDir, flags.configPath, cliOverrides, flags.hasTicketDirOverride, env)
 	if err != nil {
 		fprintln(errOut, "error:", err)
 		printUsage(errOut)

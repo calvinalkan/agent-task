@@ -444,3 +444,186 @@ func TestConfig_Precedence_CLIOverridesExplicitConfig(t *testing.T) {
 	assertExitCode(t, code, 0, stderr)
 	assertStdoutContains(t, stdout, `"ticket_dir": "from-cli"`)
 }
+
+// Tests for global config.
+
+func runTkWithEnv(t *testing.T, dir string, env []string, args ...string) (string, string, int) {
+	t.Helper()
+
+	var out, errOut bytes.Buffer
+
+	fullArgs := append([]string{"tk", "-C", dir}, args...)
+	exitCode := Run(nil, &out, &errOut, fullArgs, env)
+
+	return out.String(), errOut.String(), exitCode
+}
+
+func TestConfig_GlobalConfig_Loaded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	// Create global config with editor setting
+	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{"editor": "nvim"}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	assertStdoutContains(t, stdout, `"editor": "nvim"`)
+	assertStdoutContains(t, stdout, `"ticket_dir": ".tickets"`)
+}
+
+func TestConfig_GlobalConfig_MissingIsNotError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir() // Empty, no config file
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	assertStdoutContains(t, stdout, `"ticket_dir": ".tickets"`)
+}
+
+func TestConfig_GlobalConfig_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{invalid json}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 1, stderr)
+	assertStdoutEmpty(t, stdout)
+	assertStderrContains(t, stderr, "invalid")
+}
+
+func TestConfig_GlobalConfig_EmptyTicketDir(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{"ticket_dir": ""}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 1, stderr)
+	assertStdoutEmpty(t, stdout)
+	assertStderrContains(t, stderr, "ticket_dir cannot be empty")
+}
+
+func TestConfig_Precedence_ProjectOverridesGlobal(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	// Global config: sets both ticket_dir and editor
+	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{"ticket_dir": "global-tickets", "editor": "nvim"}`)
+
+	// Project config: only sets ticket_dir
+	writeFile(t, filepath.Join(dir, ".tk.json"), `{"ticket_dir": "project-tickets"}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	// ticket_dir should come from project config
+	assertStdoutContains(t, stdout, `"ticket_dir": "project-tickets"`)
+	// editor should still come from global config
+	assertStdoutContains(t, stdout, `"editor": "nvim"`)
+}
+
+func TestConfig_Precedence_ExplicitOverridesGlobal(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	// Global config
+	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{"ticket_dir": "global-tickets"}`)
+
+	// Explicit config
+	writeFile(t, filepath.Join(dir, "explicit.json"), `{"ticket_dir": "explicit-tickets"}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "-c", "explicit.json", "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	assertStdoutContains(t, stdout, `"ticket_dir": "explicit-tickets"`)
+}
+
+func TestConfig_Precedence_CLIOverridesGlobal(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	// Global config
+	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{"ticket_dir": "global-tickets"}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "--ticket-dir=cli-tickets", "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	assertStdoutContains(t, stdout, `"ticket_dir": "cli-tickets"`)
+}
+
+func TestConfig_Precedence_FullChain(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	// Global config: sets ticket_dir and editor
+	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{"ticket_dir": "global", "editor": "nvim"}`)
+
+	// Project config: only overrides ticket_dir
+	writeFile(t, filepath.Join(dir, ".tk.json"), `{"ticket_dir": "project"}`)
+
+	// CLI overrides ticket_dir
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "--ticket-dir=cli", "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	// CLI wins for ticket_dir
+	assertStdoutContains(t, stdout, `"ticket_dir": "cli"`)
+	// editor still comes from global
+	assertStdoutContains(t, stdout, `"editor": "nvim"`)
+}
+
+func TestConfig_GlobalConfig_PartialMerge(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	xdgDir := t.TempDir()
+
+	// Global config only sets editor
+	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{"editor": "vim"}`)
+
+	// Project config only sets ticket_dir
+	writeFile(t, filepath.Join(dir, ".tk.json"), `{"ticket_dir": "custom-tickets"}`)
+
+	env := []string{"XDG_CONFIG_HOME=" + xdgDir}
+	stdout, stderr, code := runTkWithEnv(t, dir, env, "print-config")
+
+	assertExitCode(t, code, 0, stderr)
+	assertStderrEmpty(t, stderr)
+	// Both values should be present
+	assertStdoutContains(t, stdout, `"ticket_dir": "custom-tickets"`)
+	assertStdoutContains(t, stdout, `"editor": "vim"`)
+}
