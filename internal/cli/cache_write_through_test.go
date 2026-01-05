@@ -1,9 +1,6 @@
-// Tests for cache write-through functionality.
 package cli_test
 
 import (
-	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +9,7 @@ import (
 	"time"
 
 	"tk/internal/cli"
+
 	"tk/internal/ticket"
 )
 
@@ -58,9 +56,14 @@ func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, tick
 		"---\n" +
 		"# " + title + "\n"
 
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatalf("failed to create ticket dir: %v", err)
+	}
+
 	path := filepath.Join(ticketDir, ticketID+".md")
 
-	err := os.WriteFile(path, []byte(content), 0o600)
+	err = os.WriteFile(path, []byte(content), 0o600)
 	if err != nil {
 		t.Fatalf("failed to create test ticket: %v", err)
 	}
@@ -69,185 +72,132 @@ func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, tick
 func TestWriteThroughCacheCreateStartCloseReopen(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
-	ticketDir := filepath.Join(tmpDir, ".tickets")
+	c := cli.NewCLI(t)
+	ticketID := c.MustRun("create", "Test ticket")
 
-	var createOut bytes.Buffer
-
-	exitCode := cli.Run(nil, &createOut, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "create", "Test ticket"}, nil)
-	if exitCode != 0 {
-		t.Fatal("create failed")
+	summary := loadCachedSummary(t, c.TicketDir(), ticketID+".md")
+	if got, want := summary.ID, ticketID; got != want {
+		t.Fatalf("cache ID=%q, want=%q", got, want)
 	}
 
-	ticketID := strings.TrimSpace(createOut.String())
-
-	summary := loadCachedSummary(t, ticketDir, ticketID+".md")
-	if summary.ID != ticketID {
-		t.Fatalf("cache ID = %q, want %q", summary.ID, ticketID)
+	if got, want := summary.Status, ticket.StatusOpen; got != want {
+		t.Fatalf("cache status=%q, want=%q", got, want)
 	}
 
-	if summary.Status != ticket.StatusOpen {
-		t.Fatalf("cache status = %q, want %q", summary.Status, ticket.StatusOpen)
+	c.MustRun("start", ticketID)
+
+	summary = loadCachedSummary(t, c.TicketDir(), ticketID+".md")
+	if got, want := summary.Status, ticket.StatusInProgress; got != want {
+		t.Fatalf("cache status after start=%q, want=%q", got, want)
 	}
 
-	// Start updates cache.
-	exitCode = cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "start", ticketID}, nil)
-	if exitCode != 0 {
-		t.Fatal("start failed")
-	}
+	c.MustRun("close", ticketID)
 
-	summary = loadCachedSummary(t, ticketDir, ticketID+".md")
-	if summary.Status != ticket.StatusInProgress {
-		t.Fatalf("cache status after start = %q, want %q", summary.Status, ticket.StatusInProgress)
-	}
-
-	// Close updates cache (adds closed timestamp).
-	exitCode = cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "close", ticketID}, nil)
-	if exitCode != 0 {
-		t.Fatal("close failed")
-	}
-
-	summary = loadCachedSummary(t, ticketDir, ticketID+".md")
-	if summary.Status != ticket.StatusClosed {
-		t.Fatalf("cache status after close = %q, want %q", summary.Status, ticket.StatusClosed)
+	summary = loadCachedSummary(t, c.TicketDir(), ticketID+".md")
+	if got, want := summary.Status, ticket.StatusClosed; got != want {
+		t.Fatalf("cache status after close=%q, want=%q", got, want)
 	}
 
 	if summary.Closed == "" {
 		t.Fatal("expected closed timestamp in cache after close")
 	}
 
-	// Reopen updates cache (clears closed timestamp).
-	exitCode = cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "reopen", ticketID}, nil)
-	if exitCode != 0 {
-		t.Fatal("reopen failed")
-	}
+	c.MustRun("reopen", ticketID)
 
-	summary = loadCachedSummary(t, ticketDir, ticketID+".md")
-	if summary.Status != ticket.StatusOpen {
-		t.Fatalf("cache status after reopen = %q, want %q", summary.Status, ticket.StatusOpen)
+	summary = loadCachedSummary(t, c.TicketDir(), ticketID+".md")
+	if got, want := summary.Status, ticket.StatusOpen; got != want {
+		t.Fatalf("cache status after reopen=%q, want=%q", got, want)
 	}
 
 	if summary.Closed != "" {
-		t.Fatalf("expected closed timestamp cleared in cache after reopen, got %q", summary.Closed)
+		t.Fatalf("expected closed timestamp cleared in cache after reopen, got=%q", summary.Closed)
 	}
 }
 
 func TestWriteThroughCacheBlockUnblock(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
-	ticketDir := filepath.Join(tmpDir, ".tickets")
+	c := cli.NewCLI(t)
+	ticketA := c.MustRun("create", "Ticket A")
+	ticketB := c.MustRun("create", "Ticket B")
 
-	// Create two tickets.
-	var outA, outB bytes.Buffer
-	cli.Run(nil, &outA, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "create", "Ticket A"}, nil)
-	cli.Run(nil, &outB, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "create", "Ticket B"}, nil)
+	c.MustRun("block", ticketA, ticketB)
 
-	ticketA := strings.TrimSpace(outA.String())
-	ticketB := strings.TrimSpace(outB.String())
-
-	// Block A by B.
-	exitCode := cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "block", ticketA, ticketB}, nil)
-	if exitCode != 0 {
-		t.Fatal("block failed")
-	}
-
-	summary := loadCachedSummary(t, ticketDir, ticketA+".md")
+	summary := loadCachedSummary(t, c.TicketDir(), ticketA+".md")
 	if len(summary.BlockedBy) != 1 || summary.BlockedBy[0] != ticketB {
-		t.Fatalf("cache blocked-by after block = %+v, want [%s]", summary.BlockedBy, ticketB)
+		t.Fatalf("cache blocked-by after block=%+v, want=[%s]", summary.BlockedBy, ticketB)
 	}
 
-	// Unblock A from B.
-	exitCode = cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "unblock", ticketA, ticketB}, nil)
-	if exitCode != 0 {
-		t.Fatal("unblock failed")
-	}
+	c.MustRun("unblock", ticketA, ticketB)
 
-	summary = loadCachedSummary(t, ticketDir, ticketA+".md")
+	summary = loadCachedSummary(t, c.TicketDir(), ticketA+".md")
 	if len(summary.BlockedBy) != 0 {
-		t.Fatalf("cache blocked-by after unblock = %+v, want empty", summary.BlockedBy)
+		t.Fatalf("cache blocked-by after unblock=%+v, want=empty", summary.BlockedBy)
 	}
 }
 
 func TestWriteThroughCacheRepairUpdatesEntry(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
-	ticketDir := filepath.Join(tmpDir, ".tickets")
+	c := cli.NewCLI(t)
+	ticketDir := c.TicketDir()
 
-	ensureErr := ensureDir(ticketDir)
-	if ensureErr != nil {
-		t.Fatal(ensureErr)
-	}
-
-	// Create a ticket with a stale blocker (file exists, blocker doesn't).
-	createTestTicketFull(t, ticketDir, "a-001", ticket.StatusOpen, "A", "task", 2, []string{"missing-123"})
-
-	// Build cache once.
-	_, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, &bytes.Buffer{})
+	err := os.MkdirAll(ticketDir, 0o750)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Repair should remove missing blocker and update cache.
-	exitCode := cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "repair", "a-001"}, nil)
-	if exitCode != 0 {
-		t.Fatal("repair failed")
+	createTestTicketFull(t, ticketDir, "a-001", ticket.StatusOpen, "A", "task", 2, []string{"missing-123"})
+
+	// Build cache once
+	_, err = ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+
+	c.MustRun("repair", "a-001")
 
 	summary := loadCachedSummary(t, ticketDir, "a-001.md")
 	if len(summary.BlockedBy) != 0 {
-		t.Fatalf("cache blocked-by after repair = %+v, want empty", summary.BlockedBy)
+		t.Fatalf("cache blocked-by after repair=%+v, want=empty", summary.BlockedBy)
 	}
 }
 
 func TestConcurrentWritesDoNotCorruptCache(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
-	ticketDir := filepath.Join(tmpDir, ".tickets")
+	th := cli.NewCLI(t)
+	id1 := th.MustRun("create", "Ticket 1")
+	id2 := th.MustRun("create", "Ticket 2")
 
-	var out1, out2 bytes.Buffer
-	cli.Run(nil, &out1, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "create", "Ticket 1"}, nil)
-	cli.Run(nil, &out2, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "create", "Ticket 2"}, nil)
+	th.MustRun("start", id1)
+	th.MustRun("start", id2)
 
-	id1 := strings.TrimSpace(out1.String())
-	id2 := strings.TrimSpace(out2.String())
-
-	cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "start", id1}, nil)
-	cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "start", id2}, nil)
-
-	var waitGroup sync.WaitGroup
-	waitGroup.Add(2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	go func() {
-		defer waitGroup.Done()
+		defer wg.Done()
 
-		cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "close", id1}, nil)
+		th.Run("close", id1)
 	}()
 
 	go func() {
-		defer waitGroup.Done()
+		defer wg.Done()
 
-		cli.Run(nil, &bytes.Buffer{}, &bytes.Buffer{}, []string{"tk", "-C", tmpDir, "close", id2}, nil)
+		th.Run("close", id2)
 	}()
 
-	waitGroup.Wait()
+	wg.Wait()
 
-	// Cache must be loadable and contain both updates.
-	s1 := loadCachedSummary(t, ticketDir, id1+".md")
-	s2 := loadCachedSummary(t, ticketDir, id2+".md")
+	s1 := loadCachedSummary(t, th.TicketDir(), id1+".md")
+	s2 := loadCachedSummary(t, th.TicketDir(), id2+".md")
 
-	if s1.Status != ticket.StatusClosed || s2.Status != ticket.StatusClosed {
-		t.Fatalf("expected both tickets closed in cache, got %q and %q", s1.Status, s2.Status)
-	}
-}
-
-func ensureDir(path string) error {
-	err := os.MkdirAll(path, 0o750)
-	if err != nil {
-		return fmt.Errorf("mkdir %s: %w", path, err)
+	if got, want := s1.Status, ticket.StatusClosed; got != want {
+		t.Fatalf("ticket1 status=%q, want=%q", got, want)
 	}
 
-	return nil
+	if got, want := s2.Status, ticket.StatusClosed; got != want {
+		t.Fatalf("ticket2 status=%q, want=%q", got, want)
+	}
 }

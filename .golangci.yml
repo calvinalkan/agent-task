@@ -158,7 +158,7 @@ linters:
       - path: _test\.go
         linters:
           - dupl
-          - testpackage
+          - varnamelen
       - path: _test\.go
         text: "G204:" # subprocess launched with variable
         linters:

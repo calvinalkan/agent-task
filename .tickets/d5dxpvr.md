@@ -1,7 +1,8 @@
 ---
 schema_version: 1
 id: d5dxpvr
-status: open
+status: closed
+closed: 2026-01-05T18:55:55Z
 blocked-by: [d5dwga0]
 created: 2026-01-05T15:40:31Z
 type: task

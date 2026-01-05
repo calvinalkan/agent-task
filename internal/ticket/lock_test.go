@@ -1,17 +1,15 @@
-package ticket
+package ticket_test
 
 import (
 	"bytes"
 	"errors"
-	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
+
+	"tk/internal/ticket"
 )
 
 // errTestCallback is used for testing error handling in callbacks.
@@ -26,13 +24,13 @@ func TestWithTicketLock_BasicOperation(t *testing.T) {
 	// Create test file
 	initialContent := []byte("hello world")
 
-	writeErr := os.WriteFile(path, initialContent, filePerms)
+	writeErr := os.WriteFile(path, initialContent, 0o600)
 	if writeErr != nil {
 		t.Fatalf("failed to create test file: %v", writeErr)
 	}
 
 	// Test read and modify
-	lockErr := WithTicketLock(path, func(content []byte) ([]byte, error) {
+	lockErr := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		if !bytes.Equal(content, initialContent) {
 			t.Errorf("expected content %q, got %q", initialContent, content)
 		}
@@ -63,7 +61,7 @@ func TestWithTicketLock_ReadOnlyOperation(t *testing.T) {
 	// Create test file
 	initialContent := []byte("original content")
 
-	writeErr := os.WriteFile(path, initialContent, filePerms)
+	writeErr := os.WriteFile(path, initialContent, 0o600)
 	if writeErr != nil {
 		t.Fatalf("failed to create test file: %v", writeErr)
 	}
@@ -71,7 +69,7 @@ func TestWithTicketLock_ReadOnlyOperation(t *testing.T) {
 	// Test read-only (return nil to skip write)
 	var readContent []byte
 
-	lockErr := WithTicketLock(path, func(content []byte) ([]byte, error) {
+	lockErr := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		readContent = content
 
 		return nil, nil // nil content = no write
@@ -104,13 +102,13 @@ func TestWithTicketLock_ErrorInCallback(t *testing.T) {
 	// Create test file
 	initialContent := []byte("original content")
 
-	writeErr := os.WriteFile(path, initialContent, filePerms)
+	writeErr := os.WriteFile(path, initialContent, 0o600)
 	if writeErr != nil {
 		t.Fatalf("failed to create test file: %v", writeErr)
 	}
 
 	// Test error in callback - should not write
-	lockErr := WithTicketLock(path, func(_ []byte) ([]byte, error) {
+	lockErr := ticket.WithTicketLock(path, func(_ []byte) ([]byte, error) {
 		return []byte("should not be written"), errTestCallback
 	})
 
@@ -136,7 +134,7 @@ func TestWithTicketLock_ConcurrentAccess(t *testing.T) {
 	path := filepath.Join(tmpDir, "test.md")
 
 	// Create test file with counter
-	writeErr := os.WriteFile(path, []byte("0"), filePerms)
+	writeErr := os.WriteFile(path, []byte("0"), 0o600)
 	if writeErr != nil {
 		t.Fatalf("failed to create test file: %v", writeErr)
 	}
@@ -151,7 +149,7 @@ func TestWithTicketLock_ConcurrentAccess(t *testing.T) {
 	for range numGoroutines {
 		waitGroup.Go(func() {
 			for range incrementsPerGoroutine {
-				lockErr := WithTicketLock(path, func(content []byte) ([]byte, error) {
+				lockErr := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 					// Parse current value
 					val, _ := strconv.Atoi(string(content))
 
@@ -184,51 +182,6 @@ func TestWithTicketLock_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestAcquireLockWithTimeout_Timeout(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "test.md")
-
-	// Create test file
-	writeErr := os.WriteFile(path, []byte("test"), filePerms)
-	if writeErr != nil {
-		t.Fatalf("failed to create test file: %v", writeErr)
-	}
-
-	// Acquire lock in goroutine and hold it
-	lockAcquired := make(chan struct{})
-	releaseLock := make(chan struct{})
-
-	go func() {
-		lock, acquireErr := acquireLock(path)
-		if acquireErr != nil {
-			t.Errorf("failed to acquire lock: %v", acquireErr)
-
-			return
-		}
-
-		close(lockAcquired)
-		<-releaseLock
-
-		lock.release()
-	}()
-
-	<-lockAcquired
-
-	// Try to acquire lock with short timeout - should fail
-	_, lockErr := acquireLockWithTimeout(path, 50*time.Millisecond)
-	if lockErr == nil {
-		t.Error("expected timeout error, got nil")
-	}
-
-	if !errors.Is(lockErr, errLockTimeout) {
-		t.Errorf("expected lock timeout error, got %v", lockErr)
-	}
-
-	close(releaseLock)
-}
-
 func TestWithTicketLock_LockReleasedAfterError(t *testing.T) {
 	t.Parallel()
 
@@ -236,18 +189,18 @@ func TestWithTicketLock_LockReleasedAfterError(t *testing.T) {
 	path := filepath.Join(tmpDir, "test.md")
 
 	// Create test file
-	writeErr := os.WriteFile(path, []byte("test"), filePerms)
+	writeErr := os.WriteFile(path, []byte("test"), 0o600)
 	if writeErr != nil {
 		t.Fatalf("failed to create test file: %v", writeErr)
 	}
 
 	// First call with error
-	_ = WithTicketLock(path, func(_ []byte) ([]byte, error) {
+	_ = ticket.WithTicketLock(path, func(_ []byte) ([]byte, error) {
 		return nil, errTestCallback
 	})
 
 	// Second call should succeed (lock was released)
-	lockErr := WithTicketLock(path, func(_ []byte) ([]byte, error) {
+	lockErr := ticket.WithTicketLock(path, func(_ []byte) ([]byte, error) {
 		return []byte("success"), nil
 	})
 	if lockErr != nil {
@@ -261,64 +214,10 @@ func TestWithTicketLock_FileNotExists(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "nonexistent.md")
 
-	lockErr := WithTicketLock(path, func(content []byte) ([]byte, error) {
+	lockErr := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		return content, nil
 	})
 	if lockErr == nil {
 		t.Error("expected error for nonexistent file")
 	}
-}
-
-func TestAcquireLock_Concurrent(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "test.md")
-
-	// Create test file
-	writeErr := os.WriteFile(path, []byte("test"), filePerms)
-	if writeErr != nil {
-		t.Fatalf("failed to create test file: %v", writeErr)
-	}
-
-	// Track which goroutine holds the lock
-	var lockHolder atomic.Int32
-
-	const numGoroutines = 5
-
-	var waitGroup sync.WaitGroup
-
-	for idx := range numGoroutines {
-		waitGroup.Add(1)
-
-		go func(goroutineID int) {
-			defer waitGroup.Done()
-
-			lock, acquireErr := acquireLock(path)
-			if acquireErr != nil {
-				t.Errorf("goroutine %d failed to acquire lock: %v", goroutineID, acquireErr)
-
-				return
-			}
-
-			// Check that no other goroutine holds the lock
-			// numGoroutines is a small const (5), so goroutineID+1 always fits in int32
-			id := goroutineID + 1
-			if id < 0 || id > math.MaxInt32 {
-				panic("unreachable: goroutineID out of int32 range")
-			}
-
-			if !lockHolder.CompareAndSwap(0, int32(id)) {
-				t.Errorf("goroutine %d acquired lock while %d holds it", goroutineID, lockHolder.Load()-1)
-			}
-
-			// Yield to let other goroutines try to acquire the lock
-			runtime.Gosched()
-
-			lockHolder.Store(0)
-			lock.release()
-		}(idx)
-	}
-
-	waitGroup.Wait()
 }

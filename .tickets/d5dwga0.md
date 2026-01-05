@@ -1,8 +1,9 @@
 ---
 schema_version: 1
 id: d5dwga0
-status: open
-blocked-by: [d5dcsc8]
+status: closed
+closed: 2026-01-05T16:08:40Z
+blocked-by: []
 created: 2026-01-05T14:18:16Z
 type: task
 priority: 2
@@ -11,8 +12,6 @@ assignee: Calvin Alkan
 # Add TestRunner helper for cleaner e2e tests
 
 Add a TestRunner helper in internal/cli/testing.go to reduce boilerplate in CLI tests.
-
-## Design
 
 ## Design
 
@@ -60,10 +59,18 @@ func TestCreateMultiple(t *testing.T) {
 }
 ```
 
+## Notes
+
+- File goes in `internal/cli/testing.go` (not `_test.go` so it's importable)
+- Enables `package cli_test` in test files (only uses exported `Run()`)
+- Consolidates scattered helpers like `readTicket()`, `assertContains()`, `createTestTicketFull()`
+- See d5dxpvr for re-enabling testpackage linter after this cleanup
+
 ## Acceptance Criteria
 
 - [ ] TestRunner struct with Dir and Env fields
 - [ ] NewTestRunner(t) creates runner with t.TempDir()
 - [ ] Run() returns stdout, stderr, exitCode
 - [ ] MustRun() fails test on non-zero exit
-- [ ] At least one existing test refactored to use TestRunner
+- [ ] Refactor at least 3 test files to use TestRunner
+- [ ] Remove duplicate helper functions from test files

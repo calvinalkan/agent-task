@@ -1,38 +1,36 @@
-package cli
+package cli_test
 
 import (
-	"bytes"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 
+	"tk/internal/cli"
 	"tk/internal/ticket"
 )
 
 func TestConcurrentTicketCreation(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	h := cli.NewCLI(t)
 
 	const numGoroutines = 5
 
-	ticketIDs, failures := createTicketsConcurrently(t, tmpDir, numGoroutines)
+	ticketIDs, failures := createTicketsConcurrently(t, h, numGoroutines)
 
-	// All should succeed
 	if len(failures) > 0 {
 		for _, failure := range failures {
 			t.Errorf("goroutine failed with exit code %d: stderr=%s", failure.code, failure.stderr)
 		}
 	}
 
-	// All IDs should be unique
-	if len(ticketIDs) != numGoroutines {
-		t.Fatalf("expected %d IDs, got %d", numGoroutines, len(ticketIDs))
+	if got, want := len(ticketIDs), numGoroutines; got != want {
+		t.Fatalf("ticketCount=%d, want=%d", got, want)
 	}
 
 	verifyUniqueIDs(t, ticketIDs)
-	verifyTicketsRetrievable(t, tmpDir, ticketIDs)
+	verifyTicketsRetrievable(t, h, ticketIDs)
 	verifySortOrder(t, ticketIDs)
 }
 
@@ -41,38 +39,36 @@ type createResult struct {
 	code   int
 }
 
-func createTicketsConcurrently(t *testing.T, tmpDir string, count int) ([]string, []createResult) {
+func createTicketsConcurrently(t *testing.T, h *cli.CLI, count int) ([]string, []createResult) {
 	t.Helper()
 
 	var (
-		waitGroup sync.WaitGroup
-		mutex     sync.Mutex
+		wg        sync.WaitGroup
+		mu        sync.Mutex
 		ticketIDs = make([]string, 0, count)
 		failures  = make([]createResult, 0)
 	)
 
-	waitGroup.Add(count)
+	wg.Add(count)
 
 	for range count {
 		go func() {
-			defer waitGroup.Done()
+			defer wg.Done()
 
-			var stdout, stderr bytes.Buffer
+			stdout, stderr, exitCode := h.Run("create", "Concurrent ticket")
 
-			exitCode := Run(nil, &stdout, &stderr, []string{"tk", "-C", tmpDir, "create", "Concurrent ticket"}, nil)
-
-			mutex.Lock()
-			defer mutex.Unlock()
+			mu.Lock()
+			defer mu.Unlock()
 
 			if exitCode == 0 {
-				ticketIDs = append(ticketIDs, strings.TrimSpace(stdout.String()))
+				ticketIDs = append(ticketIDs, strings.TrimSpace(stdout))
 			} else {
-				failures = append(failures, createResult{stderr.String(), exitCode})
+				failures = append(failures, createResult{stderr, exitCode})
 			}
 		}()
 	}
 
-	waitGroup.Wait()
+	wg.Wait()
 
 	return ticketIDs, failures
 }
@@ -81,7 +77,6 @@ func verifyUniqueIDs(t *testing.T, ticketIDs []string) {
 	t.Helper()
 
 	seen := make(map[string]bool)
-
 	for _, ticketID := range ticketIDs {
 		if seen[ticketID] {
 			t.Errorf("duplicate ID: %s", ticketID)
@@ -91,15 +86,13 @@ func verifyUniqueIDs(t *testing.T, ticketIDs []string) {
 	}
 }
 
-func verifyTicketsRetrievable(t *testing.T, tmpDir string, ticketIDs []string) {
+func verifyTicketsRetrievable(t *testing.T, h *cli.CLI, ticketIDs []string) {
 	t.Helper()
 
 	for _, ticketID := range ticketIDs {
-		var stdout, stderr bytes.Buffer
-
-		exitCode := Run(nil, &stdout, &stderr, []string{"tk", "-C", tmpDir, "show", ticketID}, nil)
-		if exitCode != 0 {
-			t.Errorf("tk show %s failed: %s", ticketID, stderr.String())
+		_, stderr, exitCode := h.Run("show", ticketID)
+		if got, want := exitCode, 0; got != want {
+			t.Errorf("show %s: exitCode=%d, want=%d, stderr=%s", ticketID, got, want, stderr)
 		}
 	}
 }
@@ -111,7 +104,6 @@ func verifySortOrder(t *testing.T, ticketIDs []string) {
 	copy(sorted, ticketIDs)
 	slices.Sort(sorted)
 
-	// Verify sorting: shorter IDs before longer ones with same prefix
 	for idx := 1; idx < len(sorted); idx++ {
 		if sorted[idx] <= sorted[idx-1] {
 			t.Errorf("IDs not properly sorted: %v", sorted)
@@ -124,36 +116,24 @@ func verifySortOrder(t *testing.T, ticketIDs []string) {
 func TestSuffixedIDsRetrievable(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
-	ticketDir := tmpDir + "/.tickets"
+	h := cli.NewCLI(t)
 
-	// Create tickets rapidly to trigger suffix generation
 	const numTickets = 5
 
 	ticketIDs := make([]string, 0, numTickets)
-
 	for range numTickets {
-		var stdout bytes.Buffer
-
-		exitCode := Run(nil, &stdout, nil, []string{"tk", "-C", tmpDir, "create", "Test ticket"}, nil)
-		if exitCode != 0 {
-			t.Fatal("failed to create ticket")
-		}
-
-		ticketIDs = append(ticketIDs, strings.TrimSpace(stdout.String()))
+		id := h.MustRun("create", "Test ticket")
+		ticketIDs = append(ticketIDs, id)
 	}
 
-	// Verify all tickets are retrievable
 	for _, ticketID := range ticketIDs {
-		if !ticket.Exists(ticketDir, ticketID) {
+		if !ticket.Exists(h.TicketDir(), ticketID) {
 			t.Errorf("ticket %s should exist", ticketID)
 		}
 
-		var stdout, stderr bytes.Buffer
-
-		exitCode := Run(nil, &stdout, &stderr, []string{"tk", "-C", tmpDir, "show", ticketID}, nil)
-		if exitCode != 0 {
-			t.Errorf("tk show %s failed: %s", ticketID, stderr.String())
+		_, stderr, exitCode := h.Run("show", ticketID)
+		if got, want := exitCode, 0; got != want {
+			t.Errorf("show %s: exitCode=%d, want=%d, stderr=%s", ticketID, got, want, stderr)
 		}
 	}
 }

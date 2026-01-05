@@ -1,4 +1,4 @@
-package ticket
+package ticket_test
 
 import (
 	"os"
@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"tk/internal/ticket"
 )
 
 func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, ticketType string, priority int, blockedBy []string) {
@@ -17,7 +19,7 @@ func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, tick
 	}
 
 	closedLine := ""
-	if status == StatusClosed {
+	if status == ticket.StatusClosed {
 		closedLine = "closed: " + time.Now().UTC().Format(time.RFC3339) + "\n"
 	}
 
@@ -35,7 +37,7 @@ func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, tick
 
 	path := filepath.Join(ticketDir, ticketID+".md")
 
-	err := os.WriteFile(path, []byte(content), filePerms)
+	err := os.WriteFile(path, []byte(content), 0o600)
 	if err != nil {
 		t.Fatalf("failed to create test ticket: %v", err)
 	}
@@ -46,7 +48,7 @@ func TestCreateTestTicketFullWithClosedStatus(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	createTestTicketFull(t, tmpDir, "closed-001", StatusClosed, "Closed Ticket", "task", 2, nil)
+	createTestTicketFull(t, tmpDir, "closed-001", ticket.StatusClosed, "Closed Ticket", "task", 2, nil)
 
 	content, err := os.ReadFile(filepath.Join(tmpDir, "closed-001.md"))
 	if err != nil {

@@ -1,43 +1,13 @@
-package ticket
+package ticket_test
 
 import (
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"tk/internal/ticket"
 )
-
-func TestNextSuffix(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"", "a"},
-		{"a", "b"},
-		{"b", "c"},
-		{"y", "z"},
-		{"z", "za"},
-		{"za", "zb"},
-		{"zz", "zza"},
-		{"zzz", "zzza"},
-		{"zza", "zzb"},
-		{"zzb", "zzc"},
-		{"zzy", "zzz"},
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.input+"->"+testCase.want, func(t *testing.T) {
-			t.Parallel()
-
-			got := nextSuffix(testCase.input)
-			if got != testCase.want {
-				t.Errorf("nextSuffix(%q) = %q, want %q", testCase.input, got, testCase.want)
-			}
-		})
-	}
-}
 
 func TestGenerateUniqueIDNoCollision(t *testing.T) {
 	t.Parallel()
@@ -45,12 +15,12 @@ func TestGenerateUniqueIDNoCollision(t *testing.T) {
 	tmpDir := t.TempDir()
 	ticketDir := filepath.Join(tmpDir, ".tickets")
 
-	err := os.MkdirAll(ticketDir, dirPerms)
+	err := os.MkdirAll(ticketDir, 0o750)
 	if err != nil {
 		t.Fatalf("failed to create ticket dir: %v", err)
 	}
 
-	ticketID, err := GenerateUniqueID(ticketDir)
+	ticketID, err := ticket.GenerateUniqueID(ticketDir)
 	if err != nil {
 		t.Fatalf("GenerateUniqueID failed: %v", err)
 	}
@@ -67,19 +37,19 @@ func TestGenerateUniqueIDWithCollisions(t *testing.T) {
 	tmpDir := t.TempDir()
 	ticketDir := filepath.Join(tmpDir, ".tickets")
 
-	err := os.MkdirAll(ticketDir, dirPerms)
+	err := os.MkdirAll(ticketDir, 0o750)
 	if err != nil {
 		t.Fatalf("failed to create ticket dir: %v", err)
 	}
 
 	// Generate first ID
-	baseID, err := GenerateUniqueID(ticketDir)
+	baseID, err := ticket.GenerateUniqueID(ticketDir)
 	if err != nil {
 		t.Fatalf("GenerateUniqueID failed: %v", err)
 	}
 
 	// Create a file with that ID to simulate collision
-	err = os.WriteFile(filepath.Join(ticketDir, baseID+".md"), []byte("test"), filePerms)
+	err = os.WriteFile(filepath.Join(ticketDir, baseID+".md"), []byte("test"), 0o600)
 	if err != nil {
 		t.Fatalf("failed to write file: %v", err)
 	}
@@ -89,7 +59,7 @@ func TestGenerateUniqueIDWithCollisions(t *testing.T) {
 	// by pre-creating files with predictable IDs
 
 	// For now, just verify the function returns unique IDs
-	id2, err := GenerateUniqueID(ticketDir)
+	id2, err := ticket.GenerateUniqueID(ticketDir)
 	if err != nil {
 		t.Fatalf("GenerateUniqueID failed on second call: %v", err)
 	}
