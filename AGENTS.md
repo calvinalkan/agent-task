@@ -14,19 +14,22 @@
 
 Tests run against `Run()` for integration tests or directly against `cmd*()` functions for command-specific tests.
 
-## Development
+## Commands
 
-We use a Makefile:
+We use `make` in this project. Always use make.
 
-```
-make build    # Build the tk binary
-make test     # Run tests with race detector
-make lint     # Run golangci-lint
-make fmt      # Format code
-make vet      # Run go vet
-make check    # Run fmt, vet, lint, test
+```bash
+make check # Runs everything, use this before committing
+make build # Build the binary
+make test # Run tests with race detector
+make lint # Run all linters
 make clean    # Remove binary and lock files
 ```
+
+## Sandbox Notice
+
+If you encounter errors like `read-only file system` or `permission denied` for commands,
+you are running in a sandbox and will need to ask the user for to perform the action for you.
 
 ## Workflow
 

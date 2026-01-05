@@ -1,0 +1,102 @@
+package ticket
+
+// This file contains gob-based cache implementation.
+// Currently unused - the binary mmap cache (cache_binary.go) is used instead.
+// Kept for potential Windows support, since syscall.Mmap is not available on Windows.
+// Note: Add build tags to use this on Windows if needed.
+
+import (
+	"encoding/gob"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// CacheFileName is the name of the ticket cache file.
+const CacheFileName = ".cache"
+
+// Cache stores parsed ticket summaries with file mtimes.
+type Cache struct {
+	Entries map[string]CacheEntry // filename (without path) -> entry
+}
+
+// CacheEntry holds cached data for a single ticket file.
+type CacheEntry struct {
+	Mtime   time.Time // file mtime when parsed
+	Summary Summary   // parsed frontmatter
+}
+
+// Cache errors.
+var (
+	errCacheNotFound = errors.New("cache file not found")
+	errCacheCorrupt  = errors.New("cache file corrupted")
+)
+
+// LoadCache loads the cache from the ticket directory.
+// Returns errCacheNotFound if file doesn't exist.
+// Returns errCacheCorrupt if file can't be decoded.
+func LoadCache(ticketDir string) (*Cache, error) {
+	cachePath := filepath.Join(ticketDir, CacheFileName)
+
+	file, err := os.Open(cachePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errCacheNotFound
+		}
+
+		return nil, fmt.Errorf("opening cache: %w", err)
+	}
+
+	defer func() { _ = file.Close() }()
+
+	var cache Cache
+
+	decoder := gob.NewDecoder(file)
+
+	decodeErr := decoder.Decode(&cache)
+	if decodeErr != nil {
+		return nil, errCacheCorrupt
+	}
+
+	// Ensure map is initialized
+	if cache.Entries == nil {
+		cache.Entries = make(map[string]CacheEntry)
+	}
+
+	return &cache, nil
+}
+
+// SaveCache saves the cache to the ticket directory.
+func SaveCache(ticketDir string, cache *Cache) error {
+	cachePath := filepath.Join(ticketDir, CacheFileName)
+
+	file, err := os.Create(cachePath)
+	if err != nil {
+		return fmt.Errorf("creating cache file: %w", err)
+	}
+
+	defer func() { _ = file.Close() }()
+
+	encoder := gob.NewEncoder(file)
+
+	encodeErr := encoder.Encode(cache)
+	if encodeErr != nil {
+		return fmt.Errorf("encoding cache: %w", encodeErr)
+	}
+
+	return nil
+}
+
+// DeleteCache removes the cache file from the ticket directory.
+func DeleteCache(ticketDir string) error {
+	cachePath := filepath.Join(ticketDir, CacheFileName)
+
+	err := os.Remove(cachePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing cache: %w", err)
+	}
+
+	return nil
+}

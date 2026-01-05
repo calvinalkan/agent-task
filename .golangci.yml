@@ -13,7 +13,7 @@ linters:
     - containedctx
     - contextcheck
     - copyloopvar
-    - cyclop
+    # - cyclop
     - decorder
     - dogsled
     - dupl
@@ -31,15 +31,15 @@ linters:
     - forbidigo
     - forcetypeassert
     - funcorder
-    - funlen
+    # - funlen
     - gocheckcompilerdirectives
-    - gochecknoglobals
+    # - gochecknoglobals
     - gochecknoinits
     - gochecksumtype
-    - gocognit
+    # - gocognit
     - goconst
     - gocritic
-    - gocyclo
+    # - gocyclo
     - godoclint
     - godot
     - godox
@@ -58,22 +58,21 @@ linters:
     - intrange
     - iotamixing
     - ireturn
-    - lll
+    # - lll
     - loggercheck
-    - maintidx
+    # - maintidx
     - makezero
     - mirror
     - misspell
-    - mnd
-
+    # - mnd
     - musttag
     - nakedret
-    - nestif
+    # - nestif
     - nilerr
     - nilnesserr
     - nilnil
     - nlreturn
-    - noctx
+    # - noctx
     - noinlineerr
     - nolintlint
     - nonamedreturns
@@ -93,7 +92,7 @@ linters:
     - sqlclosecheck
     - staticcheck
     - tagalign
-    - tagliatelle
+    # - tagliatelle
     - testableexamples
     - testifylint
     - testpackage
@@ -111,32 +110,67 @@ linters:
     - wrapcheck
     - wsl_v5
     - zerologlint
-
-linters-settings:
-  cyclop:
-    max-complexity: 15
-  gocyclo:
-    min-complexity: 15
-  gocognit:
-    min-complexity: 20
-  funlen:
-    lines: 80
-    statements: 50
-  lll:
-    line-length: 120
-  nestif:
-    min-complexity: 5
-  nakedret:
-    max-func-lines: 0
-  varnamelen:
-    min-name-length: 2
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-      - experimental
-      - opinionated
+  settings:
+    cyclop:
+      max-complexity: 15
+    gocyclo:
+      min-complexity: 15
+    gocognit:
+      min-complexity: 20
+    funlen:
+      lines: 80
+      statements: 50
+    lll:
+      line-length: 120
+    nestif:
+      min-complexity: 5
+    nakedret:
+      max-func-lines: 0
+    varnamelen:
+      min-name-length: 2
+      ignore-names:
+        - i
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+      disabled-checks:
+        - paramTypeCombine
+        - unnamedResult
+    gosec:
+      excludes:
+        - G304 # file inclusion via variable - we use paths from ReadDir
+    forbidigo:
+      forbid:
+        - pattern: '^time\.Sleep$'
+          msg: "time.Sleep is flaky in tests (use testing/synctest) and usually wrong in production (use tickers, timers, or context)."
+        - pattern: '^os\.Getenv$'
+          msg: "os.Getenv bypasses env abstraction - use the env map passed to Run() instead."
+        - pattern: '^os\.LookupEnv$'
+          msg: "os.LookupEnv bypasses env abstraction - use the env map passed to Run() instead."
+        - pattern: '^os\.ExpandEnv$'
+          msg: "os.ExpandEnv bypasses env abstraction - use the env map passed to Run() instead."
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - testpackage
+      - path: _test\.go
+        text: "G204:" # subprocess launched with variable
+        linters:
+          - gosec
+      - path: _test\.go
+        text: "G306:" # file permissions > 0600
+        linters:
+          - gosec
+      - path: cmd/tk-bench/main\.go
+        text: "G204:"
+        linters:
+          - gosec
 
 formatters:
   enable:

@@ -1,8 +1,8 @@
 module tk
 
-go 1.23
+go 1.25
 
-toolchain go1.24.11
+toolchain go1.25.5
 
 require (
 	github.com/spf13/pflag v1.0.10
