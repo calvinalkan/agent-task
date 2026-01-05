@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"tk/internal/ticket"
@@ -28,7 +26,7 @@ const createHelp = `  create <title>         Create ticket, prints ID
     --acceptance           Acceptance criteria
     -t, --type             Type (bug|feature|task|epic|chore) [default: task]
     -p, --priority         Priority 1-4, 1=most urgent [default: 2]
-    -a, --assignee         Assignee [default: git user.name]
+    -a, --assignee         Assignee
     --blocked-by           Blocker ticket ID (repeatable)`
 
 func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
@@ -128,12 +126,6 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 		}
 	}
 
-	// Get assignee default from git if not specified
-	actualAssignee := *assignee
-	if !flagSet.Changed("assignee") {
-		actualAssignee = getGitUserName()
-	}
-
 	// Create ticket (ID will be generated atomically)
 	tkt := ticket.Ticket{
 		SchemaVersion: 1,
@@ -142,7 +134,7 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 		Created:       time.Now(),
 		Type:          *ticketType,
 		Priority:      *priority,
-		Assignee:      actualAssignee,
+		Assignee:      *assignee,
 		Title:         title,
 		Description:   *description,
 		Design:        *design,
@@ -181,15 +173,4 @@ func validateNotEmpty(flagSet *flag.FlagSet, name, value string) error {
 	}
 
 	return nil
-}
-
-func getGitUserName() string {
-	cmd := exec.Command("git", "config", "user.name")
-
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-
-	return strings.TrimSpace(string(output))
 }

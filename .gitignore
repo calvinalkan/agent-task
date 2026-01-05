@@ -25,3 +25,4 @@ coverage.out
 
 # Benchmark reports
 bench/.reports/
+**/testdata/fuzz/
