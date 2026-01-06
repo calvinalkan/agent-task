@@ -82,6 +82,8 @@ const (
 	ErrParentCycle          ErrCode = "parent_cycle"
 	ErrParentNotStarted     ErrCode = "parent_not_started"
 	ErrHasOpenChildren      ErrCode = "has_open_children"
+	ErrHasOpenBlockers      ErrCode = "has_open_blockers"
+	ErrAncestorNotReady     ErrCode = "ancestor_not_ready"
 	ErrCantStartNotOpen     ErrCode = "cant_start_not_open"
 	ErrCantCloseOpen        ErrCode = "cant_close_open"
 	ErrCantCloseClosed      ErrCode = "cant_close_already_closed"
@@ -351,25 +353,23 @@ type UserStartInput struct {
 
 // Start transitions a ticket from StatusOpen to StatusInProgress.
 //
+// A ticket can be started if:
+//   - Status is Open
+//   - all direct blockers are Closed
+//   - parent is not Open (must be InProgress or Closed, or no parent)
+//   - all ancestors are unblocked (no ancestor has open blockers)
+//
 // Returns an error if:
 //   - the ticket doesn't exist
-//   - the ticket is not in StatusOpen
-//   - the ticket has a parent that is Open (parent must be started first)
+//   - the ticket cannot be started (see canStart for details)
 func (m *Model) Start(user UserStartInput) *Error {
 	tk, ok := m.tickets[user.ID]
 	if !ok {
 		return newErr(ErrTicketNotFound, kv("id", user.ID))
 	}
 
-	if tk.Status != StatusOpen {
-		return newErr(ErrCantStartNotOpen, kv("id", user.ID), kv("status", string(tk.Status)))
-	}
-
-	if tk.ParentID != "" {
-		parent := m.tickets[tk.ParentID]
-		if parent.Status == StatusOpen {
-			return newErr(ErrParentNotStarted, kv("id", user.ID), kv("parent_id", tk.ParentID))
-		}
+	if err := m.canStart(tk); err != nil {
+		return err
 	}
 
 	tk.Status = StatusInProgress
@@ -732,29 +732,43 @@ func (m *Model) LS(user UserLSInput) ([]Ticket, *Error) {
 	return tickets, nil
 }
 
+// UserReadyInput configures the Ready query.
+//
+// All fields are optional:
+//   - Offset: skip the first N results; must be >= 0
+//   - Limit: return at most N results; 0 means unlimited; must be >= 0
+type UserReadyInput struct {
+	Offset int // must be >= 0
+	Limit  int // must be >= 0; 0 = unlimited
+}
+
 // Ready returns tickets that are ready to be worked on.
 //
-// A ticket is "ready" if:
-//   - Status is StatusOpen
-//   - all tickets in BlockedBy have Status=StatusClosed
+// A ticket is "ready" if it can be started. See [Model.Start] for the conditions.
 //
 // Results are sorted by priority (ascending), then by creation order.
 // This uses a stable sort, so tickets with equal priority maintain their creation order.
 //
 // Returns deep copies of the tickets; modifying them does not affect the model.
 //
-// Panics if any blocker ID references a ticket that doesn't exist (invalid spec state).
-func (m *Model) Ready() []Ticket {
+// Returns an error if:
+//   - Offset is negative
+//   - Limit is negative
+//   - Offset exceeds total matching results
+func (m *Model) Ready(user UserReadyInput) ([]Ticket, *Error) {
+	if user.Offset < 0 {
+		return nil, newErr(ErrInvalidOffset, kv("offset", strconv.Itoa(user.Offset)))
+	}
+
+	if user.Limit < 0 {
+		return nil, newErr(ErrInvalidLimit, kv("limit", strconv.Itoa(user.Limit)))
+	}
 	var ready []Ticket
 
 	for _, id := range m.order {
 		tk := m.tickets[id]
 
-		if tk.Status != StatusOpen {
-			continue
-		}
-
-		if !m.allBlockersClosed(tk) {
+		if m.canStart(tk) != nil {
 			continue
 		}
 
@@ -767,10 +781,61 @@ func (m *Model) Ready() []Ticket {
 		return int(a.Priority - b.Priority)
 	})
 
-	return ready
+	// Apply offset
+	if user.Offset > 0 && user.Offset >= len(ready) {
+		return nil, newErr(ErrOffsetOutOfBounds, kv("offset", strconv.Itoa(user.Offset)), kv("count", strconv.Itoa(len(ready))))
+	}
+
+	ready = ready[user.Offset:]
+
+	// Apply limit
+	if user.Limit > 0 && user.Limit < len(ready) {
+		ready = ready[:user.Limit]
+	}
+
+	return ready, nil
 }
 
-func (m *Model) allBlockersClosed(tk *Ticket) bool {
+// canStart checks if a ticket can be started.
+// Returns an error if:
+//   - ticket is not Open
+//   - ticket has open blockers
+//   - parent is Open (must start parent first)
+//   - any ancestor has open blockers
+func (m *Model) canStart(tk *Ticket) *Error {
+	if tk.Status != StatusOpen {
+		return newErr(ErrCantStartNotOpen, kv("id", tk.ID), kv("status", string(tk.Status)))
+	}
+
+	// Own blockers must all be closed
+	if blocker := m.findOpenBlocker(tk); blocker != "" {
+		return newErr(ErrHasOpenBlockers, kv("id", tk.ID), kv("blocker_id", blocker))
+	}
+
+	// No parent = can start
+	if tk.ParentID == "" {
+		return nil
+	}
+
+	parent := m.tickets[tk.ParentID]
+
+	// Parent must be started (not Open)
+	if parent.Status == StatusOpen {
+		return newErr(ErrParentNotStarted, kv("id", tk.ID), kv("parent_id", tk.ParentID))
+	}
+
+	// Recursively check parent can start (which checks parent's blockers and ancestors)
+	if err := m.canStart(parent); err != nil {
+		// Wrap with context that it's an ancestor issue
+		return newErr(ErrAncestorNotReady, kv("id", tk.ID), kv("ancestor_id", parent.ID))
+	}
+
+	return nil
+}
+
+// findOpenBlocker returns the ID of the first blocker that is not closed.
+// Returns empty string if all blockers are closed.
+func (m *Model) findOpenBlocker(tk *Ticket) string {
 	for _, blockerID := range tk.BlockedBy {
 		blocker, ok := m.tickets[blockerID]
 		if !ok {
@@ -778,11 +843,11 @@ func (m *Model) allBlockersClosed(tk *Ticket) bool {
 		}
 
 		if blocker.Status != StatusClosed {
-			return false
+			return blockerID
 		}
 	}
 
-	return true
+	return ""
 }
 
 func toType(t string) (Type, *Error) {
