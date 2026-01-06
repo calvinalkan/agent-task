@@ -2,18 +2,17 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"tk/internal/ticket"
 )
 
 const startHelp = `  start <id>             Set status to in_progress`
 
-func cmdStart(io *IO, cfg ticket.Config, workDir string, args []string) error {
+func cmdStart(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 	if hasHelpFlag(args) {
-		io.Println("Usage: tk start <id>")
-		io.Println("")
-		io.Println("Set ticket status to in_progress. Only works on open tickets.")
+		o.Println("Usage: tk start <id>")
+		o.Println("")
+		o.Println("Set ticket status to in_progress. Only works on open tickets.")
 
 		return nil
 	}
@@ -23,17 +22,12 @@ func cmdStart(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	}
 
 	ticketID := args[0]
-	ticketDir := cfg.TicketDir
 
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
-	if !ticket.Exists(ticketDir, ticketID) {
+	if !ticket.Exists(ticketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDir, ticketID)
+	path := ticket.Path(ticketDirAbs, ticketID)
 
 	// Use locked operation to atomically check status and update
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
@@ -57,20 +51,20 @@ func cmdStart(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}
 
-	io.Println("Started", ticketID)
-	io.Println()
+	o.Println("Started", ticketID)
+	o.Println()
 
 	content, err := ticket.ReadTicket(path)
 	if err != nil {
 		return err
 	}
 
-	io.Printf("%s", content)
+	o.Printf("%s", content)
 
 	return nil
 }

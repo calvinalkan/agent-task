@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"tk/internal/ticket"
@@ -10,12 +9,12 @@ import (
 
 const closeHelp = `  close <id>             Set status to closed`
 
-func cmdClose(io *IO, cfg ticket.Config, workDir string, args []string) error {
+func cmdClose(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		io.Println("Usage: tk close <id>")
-		io.Println("")
-		io.Println("Set ticket status to closed. Only works on in_progress tickets.")
+		o.Println("Usage: tk close <id>")
+		o.Println("")
+		o.Println("Set ticket status to closed. Only works on in_progress tickets.")
 
 		return nil
 	}
@@ -26,18 +25,12 @@ func cmdClose(io *IO, cfg ticket.Config, workDir string, args []string) error {
 
 	ticketID := args[0]
 
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
 	// Check if ticket exists
-	if !ticket.Exists(ticketDir, ticketID) {
+	if !ticket.Exists(ticketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDir, ticketID)
+	path := ticket.Path(ticketDirAbs, ticketID)
 
 	// Use locked operation to atomically check status and update with closed timestamp
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
@@ -80,12 +73,12 @@ func cmdClose(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}
 
-	io.Println("Closed", ticketID)
+	o.Println("Closed", ticketID)
 
 	return nil
 }

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,22 +12,16 @@ import (
 
 const readyHelp = `  ready                  List actionable tickets (unblocked, not closed)`
 
-func cmdReady(io *IO, cfg ticket.Config, workDir string, args []string) error {
+func cmdReady(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		printReadyHelp(io)
+		printReadyHelp(o)
 
 		return nil
 	}
 
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
 	// List all tickets (need all for blocker resolution)
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, nil)
+	results, err := ticket.ListTickets(ticketDirAbs, ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
 		return err
 	}
@@ -38,7 +31,7 @@ func cmdReady(io *IO, cfg ticket.Config, workDir string, args []string) error {
 
 	// Collect warnings via IO
 	for _, w := range warnings {
-		io.WarnLLM(w.issue, w.action)
+		o.WarnLLM(w.issue, w.action)
 	}
 
 	// Sort by priority (ascending, P1 first), then by ID
@@ -53,7 +46,7 @@ func cmdReady(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	// Output formatted lines
 	for _, summary := range ready {
 		line := formatReadyLine(summary)
-		io.Println(line)
+		o.Println(line)
 	}
 
 	return nil
@@ -184,11 +177,11 @@ func formatReadyLine(summary *ticket.Summary) string {
 	return builder.String()
 }
 
-func printReadyHelp(io *IO) {
-	io.Println("Usage: tk ready")
-	io.Println("")
-	io.Println("List actionable tickets that can be worked on now.")
-	io.Println("Shows open tickets with all blockers closed.")
-	io.Println("")
-	io.Println("Output sorted by priority (P1 first), then by ID.")
+func printReadyHelp(o *IO) {
+	o.Println("Usage: tk ready")
+	o.Println("")
+	o.Println("List actionable tickets that can be worked on now.")
+	o.Println("Shows open tickets with all blockers closed.")
+	o.Println("")
+	o.Println("Output sorted by priority (P1 first), then by ID.")
 }

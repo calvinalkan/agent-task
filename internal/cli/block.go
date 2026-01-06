@@ -3,7 +3,6 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 	"slices"
 
 	"tk/internal/ticket"
@@ -11,12 +10,12 @@ import (
 
 const blockHelp = `  block <id> <blocker>   Add blocker to ticket`
 
-func cmdBlock(io *IO, cfg ticket.Config, workDir string, args []string) error {
+func cmdBlock(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		io.Println("Usage: tk block <id> <blocker-id>")
-		io.Println("")
-		io.Println("Add a blocker to a ticket's blocked-by list.")
+		o.Println("Usage: tk block <id> <blocker-id>")
+		o.Println("")
+		o.Println("Add a blocker to a ticket's blocked-by list.")
 
 		return nil
 	}
@@ -32,19 +31,13 @@ func cmdBlock(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	ticketID := args[0]
 	blockerID := args[1]
 
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
 	// Check if ticket exists
-	if !ticket.Exists(ticketDir, ticketID) {
+	if !ticket.Exists(ticketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	// Check if blocker ticket exists
-	if !ticket.Exists(ticketDir, blockerID) {
+	if !ticket.Exists(ticketDirAbs, blockerID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, blockerID)
 	}
 
@@ -53,7 +46,7 @@ func cmdBlock(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		return ticket.ErrCannotBlockSelf
 	}
 
-	path := ticket.Path(ticketDir, ticketID)
+	path := ticket.Path(ticketDirAbs, ticketID)
 
 	// Use locked operation to atomically check and update blocked-by list
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
@@ -83,12 +76,12 @@ func cmdBlock(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}
 
-	io.Println("Blocked", ticketID, "by", blockerID)
+	o.Println("Blocked", ticketID, "by", blockerID)
 
 	return nil
 }

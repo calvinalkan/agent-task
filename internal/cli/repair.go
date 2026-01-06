@@ -13,10 +13,10 @@ import (
 
 const repairHelp = `  repair <id>            Repair ticket inconsistencies`
 
-func cmdRepair(io *IO, cfg ticket.Config, workDir string, args []string) error {
+func cmdRepair(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		printRepairHelp(io)
+		printRepairHelp(o)
 
 		return nil
 	}
@@ -35,28 +35,22 @@ func cmdRepair(io *IO, cfg ticket.Config, workDir string, args []string) error {
 
 	remaining := flagSet.Args()
 
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
 	if *rebuildCache {
-		results, err := ticket.BuildCacheParallelLocked(ticketDir, nil)
+		results, err := ticket.BuildCacheParallelLocked(ticketDirAbs, nil)
 		if err != nil {
 			return err
 		}
 
 		for _, r := range results {
 			if r.Err != nil {
-				io.WarnLLM(
+				o.WarnLLM(
 					fmt.Sprintf("%s: %v", r.Path, r.Err),
 					"fix the ticket file or delete it if invalid",
 				)
 			}
 		}
 
-		io.Println("Rebuilt cache")
+		o.Println("Rebuilt cache")
 
 		return nil
 	}
@@ -67,21 +61,21 @@ func cmdRepair(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	}
 
 	if *allFlag {
-		return repairAllTickets(io, ticketDir, *dryRun)
+		return repairAllTickets(o, ticketDirAbs, *dryRun)
 	}
 
 	ticketID := remaining[0]
 
-	return repairSingleTicket(io, ticketDir, ticketID, *dryRun)
+	return repairSingleTicket(o, ticketDirAbs, ticketID, *dryRun)
 }
 
-func repairSingleTicket(io *IO, ticketDir, ticketID string, dryRun bool) error {
+func repairSingleTicket(o *IO, ticketDirAbs, ticketID string, dryRun bool) error {
 	// Check if ticket exists
-	if !ticket.Exists(ticketDir, ticketID) {
+	if !ticket.Exists(ticketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDir, ticketID)
+	path := ticket.Path(ticketDirAbs, ticketID)
 
 	// Read current blocked-by list
 	blockedBy, err := ticket.ReadTicketBlockedBy(path)
@@ -90,10 +84,10 @@ func repairSingleTicket(io *IO, ticketDir, ticketID string, dryRun bool) error {
 	}
 
 	// Find stale blockers
-	staleBlockers := findStaleBlockers(ticketDir, blockedBy)
+	staleBlockers := findStaleBlockers(ticketDirAbs, blockedBy)
 
 	if len(staleBlockers) == 0 {
-		io.Println("Nothing to repair")
+		o.Println("Nothing to repair")
 
 		return nil
 	}
@@ -101,9 +95,9 @@ func repairSingleTicket(io *IO, ticketDir, ticketID string, dryRun bool) error {
 	// Report what will be/was removed
 	for _, stale := range staleBlockers {
 		if dryRun {
-			io.Println("Would remove stale blocker:", stale)
+			o.Println("Would remove stale blocker:", stale)
 		} else {
-			io.Println("Removed stale blocker:", stale)
+			o.Println("Removed stale blocker:", stale)
 		}
 	}
 
@@ -124,23 +118,23 @@ func repairSingleTicket(io *IO, ticketDir, ticketID string, dryRun bool) error {
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}
 
-	io.Println("Repaired", ticketID)
+	o.Println("Repaired", ticketID)
 
 	return nil
 }
 
-func repairAllTickets(io *IO, ticketDir string, dryRun bool) error {
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, nil)
+func repairAllTickets(o *IO, ticketDirAbs string, dryRun bool) error {
+	results, err := ticket.ListTickets(ticketDirAbs, ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
 		return err
 	}
 
-	validIDs := buildValidIDMap(io, results)
+	validIDs := buildValidIDMap(o, results)
 	anyRepaired := false
 
 	for _, result := range results {
@@ -148,7 +142,7 @@ func repairAllTickets(io *IO, ticketDir string, dryRun bool) error {
 			continue
 		}
 
-		repaired, repairErr := repairTicketBlockers(io, result.Summary, validIDs, dryRun)
+		repaired, repairErr := repairTicketBlockers(o, result.Summary, validIDs, dryRun)
 		if repairErr != nil {
 			return repairErr
 		}
@@ -159,18 +153,18 @@ func repairAllTickets(io *IO, ticketDir string, dryRun bool) error {
 	}
 
 	if !anyRepaired {
-		io.Println("Nothing to repair")
+		o.Println("Nothing to repair")
 	}
 
 	return nil
 }
 
-func buildValidIDMap(io *IO, results []ticket.Result) map[string]bool {
+func buildValidIDMap(o *IO, results []ticket.Result) map[string]bool {
 	validIDs := make(map[string]bool)
 
 	for _, result := range results {
 		if result.Err != nil {
-			io.WarnLLM(
+			o.WarnLLM(
 				fmt.Sprintf("%s: %v", result.Path, result.Err),
 				"fix the ticket file or delete it if invalid",
 			)
@@ -184,7 +178,7 @@ func buildValidIDMap(io *IO, results []ticket.Result) map[string]bool {
 	return validIDs
 }
 
-func repairTicketBlockers(io *IO, summary *ticket.Summary, validIDs map[string]bool, dryRun bool) (bool, error) {
+func repairTicketBlockers(o *IO, summary *ticket.Summary, validIDs map[string]bool, dryRun bool) (bool, error) {
 	staleBlockers := findStaleBlockersFromMap(summary.BlockedBy, validIDs)
 
 	if len(staleBlockers) == 0 {
@@ -194,9 +188,9 @@ func repairTicketBlockers(io *IO, summary *ticket.Summary, validIDs map[string]b
 	// Report what will be/was removed
 	for _, stale := range staleBlockers {
 		if dryRun {
-			io.Println("Would remove stale blocker:", stale)
+			o.Println("Would remove stale blocker:", stale)
 		} else {
-			io.Println("Removed stale blocker:", stale)
+			o.Println("Removed stale blocker:", stale)
 		}
 	}
 
@@ -219,17 +213,17 @@ func repairTicketBlockers(io *IO, summary *ticket.Summary, validIDs map[string]b
 			return false, fmt.Errorf("updating cache: %w", cacheErr)
 		}
 
-		io.Println("Repaired", summary.ID)
+		o.Println("Repaired", summary.ID)
 	}
 
 	return true, nil
 }
 
-func findStaleBlockers(ticketDir string, blockedBy []string) []string {
+func findStaleBlockers(ticketDirAbs string, blockedBy []string) []string {
 	var stale []string
 
 	for _, blockerID := range blockedBy {
-		if !ticket.Exists(ticketDir, blockerID) {
+		if !ticket.Exists(ticketDirAbs, blockerID) {
 			stale = append(stale, blockerID)
 		}
 	}
@@ -261,13 +255,13 @@ func removeItems(slice, toRemove []string) []string {
 	return result
 }
 
-func printRepairHelp(io *IO) {
-	io.Println("Usage: tk repair <id>")
-	io.Println("       tk repair --all")
-	io.Println("")
-	io.Println("Fix ticket inconsistencies like stale blocker references.")
-	io.Println("")
-	io.Println("Options:")
-	io.Println("  --all      Repair all tickets instead of single ID")
-	io.Println("  --dry-run  Show what would be fixed without writing")
+func printRepairHelp(o *IO) {
+	o.Println("Usage: tk repair <id>")
+	o.Println("       tk repair --all")
+	o.Println("")
+	o.Println("Fix ticket inconsistencies like stale blocker references.")
+	o.Println("")
+	o.Println("Options:")
+	o.Println("  --all      Repair all tickets instead of single ID")
+	o.Println("  --dry-run  Show what would be fixed without writing")
 }

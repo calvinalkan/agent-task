@@ -2,19 +2,18 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"tk/internal/ticket"
 )
 
 const reopenHelp = `  reopen <id>            Set status to open`
 
-func cmdReopen(io *IO, cfg ticket.Config, workDir string, args []string) error {
+func cmdReopen(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		io.Println("Usage: tk reopen <id>")
-		io.Println("")
-		io.Println("Set ticket status back to open. Only works on closed tickets.")
+		o.Println("Usage: tk reopen <id>")
+		o.Println("")
+		o.Println("Set ticket status back to open. Only works on closed tickets.")
 
 		return nil
 	}
@@ -25,18 +24,12 @@ func cmdReopen(io *IO, cfg ticket.Config, workDir string, args []string) error {
 
 	ticketID := args[0]
 
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
 	// Check if ticket exists
-	if !ticket.Exists(ticketDir, ticketID) {
+	if !ticket.Exists(ticketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDir, ticketID)
+	path := ticket.Path(ticketDirAbs, ticketID)
 
 	// Use locked operation to atomically check status and update
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
@@ -82,12 +75,12 @@ func cmdReopen(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}
 
-	io.Println("Reopened", ticketID)
+	o.Println("Reopened", ticketID)
 
 	return nil
 }

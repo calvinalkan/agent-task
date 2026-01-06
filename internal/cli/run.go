@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"tk/internal/ticket"
@@ -55,6 +56,12 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 		return 1
 	}
 
+	// Resolve ticket directory to absolute path
+	ticketDirAbs := cfg.TicketDir
+	if !filepath.IsAbs(ticketDirAbs) {
+		ticketDirAbs = filepath.Join(workDir, ticketDirAbs)
+	}
+
 	if len(flags.remaining) == 0 {
 		printUsage(out)
 
@@ -79,27 +86,27 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 
 	switch cmd {
 	case "create":
-		cmdErr = cmdCreate(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdCreate(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "show":
-		cmdErr = cmdShow(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdShow(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "ls":
-		cmdErr = cmdLs(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdLs(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "start":
-		cmdErr = cmdStart(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdStart(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "close":
-		cmdErr = cmdClose(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdClose(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "reopen":
-		cmdErr = cmdReopen(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdReopen(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "block":
-		cmdErr = cmdBlock(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdBlock(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "unblock":
-		cmdErr = cmdUnblock(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdUnblock(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "ready":
-		cmdErr = cmdReady(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdReady(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "repair":
-		cmdErr = cmdRepair(ioCtx, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdRepair(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
 	case "editor":
-		cmdErr = cmdEditor(ioCtx, cfg, workDir, flags.remaining[1:], env)
+		cmdErr = cmdEditor(ioCtx, cfg, ticketDirAbs, flags.remaining[1:], env)
 	case "print-config":
 		cmdErr = cmdPrintConfig(ioCtx, cfg, sources)
 	default:

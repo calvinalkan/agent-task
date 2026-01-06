@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"tk/internal/ticket"
@@ -22,10 +21,10 @@ type lsOptions struct {
 	offset     int
 }
 
-func cmdLs(io *IO, cfg ticket.Config, workDir string, args []string) error {
+func cmdLs(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		printLsHelp(io)
+		printLsHelp(o)
 
 		return nil
 	}
@@ -33,12 +32,6 @@ func cmdLs(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	opts, err := parseLsFlags(args)
 	if err != nil {
 		return err
-	}
-
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
 	}
 
 	// List tickets with options - filtering happens in ListTickets
@@ -50,7 +43,7 @@ func cmdLs(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		Offset:   opts.offset,
 	}
 
-	results, err := ticket.ListTickets(ticketDir, listOpts, nil)
+	results, err := ticket.ListTickets(ticketDirAbs, listOpts, nil)
 	if err != nil {
 		return err
 	}
@@ -60,7 +53,7 @@ func cmdLs(io *IO, cfg ticket.Config, workDir string, args []string) error {
 
 	for _, result := range results {
 		if result.Err != nil {
-			io.WarnLLM(
+			o.WarnLLM(
 				fmt.Sprintf("%s: %v", result.Path, result.Err),
 				"fix the ticket file or delete it if invalid",
 			)
@@ -73,7 +66,7 @@ func cmdLs(io *IO, cfg ticket.Config, workDir string, args []string) error {
 
 	// Output valid tickets
 	for _, summary := range valid {
-		io.Println(formatTicketLine(summary))
+		o.Println(formatTicketLine(summary))
 	}
 
 	return nil
@@ -135,17 +128,17 @@ func parseLsFlags(args []string) (lsOptions, error) {
 	}, nil
 }
 
-func printLsHelp(io *IO) {
-	io.Println("Usage: tk ls [options]")
-	io.Println("")
-	io.Println("List all tickets. Output sorted by ID (oldest first).")
-	io.Println("")
-	io.Println("Options:")
-	io.Println("  --status=<status>    Filter by status (open|in_progress|closed)")
-	io.Println("  --priority=N         Filter by priority (1-4)")
-	io.Println("  --type=<type>        Filter by type (bug|feature|task|epic|chore)")
-	io.Println("  --limit=N            Max tickets to show [default: 100]")
-	io.Println("  --offset=N           Skip first N tickets [default: 0]")
+func printLsHelp(o *IO) {
+	o.Println("Usage: tk ls [options]")
+	o.Println("")
+	o.Println("List all tickets. Output sorted by ID (oldest first).")
+	o.Println("")
+	o.Println("Options:")
+	o.Println("  --status=<status>    Filter by status (open|in_progress|closed)")
+	o.Println("  --priority=N         Filter by priority (1-4)")
+	o.Println("  --type=<type>        Filter by type (bug|feature|task|epic|chore)")
+	o.Println("  --limit=N            Max tickets to show [default: 100]")
+	o.Println("  --offset=N           Skip first N tickets [default: 0]")
 }
 
 var errInvalidStatus = errors.New("invalid status")

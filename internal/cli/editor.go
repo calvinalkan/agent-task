@@ -83,17 +83,17 @@ func runEditor(editor, path string) error {
 }
 
 func cmdEditor(
-	io *IO,
+	o *IO,
 	cfg ticket.Config,
-	workDir string,
+	ticketDirAbs string,
 	args []string,
 	env map[string]string,
 ) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		io.Println("Usage: tk editor <id>")
-		io.Println("")
-		io.Println("Open a ticket in your preferred editor.")
+		o.Println("Usage: tk editor <id>")
+		o.Println("")
+		o.Println("Open a ticket in your preferred editor.")
 
 		return nil
 	}
@@ -104,18 +104,12 @@ func cmdEditor(
 
 	ticketID := args[0]
 
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
 	// Check if ticket exists
-	if !ticket.Exists(ticketDir, ticketID) {
+	if !ticket.Exists(ticketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDir, ticketID)
+	path := ticket.Path(ticketDirAbs, ticketID)
 
 	// Resolve editor
 	editor, resolveErr := resolveEditor(cfg, env)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"tk/internal/ticket"
@@ -29,7 +28,7 @@ const createHelp = `  create <title>         Create ticket, prints ID
     -a, --assignee         Assignee
     --blocked-by           Blocker ticket ID (repeatable)`
 
-func cmdCreate(io *IO, cfg ticket.Config, workDir string, args []string) error {
+func cmdCreate(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 	var helpBuf bytes.Buffer
 
 	flagSet := flag.NewFlagSet("create", flag.ContinueOnError)
@@ -52,7 +51,7 @@ func cmdCreate(io *IO, cfg ticket.Config, workDir string, args []string) error {
 
 	if hasHelpFlag(args) {
 		flagSet.Usage()
-		io.Printf("%s", helpBuf.String())
+		o.Printf("%s", helpBuf.String())
 
 		return nil
 	}
@@ -96,19 +95,13 @@ func cmdCreate(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		return errInvalidPriority
 	}
 
-	// Resolve ticket directory
-	ticketDir := cfg.TicketDir
-	if !filepath.IsAbs(ticketDir) {
-		ticketDir = filepath.Join(workDir, ticketDir)
-	}
-
 	// Validate blockers exist
 	for _, blocker := range *blockedBy {
 		if blocker == "" {
 			return fmt.Errorf("%w: --blocked-by", errEmptyValue)
 		}
 
-		if !ticket.Exists(ticketDir, blocker) {
+		if !ticket.Exists(ticketDirAbs, blocker) {
 			return fmt.Errorf("%w: %s", errInvalidBlocker, blocker)
 		}
 	}
@@ -128,7 +121,7 @@ func cmdCreate(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		Acceptance:    *acceptance,
 	}
 
-	ticketID, ticketPath, writeErr := ticket.WriteTicketAtomic(ticketDir, &tkt)
+	ticketID, ticketPath, writeErr := ticket.WriteTicketAtomic(ticketDirAbs, &tkt)
 	if writeErr != nil {
 		return writeErr
 	}
@@ -138,12 +131,12 @@ func cmdCreate(io *IO, cfg ticket.Config, workDir string, args []string) error {
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}
 
-	io.Println(ticketID)
+	o.Println(ticketID)
 
 	return nil
 }
