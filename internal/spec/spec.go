@@ -93,6 +93,8 @@ const (
 	ErrInvalidOffset        ErrCode = "invalid_offset"
 	ErrInvalidLimit         ErrCode = "invalid_limit"
 	ErrOffsetOutOfBounds    ErrCode = "offset_out_of_bounds"
+	ErrDuplicateBlocker     ErrCode = "duplicate_blocker"
+	ErrTicketClosed         ErrCode = "ticket_closed"
 )
 
 // KV is a key-value pair for error context.
@@ -244,7 +246,7 @@ type UserCreateInput struct {
 //   - Type is non-empty but not a valid Type
 //   - Priority is non-zero but not in range 1-4
 //   - ParentID is non-empty but references a non-existent or closed ticket
-//   - any BlockedBy ID is empty or references a non-existent ticket
+//   - any BlockedBy ID is empty, references a non-existent ticket, or is duplicated
 //
 // Panics if:
 //   - fuzz.ID is lexicographically less than or equal to the previous ID (violates ordering invariant)
@@ -292,6 +294,7 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 		}
 	}
 
+	seen := make(map[string]bool)
 	for _, blockerID := range user.BlockedBy {
 		if blockerID == "" {
 			return "", newErr(ErrBlockerIDRequired, kv("blocker_id", blockerID))
@@ -300,6 +303,11 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 		if _, ok := m.tickets[blockerID]; !ok {
 			return "", newErr(ErrBlockerNotFound, kv("blocker_id", blockerID))
 		}
+
+		if seen[blockerID] {
+			return "", newErr(ErrDuplicateBlocker, kv("blocker_id", blockerID))
+		}
+		seen[blockerID] = true
 	}
 
 	// Enforce ordering invariants
@@ -462,6 +470,7 @@ type UserReopenInput struct {
 //   - the ticket doesn't exist
 //   - the ticket is in StatusOpen
 //   - the ticket is in StatusInProgress
+//   - the ticket has a parent that is closed (must reopen parent first)
 //
 // Panics if the ticket has an unknown status (invalid spec state).
 func (m *Model) Reopen(user UserReopenInput) *Error {
@@ -481,6 +490,13 @@ func (m *Model) Reopen(user UserReopenInput) *Error {
 		panic(fmt.Sprintf("invalid spec state: ticket %q has unknown status %q", user.ID, tk.Status))
 	}
 
+	if tk.ParentID != "" {
+		parent := m.tickets[tk.ParentID]
+		if parent.Status == StatusClosed {
+			return newErr(ErrParentAlreadyClosed, kv("id", user.ID), kv("parent_id", tk.ParentID))
+		}
+	}
+
 	tk.Status = StatusOpen
 	tk.ClosedAt = time.Time{}
 
@@ -497,6 +513,7 @@ type UserBlockInput struct {
 //
 // Returns an error if:
 //   - the ticket doesn't exist
+//   - the ticket is closed
 //   - user.BlockerID is empty
 //   - the blocker ticket doesn't exist
 //   - user.ID == user.BlockerID (can't block itself)
@@ -506,6 +523,10 @@ func (m *Model) Block(user UserBlockInput) *Error {
 	tk, ok := m.tickets[user.ID]
 	if !ok {
 		return newErr(ErrTicketNotFound, kv("id", user.ID))
+	}
+
+	if tk.Status == StatusClosed {
+		return newErr(ErrTicketClosed, kv("id", user.ID))
 	}
 
 	if user.BlockerID == "" {
@@ -581,11 +602,16 @@ type UserUnblockInput struct {
 //
 // Returns an error if:
 //   - the ticket doesn't exist
+//   - the ticket is closed
 //   - the ticket is not blocked by user.BlockerID
 func (m *Model) Unblock(user UserUnblockInput) *Error {
 	tk, ok := m.tickets[user.ID]
 	if !ok {
 		return newErr(ErrTicketNotFound, kv("id", user.ID))
+	}
+
+	if tk.Status == StatusClosed {
+		return newErr(ErrTicketClosed, kv("id", user.ID))
 	}
 
 	idx := slices.Index(tk.BlockedBy, user.BlockerID)
