@@ -78,7 +78,9 @@ const (
 	ErrNotBlocked           ErrCode = "not_blocked"
 	ErrBlockerCycle         ErrCode = "blocker_cycle"
 	ErrParentNotFound       ErrCode = "parent_not_found"
+	ErrParentAlreadyClosed  ErrCode = "parent_already_closed"
 	ErrParentCycle          ErrCode = "parent_cycle"
+	ErrParentNotStarted     ErrCode = "parent_not_started"
 	ErrHasOpenChildren      ErrCode = "has_open_children"
 	ErrCantStartNotOpen     ErrCode = "cant_start_not_open"
 	ErrCantCloseOpen        ErrCode = "cant_close_open"
@@ -236,7 +238,11 @@ type UserCreateInput struct {
 //   - fuzz.ID is empty
 //   - fuzz.CreatedAt is not a valid ISO 8601 timestamp
 //   - a ticket with the given ID already exists
-//   - user input validation fails (see ValidateUserInput for details)
+//   - Title is empty or whitespace-only
+//   - Type is non-empty but not a valid Type
+//   - Priority is non-zero but not in range 1-4
+//   - ParentID is non-empty but references a non-existent or closed ticket
+//   - any BlockedBy ID is empty or references a non-existent ticket
 //
 // Panics if:
 //   - fuzz.ID is lexicographically less than or equal to the previous ID (violates ordering invariant)
@@ -255,8 +261,43 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 		return "", newErr(ErrTicketAlreadyExists, kv("id", fuzz.ID))
 	}
 
-	if err := m.ValidateUserInput(user); err != nil {
-		return "", err
+	if strings.TrimSpace(user.Title) == "" {
+		return "", newErr(ErrTitleRequired, kv("title", user.Title))
+	}
+
+	if user.Type != "" {
+		if _, err := toType(user.Type); err != nil {
+			return "", err
+		}
+	}
+
+	if user.Priority != 0 {
+		if _, err := toPriority(user.Priority); err != nil {
+			return "", err
+		}
+	}
+
+	if user.ParentID != "" {
+		parent, ok := m.tickets[user.ParentID]
+		if !ok {
+			return "", newErr(ErrParentNotFound, kv("parent_id", user.ParentID))
+		}
+
+		if parent.Status == StatusClosed {
+			return "", newErr(ErrParentAlreadyClosed,
+				kv("parent_id", user.ParentID),
+				kv("status", string(parent.Status)))
+		}
+	}
+
+	for _, blockerID := range user.BlockedBy {
+		if blockerID == "" {
+			return "", newErr(ErrBlockerIDRequired, kv("blocker_id", blockerID))
+		}
+
+		if _, ok := m.tickets[blockerID]; !ok {
+			return "", newErr(ErrBlockerNotFound, kv("blocker_id", blockerID))
+		}
 	}
 
 	// Enforce ordering invariants
@@ -303,51 +344,6 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 	return fuzz.ID, nil
 }
 
-// ValidateUserInput checks UserCreateInput for semantic correctness without modifying the model.
-//
-// Returns an error if:
-//   - Title is empty or whitespace-only
-//   - Type is non-empty but not a valid Type
-//   - Priority is non-zero but not in range 1-4
-//   - ParentID is non-empty but references a ticket that doesn't exist
-//   - any BlockedBy ID is empty
-//   - any BlockedBy ID references a ticket that doesn't exist
-func (m *Model) ValidateUserInput(in UserCreateInput) *Error {
-	if strings.TrimSpace(in.Title) == "" {
-		return newErr(ErrTitleRequired)
-	}
-
-	if in.Type != "" {
-		if _, err := toType(in.Type); err != nil {
-			return err
-		}
-	}
-
-	if in.Priority != 0 {
-		if _, err := toPriority(in.Priority); err != nil {
-			return err
-		}
-	}
-
-	if in.ParentID != "" {
-		if _, ok := m.tickets[in.ParentID]; !ok {
-			return newErr(ErrParentNotFound, kv("parent_id", in.ParentID))
-		}
-	}
-
-	for _, blockerID := range in.BlockedBy {
-		if blockerID == "" {
-			return newErr(ErrBlockerIDRequired)
-		}
-
-		if _, ok := m.tickets[blockerID]; !ok {
-			return newErr(ErrBlockerNotFound, kv("blocker_id", blockerID))
-		}
-	}
-
-	return nil
-}
-
 // UserStartInput contains user-provided values for starting a ticket.
 type UserStartInput struct {
 	ID string // ticket ID to start
@@ -358,6 +354,7 @@ type UserStartInput struct {
 // Returns an error if:
 //   - the ticket doesn't exist
 //   - the ticket is not in StatusOpen
+//   - the ticket has a parent that is Open (parent must be started first)
 func (m *Model) Start(user UserStartInput) *Error {
 	tk, ok := m.tickets[user.ID]
 	if !ok {
@@ -366,6 +363,13 @@ func (m *Model) Start(user UserStartInput) *Error {
 
 	if tk.Status != StatusOpen {
 		return newErr(ErrCantStartNotOpen, kv("id", user.ID), kv("status", string(tk.Status)))
+	}
+
+	if tk.ParentID != "" {
+		parent := m.tickets[tk.ParentID]
+		if parent.Status == StatusOpen {
+			return newErr(ErrParentNotStarted, kv("id", user.ID), kv("parent_id", tk.ParentID))
+		}
 	}
 
 	tk.Status = StatusInProgress
@@ -505,7 +509,7 @@ func (m *Model) Block(user UserBlockInput) *Error {
 	}
 
 	if user.BlockerID == "" {
-		return newErr(ErrBlockerIDRequired)
+		return newErr(ErrBlockerIDRequired, kv("blocker_id", user.BlockerID))
 	}
 
 	if _, ok := m.tickets[user.BlockerID]; !ok {
