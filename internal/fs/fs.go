@@ -8,15 +8,14 @@
 //
 // Example usage:
 //
-//	fs := fs.NewReal()
-//	f, err := fs.Open("config.json")
+//	fsys := fs.NewReal()
+//	f, err := fsys.Open("config.json")
 //	if err != nil {
 //	    return err
 //	}
 //	defer f.Close()
 //
 //	// Works with all stdlib io functions:
-//	scanner := bufio.NewScanner(f)
 //	data, _ := io.ReadAll(f)
 package fs
 
@@ -30,6 +29,8 @@ import (
 // This interface is satisfied by [os.File] and can be used with all
 // standard library functions that accept [io.Reader], [io.Writer],
 // [io.Seeker], or [io.Closer].
+//
+// Implementations must be safe for concurrent use by multiple goroutines.
 //
 // Example:
 //
@@ -61,22 +62,6 @@ type File interface {
 	Sync() error
 }
 
-// Locker represents a held file lock.
-// Call [Locker.Close] to release the lock.
-//
-// Example:
-//
-//	lock, err := fs.Lock("data.db")
-//	if err != nil {
-//	    return err // lock contention or timeout
-//	}
-//	defer lock.Close() // always release
-//
-//	// ... exclusive access to data.db ...
-type Locker interface {
-	io.Closer
-}
-
 // FS defines filesystem operations for reading, writing, and managing files.
 //
 // Two implementations are provided:
@@ -85,9 +70,22 @@ type Locker interface {
 //
 // All methods mirror their [os] package equivalents but can be intercepted
 // for testing with fault injection.
+//
+// Paths use OS semantics (like the os package and path/filepath), not the slash-separated
+// paths used by the standard library io/fs package.
+//
+// Some implementations expose additional capabilities beyond [FS] (for example
+// [Real.WriteFileAtomic]).
+//
+// This interface intentionally does not include a WriteFile helper. A naive
+// "write file" convenience typically spans multiple syscalls (open/truncate,
+// write, close) and is not atomic or durable: errors or crashes can leave a
+// partially written or empty file, and it doesn't let callers control
+// durability via [File.Sync]. Prefer explicit [FS.OpenFile] + [File.Sync], or
+// an atomic replace helper like [Real.WriteFileAtomic].
+//
+// Implementations must be safe for concurrent use by multiple goroutines.
 type FS interface {
-	// --- File Operations ---
-
 	// Open opens a file for reading. See [os.Open].
 	// The returned [File] can be used with [bufio], [io], and other stdlib packages.
 	Open(path string) (File, error)
@@ -103,18 +101,9 @@ type FS interface {
 	// [os.O_APPEND], [os.O_CREATE], [os.O_EXCL], [os.O_TRUNC].
 	OpenFile(path string, flag int, perm os.FileMode) (File, error)
 
-	// --- Convenience Methods ---
-
 	// ReadFile reads an entire file into memory. See [os.ReadFile].
 	// For large files, prefer [FS.Open] with streaming reads.
 	ReadFile(path string) ([]byte, error)
-
-	// WriteFileAtomic writes data to a file atomically.
-	// Uses a temp file + rename to prevent partial writes on crash.
-	// This is safer than [os.WriteFile] for critical data.
-	WriteFileAtomic(path string, data []byte, perm os.FileMode) error
-
-	// --- Directory Operations ---
 
 	// ReadDir reads a directory and returns its entries. See [os.ReadDir].
 	// Entries are sorted by name.
@@ -124,8 +113,6 @@ type FS interface {
 	// No error if the directory already exists.
 	MkdirAll(path string, perm os.FileMode) error
 
-	// --- Metadata ---
-
 	// Stat returns file info. See [os.Stat].
 	// Returns [os.ErrNotExist] if file doesn't exist.
 	Stat(path string) (os.FileInfo, error)
@@ -133,8 +120,6 @@ type FS interface {
 	// Exists reports whether a file or directory exists.
 	// Returns (false, nil) if not found, (false, err) on other errors.
 	Exists(path string) (bool, error)
-
-	// --- Mutations ---
 
 	// Remove deletes a file or empty directory. See [os.Remove].
 	// For recursive deletion, use [FS.RemoveAll].
@@ -147,15 +132,6 @@ type FS interface {
 	// Rename moves/renames a file or directory. See [os.Rename].
 	// Atomic on the same filesystem.
 	Rename(oldpath, newpath string) error
-
-	// --- Locking ---
-
-	// Lock acquires an exclusive file lock.
-	// Blocks until the lock is acquired or returns error on timeout.
-	// Call [Locker.Close] to release the lock.
-	//
-	// Used for coordinating access between processes.
-	Lock(path string) (Locker, error)
 }
 
 // Compile-time interface checks.

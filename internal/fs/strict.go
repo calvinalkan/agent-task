@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -14,10 +15,15 @@ import (
 // This keeps [StrictTestFS] usable from tests in other packages without
 // depending on _test.go files.
 type TestBuilder interface {
+	// [testing.T.Helper]
 	Helper()
+	// [testing.T.Cleanup]
 	Cleanup(func())
+	// [testing.T.Failed]
 	Failed() bool
+	// [testing.T.Logf]
 	Logf(format string, args ...any)
+	// [testing.T.Fatalf]
 	Fatalf(format string, args ...any)
 }
 
@@ -32,22 +38,32 @@ type StrictTestFS struct {
 	trace *traceLog
 }
 
+// StrictTestFSOptions configures a [StrictTestFS].
+type StrictTestFSOptions struct {
+	// FS is the underlying filesystem to wrap.
+	FS FS
+	// TraceCapacity is the max number of operations to keep in the trace log.
+	// Defaults to 200. Set to a pointer to 0 to disable tracing.
+	TraceCapacity *int
+}
+
 // NewStrictTestFS creates a new [StrictTestFS] wrapping the given [FS].
 //
 // On test failure, logs the trace of recent FS operations via tb.Cleanup.
-// Panics if tb or fs is nil.
-func NewStrictTestFS(tb TestBuilder, fs FS) *StrictTestFS {
+func NewStrictTestFS(tb TestBuilder, opts StrictTestFSOptions) *StrictTestFS {
 	tb.Helper()
 
 	s := &StrictTestFS{
 		tb:    tb,
-		fs:    fs,
-		trace: newTraceLog(defaultStrictTraceCapacity),
+		fs:    opts.FS,
+		trace: newTraceLog(opts.TraceCapacity),
 	}
 
 	tb.Cleanup(func() {
 		if tb.Failed() {
-			tb.Logf("fs trace:\n%s", s.Trace())
+			if trace := s.Trace(); trace != "" {
+				tb.Logf("fs trace:\n%s", trace)
+			}
 		}
 	})
 
@@ -59,228 +75,150 @@ func (s *StrictTestFS) Trace() string {
 	return s.trace.String()
 }
 
-// Underlying returns the wrapped [FS].
-func (s *StrictTestFS) Underlying() FS {
-	return s.fs
-}
-
-// A wrapper for [FS.Open] that traces and validates errors.
 func (s *StrictTestFS) Open(path string) (File, error) {
 	s.tb.Helper()
-
 	f, err := s.fs.Open(path)
-	s.trace.add("open", path, "", "", err)
-	s.fatalIfReal("Open", err)
 
-	if err != nil {
-		return nil, err
-	}
-
-	return &strictFile{tb: s.tb, f: f, trace: s.trace, path: path}, nil
+	return s.wrapFile("open", path, f, err)
 }
 
-// A wrapper for [FS.Create] that traces and validates errors.
 func (s *StrictTestFS) Create(path string) (File, error) {
 	s.tb.Helper()
-
 	f, err := s.fs.Create(path)
-	s.trace.add("create", path, "", "", err)
-	s.fatalIfReal("Create", err)
 
-	if err != nil {
-		return nil, err
-	}
-
-	return &strictFile{tb: s.tb, f: f, trace: s.trace, path: path}, nil
+	return s.wrapFile("create", path, f, err)
 }
 
-// A wrapper for [FS.OpenFile] that traces and validates errors.
 func (s *StrictTestFS) OpenFile(path string, flag int, perm os.FileMode) (File, error) {
 	s.tb.Helper()
-
 	f, err := s.fs.OpenFile(path, flag, perm)
-	s.trace.add("openfile", path, "", fmt.Sprintf("flag=%d perm=%#o", flag, perm), err)
-	s.fatalIfReal("OpenFile", err)
 
-	if err != nil {
-		return nil, err
-	}
-
-	return &strictFile{tb: s.tb, f: f, trace: s.trace, path: path}, nil
+	return s.wrapFile("openfile", path, f, err, attr("flag", strconv.Itoa(flag)), attr("perm", fmt.Sprintf("%#o", perm)))
 }
 
-// A wrapper for [FS.ReadFile] that traces and validates errors.
 func (s *StrictTestFS) ReadFile(path string) ([]byte, error) {
 	s.tb.Helper()
-
 	data, err := s.fs.ReadFile(path)
-	s.trace.add("readfile", path, "", fmt.Sprintf("n=%d", len(data)), err)
-	s.fatalIfReal("ReadFile", err)
 
-	return data, err
+	return data, s.wrap("readfile", path, err, attr("n", strconv.Itoa(len(data))))
 }
 
-// A wrapper for [FS.WriteFileAtomic] that traces and validates errors.
-func (s *StrictTestFS) WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
-	s.tb.Helper()
-
-	err := s.fs.WriteFileAtomic(path, data, perm)
-	s.trace.add("writefileatomic", path, "", fmt.Sprintf("n=%d perm=%#o", len(data), perm), err)
-	s.fatalIfReal("WriteFileAtomic", err)
-
-	return err
-}
-
-// A wrapper for [FS.ReadDir] that traces and validates errors.
 func (s *StrictTestFS) ReadDir(path string) ([]os.DirEntry, error) {
 	s.tb.Helper()
-
 	entries, err := s.fs.ReadDir(path)
-	s.trace.add("readdir", path, "", fmt.Sprintf("n=%d", len(entries)), err)
-	s.fatalIfReal("ReadDir", err)
 
-	return entries, err
+	return entries, s.wrap("readdir", path, err, attr("n", strconv.Itoa(len(entries))))
 }
 
-// A wrapper for [FS.MkdirAll] that traces and validates errors.
 func (s *StrictTestFS) MkdirAll(path string, perm os.FileMode) error {
 	s.tb.Helper()
 
-	err := s.fs.MkdirAll(path, perm)
-	s.trace.add("mkdirall", path, "", fmt.Sprintf("perm=%#o", perm), err)
-	s.fatalIfReal("MkdirAll", err)
-
-	return err
+	return s.wrap("mkdirall", path, s.fs.MkdirAll(path, perm), attr("perm", fmt.Sprintf("%#o", perm)))
 }
 
-// A wrapper for [FS.Stat] that traces and validates errors.
 func (s *StrictTestFS) Stat(path string) (os.FileInfo, error) {
 	s.tb.Helper()
-
 	info, err := s.fs.Stat(path)
-	s.trace.add("stat", path, "", "", err)
-	s.fatalIfReal("Stat", err)
 
-	return info, err
+	return info, s.wrap("stat", path, err)
 }
 
-// A wrapper for [FS.Exists] that traces and validates errors.
 func (s *StrictTestFS) Exists(path string) (bool, error) {
 	s.tb.Helper()
-
 	exists, err := s.fs.Exists(path)
-	s.trace.add("exists", path, "", fmt.Sprintf("exists=%t", exists), err)
-	s.fatalIfReal("Exists", err)
 
-	return exists, err
+	return exists, s.wrap("exists", path, err, attr("exists", strconv.FormatBool(exists)))
 }
 
-// A wrapper for [FS.Remove] that traces and validates errors.
 func (s *StrictTestFS) Remove(path string) error {
 	s.tb.Helper()
 
-	err := s.fs.Remove(path)
-	s.trace.add("remove", path, "", "", err)
-	s.fatalIfReal("Remove", err)
-
-	return err
+	return s.wrap("remove", path, s.fs.Remove(path))
 }
 
-// A wrapper for [FS.RemoveAll] that traces and validates errors.
 func (s *StrictTestFS) RemoveAll(path string) error {
 	s.tb.Helper()
 
-	err := s.fs.RemoveAll(path)
-	s.trace.add("removeall", path, "", "", err)
-	s.fatalIfReal("RemoveAll", err)
-
-	return err
+	return s.wrap("removeall", path, s.fs.RemoveAll(path))
 }
 
-// A wrapper for [FS.Rename] that traces and validates errors.
 func (s *StrictTestFS) Rename(oldpath, newpath string) error {
 	s.tb.Helper()
 
-	err := s.fs.Rename(oldpath, newpath)
-	s.trace.add("rename", oldpath, newpath, "", err)
-	s.fatalIfReal("Rename", err)
-
-	return err
-}
-
-// A wrapper for [FS.Lock] that traces and validates errors.
-func (s *StrictTestFS) Lock(path string) (Locker, error) {
-	s.tb.Helper()
-
-	lock, err := s.fs.Lock(path)
-	s.trace.add("lock", path, "", "", err)
-	s.fatalIfReal("Lock", err)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &strictLocker{tb: s.tb, l: lock, trace: s.trace, path: path}, nil
+	return s.wrap("rename", oldpath, s.fs.Rename(oldpath, newpath), attr("dest", newpath))
 }
 
 // Interface compliance.
 var _ FS = (*StrictTestFS)(nil)
 
-// --- Unexported ---
-
-const defaultStrictTraceCapacity = 200
-
-// fatalIfReal fails the test if err is a real (non-injected) filesystem error.
-// Ignores nil and [io.EOF] (normal streaming signal).
-func (s *StrictTestFS) fatalIfReal(op string, err error) {
+// wrap traces the operation and fatals on real (non-injected) errors.
+func (s *StrictTestFS) wrap(op, path string, err error, attrs ...kv) error {
 	s.tb.Helper()
 
-	if err == nil || IsInjected(err) {
-		return
+	s.trace.add(op, path, err, attrs...)
+
+	if err != nil && !IsChaosErr(err) && !errors.Is(err, io.EOF) {
+		trace := s.Trace()
+		if trace != "" {
+			trace = "\n" + trace
+		}
+		s.tb.Fatalf("strictfs: underlying filesystem error: %v%s", err, trace)
 	}
 
-	// io.EOF is a normal signal for streaming reads (not an OS failure).
-	if errors.Is(err, io.EOF) {
-		return
+	return err
+}
+
+// wrapFile traces the operation, fatals on real errors, and wraps the file.
+func (s *StrictTestFS) wrapFile(op, path string, f File, err error, attrs ...kv) (File, error) {
+	s.tb.Helper()
+
+	if err := s.wrap(op, path, err, attrs...); err != nil {
+		return nil, err
 	}
 
-	s.tb.Fatalf("unexpected real fs error during %s: %v\nfs trace:\n%s", op, err, s.Trace())
+	return &strictFile{tb: s.tb, f: f, trace: s.trace, path: path}, nil
+}
+
+// kv is a key-value pair for trace context.
+type kv struct {
+	k string
+	v string
+}
+
+func attr(k, v string) kv {
+	return kv{k: k, v: v}
 }
 
 // traceEvent records a single FS operation.
 type traceEvent struct {
-	Seq      uint64
-	Op       string
-	Path     string
-	Path2    string
-	Info     string
-	Injected bool
-	Err      error
+	seq      uint64
+	op       string
+	path     string
+	err      error
+	injected bool
+	attrs    []kv
 }
 
 func (e traceEvent) String() string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "#%d %s", e.Seq, e.Op)
+	fmt.Fprintf(&b, "#%d %s", e.seq, e.op)
 
-	if e.Path != "" {
-		fmt.Fprintf(&b, " path=%q", e.Path)
+	if e.path != "" {
+		fmt.Fprintf(&b, " path=%q", e.path)
 	}
 
-	if e.Path2 != "" {
-		fmt.Fprintf(&b, " path2=%q", e.Path2)
+	for _, a := range e.attrs {
+		fmt.Fprintf(&b, " %s=%s", a.k, a.v)
 	}
 
-	if e.Info != "" {
-		fmt.Fprintf(&b, " %s", e.Info)
-	}
-
-	if e.Err == nil {
+	if e.err == nil {
 		b.WriteString(" ok")
+
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, " err=%v injected=%t", e.Err, e.Injected)
+	fmt.Fprintf(&b, " err=%v injected=%t", e.err, e.injected)
 
 	return b.String()
 }
@@ -289,42 +227,46 @@ func (e traceEvent) String() string {
 type traceLog struct {
 	mu       sync.Mutex
 	capacity int
-
-	events []traceEvent
-	next   int
-	full   bool
-	seq    uint64
+	events   []traceEvent
+	next     int
+	full     bool
+	seq      uint64
 }
 
-func newTraceLog(capacity int) *traceLog {
-	if capacity < 1 {
-		capacity = 1
+func newTraceLog(capacity *int) *traceLog {
+	cap := 200
+	if capacity != nil {
+		cap = *capacity
 	}
 
 	return &traceLog{
-		capacity: capacity,
-		events:   make([]traceEvent, 0, capacity),
+		capacity: cap,
+		events:   make([]traceEvent, 0, cap),
 	}
 }
 
-func (t *traceLog) add(op, path, path2, info string, err error) {
+func (t *traceLog) add(op, path string, err error, attrs ...kv) {
+	if t.capacity == 0 {
+		return
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	t.seq++
 
 	event := traceEvent{
-		Seq:      t.seq,
-		Op:       op,
-		Path:     path,
-		Path2:    path2,
-		Info:     info,
-		Err:      err,
-		Injected: IsInjected(err),
+		seq:      t.seq,
+		op:       op,
+		path:     path,
+		err:      err,
+		injected: IsChaosErr(err),
+		attrs:    attrs,
 	}
 
 	if len(t.events) < t.capacity {
 		t.events = append(t.events, event)
+
 		return
 	}
 
@@ -351,7 +293,7 @@ func (t *traceLog) snapshot() []traceEvent {
 func (t *traceLog) String() string {
 	events := t.snapshot()
 	if len(events) == 0 {
-		return "(no events)"
+		return ""
 	}
 
 	var b strings.Builder
@@ -375,119 +317,63 @@ type strictFile struct {
 	path  string
 }
 
-// Interface compliance.
 var _ File = (*strictFile)(nil)
 
-// A wrapper for [File.Read] that traces and validates errors.
+func (sf *strictFile) wrap(op string, err error, attrs ...kv) error {
+	sf.tb.Helper()
+	sf.trace.add(op, sf.path, err, attrs...)
+
+	if err != nil && !IsChaosErr(err) && !errors.Is(err, io.EOF) {
+		trace := sf.trace.String()
+		if trace != "" {
+			trace = "\n" + trace
+		}
+		sf.tb.Fatalf("strictfs: unexpected real fs error: %v%s", err, trace)
+	}
+
+	return err
+}
+
 func (sf *strictFile) Read(p []byte) (int, error) {
 	sf.tb.Helper()
-
 	n, err := sf.f.Read(p)
-	sf.trace.add("file.read", sf.path, "", fmt.Sprintf("n=%d", n), err)
 
-	if err != nil && !errors.Is(err, io.EOF) {
-		if !IsInjected(err) {
-			sf.tb.Fatalf("unexpected real fs error during File.Read: %v\nfs trace:\n%s", err, sf.trace.String())
-		}
-	}
-
-	return n, err
+	return n, sf.wrap("file.read", err, attr("n", strconv.Itoa(n)))
 }
 
-// A wrapper for [File.Write] that traces and validates errors.
 func (sf *strictFile) Write(p []byte) (int, error) {
 	sf.tb.Helper()
-
 	n, err := sf.f.Write(p)
-	sf.trace.add("file.write", sf.path, "", fmt.Sprintf("n=%d", n), err)
 
-	if err != nil && !IsInjected(err) {
-		sf.tb.Fatalf("unexpected real fs error during File.Write: %v\nfs trace:\n%s", err, sf.trace.String())
-	}
-
-	return n, err
+	return n, sf.wrap("file.write", err, attr("n", strconv.Itoa(n)))
 }
 
-// A wrapper for [File.Close] that traces and validates errors.
 func (sf *strictFile) Close() error {
 	sf.tb.Helper()
 
-	err := sf.f.Close()
-	sf.trace.add("file.close", sf.path, "", "", err)
-
-	if err != nil && !IsInjected(err) {
-		sf.tb.Fatalf("unexpected real fs error during File.Close: %v\nfs trace:\n%s", err, sf.trace.String())
-	}
-
-	return err
+	return sf.wrap("file.close", sf.f.Close())
 }
 
-// A wrapper for [File.Seek] that traces and validates errors.
 func (sf *strictFile) Seek(offset int64, whence int) (int64, error) {
 	sf.tb.Helper()
-
 	pos, err := sf.f.Seek(offset, whence)
-	sf.trace.add("file.seek", sf.path, "", fmt.Sprintf("offset=%d whence=%d pos=%d", offset, whence, pos), err)
 
-	if err != nil && !IsInjected(err) {
-		sf.tb.Fatalf("unexpected real fs error during File.Seek: %v\nfs trace:\n%s", err, sf.trace.String())
-	}
-
-	return pos, err
+	return pos, sf.wrap("file.seek", err, attr("offset", strconv.FormatInt(offset, 10)), attr("whence", strconv.Itoa(whence)), attr("pos", strconv.FormatInt(pos, 10)))
 }
 
-// A passthrough wrapper for [File.Fd].
-func (sf *strictFile) Fd() uintptr { return sf.f.Fd() }
+func (sf *strictFile) Fd() uintptr {
+	return sf.f.Fd()
+}
 
-// A wrapper for [File.Stat] that traces and validates errors.
 func (sf *strictFile) Stat() (os.FileInfo, error) {
 	sf.tb.Helper()
-
 	info, err := sf.f.Stat()
-	sf.trace.add("file.stat", sf.path, "", "", err)
 
-	if err != nil && !IsInjected(err) {
-		sf.tb.Fatalf("unexpected real fs error during File.Stat: %v\nfs trace:\n%s", err, sf.trace.String())
-	}
-
-	return info, err
+	return info, sf.wrap("file.stat", err)
 }
 
-// A wrapper for [File.Sync] that traces and validates errors.
 func (sf *strictFile) Sync() error {
 	sf.tb.Helper()
 
-	err := sf.f.Sync()
-	sf.trace.add("file.sync", sf.path, "", "", err)
-
-	if err != nil && !IsInjected(err) {
-		sf.tb.Fatalf("unexpected real fs error during File.Sync: %v\nfs trace:\n%s", err, sf.trace.String())
-	}
-
-	return err
-}
-
-// strictLocker wraps a [Locker] to trace and validate errors.
-type strictLocker struct {
-	tb    TestBuilder
-	l     Locker
-	trace *traceLog
-	path  string
-}
-
-// Interface compliance.
-var _ Locker = (*strictLocker)(nil)
-
-// A wrapper for [Locker.Close] that traces and validates errors.
-func (sl *strictLocker) Close() error {
-	sl.tb.Helper()
-
-	err := sl.l.Close()
-	sl.trace.add("lock.close", sl.path, "", "", err)
-
-	if err != nil && !IsInjected(err) {
-		sl.tb.Fatalf("unexpected real fs error during Locker.Close: %v\nfs trace:\n%s", err, sl.trace.String())
-	}
-
-	return err
+	return sf.wrap("file.sync", sf.f.Sync())
 }
