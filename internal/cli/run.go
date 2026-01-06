@@ -3,8 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"tk/internal/ticket"
@@ -34,32 +32,18 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 		return 1
 	}
 
-	// Default workDir to current directory
-	workDir := flags.workDir
-	if workDir == "" {
-		workDir, err = os.Getwd()
-		if err != nil {
-			fprintln(errOut, "error: cannot get working directory:", err)
-
-			return 1
-		}
-	}
-
-	// Load and validate config
-	cliOverrides := ticket.Config{TicketDir: flags.ticketDir}
-
-	cfg, sources, err := ticket.LoadConfig(workDir, flags.configPath, cliOverrides, flags.hasTicketDirOverride, env)
+	// Load and validate config (resolves all paths internally)
+	cfg, sources, err := ticket.LoadConfig(ticket.LoadConfigInput{
+		WorkDirOverride:   flags.workDir,
+		ConfigPath:        flags.configPath,
+		TicketDirOverride: flags.ticketDir,
+		Env:               env,
+	})
 	if err != nil {
 		fprintln(errOut, "error:", err)
 		printUsage(errOut)
 
 		return 1
-	}
-
-	// Resolve ticket directory to absolute path
-	ticketDirAbs := cfg.TicketDir
-	if !filepath.IsAbs(ticketDirAbs) {
-		ticketDirAbs = filepath.Join(workDir, ticketDirAbs)
 	}
 
 	if len(flags.remaining) == 0 {
@@ -86,27 +70,27 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 
 	switch cmd {
 	case "create":
-		cmdErr = cmdCreate(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdCreate(ioCtx, cfg, flags.remaining[1:])
 	case "show":
-		cmdErr = cmdShow(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdShow(ioCtx, cfg, flags.remaining[1:])
 	case "ls":
-		cmdErr = cmdLs(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdLs(ioCtx, cfg, flags.remaining[1:])
 	case "start":
-		cmdErr = cmdStart(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdStart(ioCtx, cfg, flags.remaining[1:])
 	case "close":
-		cmdErr = cmdClose(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdClose(ioCtx, cfg, flags.remaining[1:])
 	case "reopen":
-		cmdErr = cmdReopen(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdReopen(ioCtx, cfg, flags.remaining[1:])
 	case "block":
-		cmdErr = cmdBlock(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdBlock(ioCtx, cfg, flags.remaining[1:])
 	case "unblock":
-		cmdErr = cmdUnblock(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdUnblock(ioCtx, cfg, flags.remaining[1:])
 	case "ready":
-		cmdErr = cmdReady(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdReady(ioCtx, cfg, flags.remaining[1:])
 	case "repair":
-		cmdErr = cmdRepair(ioCtx, cfg, ticketDirAbs, flags.remaining[1:])
+		cmdErr = cmdRepair(ioCtx, cfg, flags.remaining[1:])
 	case "editor":
-		cmdErr = cmdEditor(ioCtx, cfg, ticketDirAbs, flags.remaining[1:], env)
+		cmdErr = cmdEditor(ioCtx, cfg, flags.remaining[1:], env)
 	case "print-config":
 		cmdErr = cmdPrintConfig(ioCtx, cfg, sources)
 	default:
@@ -128,11 +112,10 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 }
 
 type globalFlags struct {
-	workDir              string
-	configPath           string
-	ticketDir            string
-	hasTicketDirOverride bool
-	remaining            []string
+	workDir    string
+	configPath string
+	ticketDir  string
+	remaining  []string
 }
 
 func parseGlobalFlags(args []string) (globalFlags, error) {
@@ -204,15 +187,21 @@ func parseFlag(args []string, idx int, flags *globalFlags) (int, error) {
 			return consumedNone, fmt.Errorf("%w: %s", ticket.ErrFlagRequiresArg, arg)
 		}
 
+		if args[idx+1] == "" {
+			return consumedNone, ticket.ErrTicketDirEmpty
+		}
+
 		flags.ticketDir = args[idx+1]
-		flags.hasTicketDirOverride = true
 
 		return consumedTwo, nil
 	}
 
 	if after, ok := strings.CutPrefix(arg, "--ticket-dir="); ok {
+		if after == "" {
+			return consumedNone, ticket.ErrTicketDirEmpty
+		}
+
 		flags.ticketDir = after
-		flags.hasTicketDirOverride = true
 
 		return consumedOne, nil
 	}
@@ -234,27 +223,28 @@ func parseFlag(args []string, idx int, flags *globalFlags) (int, error) {
 }
 
 func cmdPrintConfig(o *IO, cfg ticket.Config, sources ticket.ConfigSources) error {
-	formatted, err := ticket.FormatConfig(cfg)
-	if err != nil {
-		return err
-	}
+	// Print config values (omit empty)
+	o.Println("effective_cwd=" + cfg.EffectiveCwd)
+	o.Println("ticket_dir=" + cfg.TicketDirAbs)
 
-	o.Println(formatted)
+	if cfg.Editor != "" {
+		o.Println("editor=" + cfg.Editor)
+	}
 
 	// Print sources
 	o.Println("")
-	o.Println("# Sources:")
-
-	if sources.Global != "" {
-		o.Println("#   global:", sources.Global)
-	}
-
-	if sources.Project != "" {
-		o.Println("#   project:", sources.Project)
-	}
+	o.Println("# sources")
 
 	if sources.Global == "" && sources.Project == "" {
-		o.Println("#   (using defaults only)")
+		o.Println("(defaults only)")
+	} else {
+		if sources.Global != "" {
+			o.Println("global_config=" + sources.Global)
+		}
+
+		if sources.Project != "" {
+			o.Println("project_config=" + sources.Project)
+		}
 	}
 
 	return nil

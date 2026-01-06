@@ -10,7 +10,7 @@ import (
 
 const blockHelp = `  block <id> <blocker>   Add blocker to ticket`
 
-func cmdBlock(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
+func cmdBlock(o *IO, cfg ticket.Config, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
 		o.Println("Usage: tk block <id> <blocker-id>")
@@ -32,12 +32,12 @@ func cmdBlock(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) erro
 	blockerID := args[1]
 
 	// Check if ticket exists
-	if !ticket.Exists(ticketDirAbs, ticketID) {
+	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	// Check if blocker ticket exists
-	if !ticket.Exists(ticketDirAbs, blockerID) {
+	if !ticket.Exists(cfg.TicketDirAbs, blockerID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, blockerID)
 	}
 
@@ -46,7 +46,7 @@ func cmdBlock(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) erro
 		return ticket.ErrCannotBlockSelf
 	}
 
-	path := ticket.Path(ticketDirAbs, ticketID)
+	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
 	// Use locked operation to atomically check and update blocked-by list
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
@@ -76,7 +76,7 @@ func cmdBlock(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) erro
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}

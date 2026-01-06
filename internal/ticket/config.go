@@ -11,8 +11,13 @@ import (
 
 // Config holds all configuration options.
 type Config struct {
+	// From config files (serialized)
 	TicketDir string `json:"ticket_dir"`
 	Editor    string `json:"editor,omitempty"`
+
+	// Resolved paths (computed, not serialized)
+	EffectiveCwd string `json:"-"` // Absolute working directory (from -C flag or os.Getwd)
+	TicketDirAbs string `json:"-"` // Absolute path to ticket directory
 }
 
 // ConfigSources tracks which config files were loaded.
@@ -46,21 +51,40 @@ func getGlobalConfigPath(env map[string]string) string {
 	return ""
 }
 
+// LoadConfigInput holds the inputs for LoadConfig.
+type LoadConfigInput struct {
+	WorkDirOverride   string            // -C/--cwd flag value; if empty, os.Getwd() is used
+	ConfigPath        string            // -c/--config flag value
+	TicketDirOverride string            // --ticket-dir flag value; empty means no override
+	Env               map[string]string // environment variables
+}
+
 // LoadConfig loads configuration with the following precedence (highest wins):
 // 1. Defaults
 // 2. Global user config (~/.config/tk/config.json or $XDG_CONFIG_HOME/tk/config.json)
 // 3. Project config file at default location (.tk.json, if exists)
 // 4. Explicit config file via configPath (if non-empty)
 // 5. CLI overrides.
-func LoadConfig(
-	workDir, configPath string, cliOverrides Config, hasTicketDirOverride bool, env map[string]string,
-) (Config, ConfigSources, error) {
+//
+// All paths in the returned Config are resolved to absolute paths.
+func LoadConfig(input LoadConfigInput) (Config, ConfigSources, error) {
+	// Resolve effective working directory
+	workDir := input.WorkDirOverride
+	if workDir == "" {
+		var err error
+
+		workDir, err = os.Getwd()
+		if err != nil {
+			return Config{}, ConfigSources{}, fmt.Errorf("cannot get working directory: %w", err)
+		}
+	}
+
 	cfg := DefaultConfig()
 
 	var sources ConfigSources
 
 	// Load global config if it exists
-	globalCfg, globalPath, err := loadGlobalConfig(env)
+	globalCfg, globalPath, err := loadGlobalConfig(input.Env)
 	if err != nil {
 		return Config{}, ConfigSources{}, err
 	}
@@ -69,7 +93,7 @@ func LoadConfig(
 	cfg = mergeConfig(cfg, globalCfg)
 
 	// Load project/explicit config file
-	projectCfg, projectPath, err := loadProjectConfig(workDir, configPath)
+	projectCfg, projectPath, err := loadProjectConfig(workDir, input.ConfigPath)
 	if err != nil {
 		return Config{}, ConfigSources{}, err
 	}
@@ -78,14 +102,23 @@ func LoadConfig(
 	cfg = mergeConfig(cfg, projectCfg)
 
 	// Apply CLI overrides
-	if hasTicketDirOverride {
-		cfg.TicketDir = cliOverrides.TicketDir
+	if input.TicketDirOverride != "" {
+		cfg.TicketDir = input.TicketDirOverride
 	}
 
 	// Validate
 	validateErr := validateConfig(cfg)
 	if validateErr != nil {
 		return Config{}, ConfigSources{}, validateErr
+	}
+
+	// Resolve all paths to absolute
+	cfg.EffectiveCwd = workDir
+
+	if filepath.IsAbs(cfg.TicketDir) {
+		cfg.TicketDirAbs = cfg.TicketDir
+	} else {
+		cfg.TicketDirAbs = filepath.Join(workDir, cfg.TicketDir)
 	}
 
 	return cfg, sources, nil
@@ -230,14 +263,4 @@ func validateConfig(cfg Config) error {
 	}
 
 	return nil
-}
-
-// FormatConfig returns the config as formatted JSON.
-func FormatConfig(cfg Config) (string, error) {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to format config: %w", err)
-	}
-
-	return string(data), nil
 }

@@ -21,7 +21,7 @@ type lsOptions struct {
 	offset     int
 }
 
-func cmdLs(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
+func cmdLs(o *IO, cfg ticket.Config, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
 		printLsHelp(o)
@@ -43,7 +43,7 @@ func cmdLs(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
 		Offset:   opts.offset,
 	}
 
-	results, err := ticket.ListTickets(ticketDirAbs, listOpts, nil)
+	results, err := ticket.ListTickets(cfg.TicketDirAbs, listOpts, nil)
 	if err != nil {
 		return err
 	}

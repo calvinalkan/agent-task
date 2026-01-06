@@ -8,7 +8,7 @@ import (
 
 const startHelp = `  start <id>             Set status to in_progress`
 
-func cmdStart(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
+func cmdStart(o *IO, cfg ticket.Config, args []string) error {
 	if hasHelpFlag(args) {
 		o.Println("Usage: tk start <id>")
 		o.Println("")
@@ -23,11 +23,11 @@ func cmdStart(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) erro
 
 	ticketID := args[0]
 
-	if !ticket.Exists(ticketDirAbs, ticketID) {
+	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDirAbs, ticketID)
+	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
 	// Use locked operation to atomically check status and update
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
@@ -51,7 +51,7 @@ func cmdStart(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) erro
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}

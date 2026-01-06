@@ -32,7 +32,7 @@ func TestPrintConfig_Defaults(t *testing.T) {
 
 	c := cli.NewCLI(t)
 	stdout := c.MustRun("print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": ".tickets"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
 func TestPrintConfig_FromConfigFile(t *testing.T) {
@@ -42,7 +42,7 @@ func TestPrintConfig_FromConfigFile(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, ".tk.json"), `{"ticket_dir": "my-tickets"}`)
 
 	stdout := c.MustRun("print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "my-tickets"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "my-tickets"))
 }
 
 func TestPrintConfig_FromConfigFileWithComments(t *testing.T) {
@@ -55,7 +55,7 @@ func TestPrintConfig_FromConfigFileWithComments(t *testing.T) {
 	}`)
 
 	stdout := c.MustRun("print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "commented-tickets"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "commented-tickets"))
 }
 
 func TestPrintConfig_ExplicitConfigFlag(t *testing.T) {
@@ -65,7 +65,7 @@ func TestPrintConfig_ExplicitConfigFlag(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, "custom.json"), `{"ticket_dir": "custom-dir"}`)
 
 	stdout := c.MustRun("-c", "custom.json", "print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "custom-dir"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "custom-dir"))
 }
 
 func TestPrintConfig_ExplicitConfigFlagLong(t *testing.T) {
@@ -75,7 +75,7 @@ func TestPrintConfig_ExplicitConfigFlagLong(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, "custom.json"), `{"ticket_dir": "custom-dir"}`)
 
 	stdout := c.MustRun("--config=custom.json", "print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "custom-dir"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "custom-dir"))
 }
 
 func TestPrintConfig_TicketDirOverride(t *testing.T) {
@@ -85,7 +85,7 @@ func TestPrintConfig_TicketDirOverride(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, ".tk.json"), `{"ticket_dir": "from-file"}`)
 
 	stdout := c.MustRun("--ticket-dir=from-cli", "print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "from-cli"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "from-cli"))
 }
 
 func TestPrintConfig_TicketDirOverrideWithEquals(t *testing.T) {
@@ -93,7 +93,7 @@ func TestPrintConfig_TicketDirOverrideWithEquals(t *testing.T) {
 
 	c := cli.NewCLI(t)
 	stdout := c.MustRun("--ticket-dir=override-dir", "print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "override-dir"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "override-dir"))
 }
 
 // Tests for config errors.
@@ -236,7 +236,7 @@ func TestCFlag_ChangesWorkDir(t *testing.T) {
 		t.Errorf("exitCode=%d, want=%d; stderr=%s", got, want, stderr)
 	}
 
-	cli.AssertContains(t, stdout, `"ticket_dir": "subdir-tickets"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(subdir, "subdir-tickets"))
 }
 
 func TestCFlag_CombinedForm(t *testing.T) {
@@ -259,7 +259,7 @@ func TestCwdFlag_Long(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, ".tk.json"), `{"ticket_dir": "cwd-test"}`)
 
 	stdout := c.MustRun("print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "cwd-test"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "cwd-test"))
 }
 
 func TestCwdFlag_LongWithEquals(t *testing.T) {
@@ -269,7 +269,7 @@ func TestCwdFlag_LongWithEquals(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, ".tk.json"), `{"ticket_dir": "cwd-equals-test"}`)
 
 	stdout := c.MustRun("print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "cwd-equals-test"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "cwd-equals-test"))
 }
 
 // Test precedence.
@@ -281,7 +281,7 @@ func TestConfig_Precedence_CLIOverridesFile(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, ".tk.json"), `{"ticket_dir": "from-file"}`)
 
 	stdout := c.MustRun("--ticket-dir=from-cli", "print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "from-cli"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "from-cli"))
 }
 
 func TestConfig_Precedence_ExplicitConfigOverridesDefault(t *testing.T) {
@@ -292,7 +292,7 @@ func TestConfig_Precedence_ExplicitConfigOverridesDefault(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, "explicit.json"), `{"ticket_dir": "from-explicit"}`)
 
 	stdout := c.MustRun("-c", "explicit.json", "print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "from-explicit"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "from-explicit"))
 }
 
 func TestConfig_Precedence_CLIOverridesExplicitConfig(t *testing.T) {
@@ -302,7 +302,7 @@ func TestConfig_Precedence_CLIOverridesExplicitConfig(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, "explicit.json"), `{"ticket_dir": "from-explicit"}`)
 
 	stdout := c.MustRun("-c", "explicit.json", "--ticket-dir=from-cli", "print-config")
-	cli.AssertContains(t, stdout, `"ticket_dir": "from-cli"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "from-cli"))
 }
 
 // Tests for global config.
@@ -319,8 +319,8 @@ func TestConfig_GlobalConfig_Loaded(t *testing.T) {
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stdout := c.MustRun("print-config")
 
-	cli.AssertContains(t, stdout, `"editor": "nvim"`)
-	cli.AssertContains(t, stdout, `"ticket_dir": ".tickets"`)
+	cli.AssertContains(t, stdout, "editor=nvim")
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
 func TestConfig_GlobalConfig_MissingIsNotError(t *testing.T) {
@@ -332,7 +332,7 @@ func TestConfig_GlobalConfig_MissingIsNotError(t *testing.T) {
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stdout := c.MustRun("print-config")
 
-	cli.AssertContains(t, stdout, `"ticket_dir": ".tickets"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
 func TestConfig_GlobalConfig_InvalidJSON(t *testing.T) {
@@ -377,9 +377,9 @@ func TestConfig_Precedence_ProjectOverridesGlobal(t *testing.T) {
 	stdout := c.MustRun("print-config")
 
 	// ticket_dir should come from project config
-	cli.AssertContains(t, stdout, `"ticket_dir": "project-tickets"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "project-tickets"))
 	// editor should still come from global config
-	cli.AssertContains(t, stdout, `"editor": "nvim"`)
+	cli.AssertContains(t, stdout, "editor=nvim")
 }
 
 func TestConfig_Precedence_ExplicitOverridesGlobal(t *testing.T) {
@@ -397,7 +397,7 @@ func TestConfig_Precedence_ExplicitOverridesGlobal(t *testing.T) {
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stdout := c.MustRun("-c", "explicit.json", "print-config")
 
-	cli.AssertContains(t, stdout, `"ticket_dir": "explicit-tickets"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "explicit-tickets"))
 }
 
 func TestConfig_Precedence_CLIOverridesGlobal(t *testing.T) {
@@ -412,7 +412,7 @@ func TestConfig_Precedence_CLIOverridesGlobal(t *testing.T) {
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stdout := c.MustRun("--ticket-dir=cli-tickets", "print-config")
 
-	cli.AssertContains(t, stdout, `"ticket_dir": "cli-tickets"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "cli-tickets"))
 }
 
 func TestConfig_Precedence_FullChain(t *testing.T) {
@@ -432,9 +432,9 @@ func TestConfig_Precedence_FullChain(t *testing.T) {
 	stdout := c.MustRun("--ticket-dir=cli", "print-config")
 
 	// CLI wins for ticket_dir
-	cli.AssertContains(t, stdout, `"ticket_dir": "cli"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "cli"))
 	// editor still comes from global
-	cli.AssertContains(t, stdout, `"editor": "nvim"`)
+	cli.AssertContains(t, stdout, "editor=nvim")
 }
 
 func TestConfig_GlobalConfig_PartialMerge(t *testing.T) {
@@ -453,8 +453,8 @@ func TestConfig_GlobalConfig_PartialMerge(t *testing.T) {
 	stdout := th.MustRun("print-config")
 
 	// Both values should be present
-	cli.AssertContains(t, stdout, `"ticket_dir": "custom-tickets"`)
-	cli.AssertContains(t, stdout, `"editor": "vim"`)
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(th.Dir, "custom-tickets"))
+	cli.AssertContains(t, stdout, "editor=vim")
 }
 
 // Tests for print-config sources output.
@@ -468,8 +468,8 @@ func TestPrintConfig_ShowsDefaultsOnly(t *testing.T) {
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stdout := c.MustRun("print-config")
 
-	cli.AssertContains(t, stdout, "# Sources:")
-	cli.AssertContains(t, stdout, "#   (using defaults only)")
+	cli.AssertContains(t, stdout, "# sources")
+	cli.AssertContains(t, stdout, "(defaults only)")
 }
 
 func TestPrintConfig_ShowsGlobalSource(t *testing.T) {
@@ -484,8 +484,8 @@ func TestPrintConfig_ShowsGlobalSource(t *testing.T) {
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stdout := c.MustRun("print-config")
 
-	cli.AssertContains(t, stdout, "# Sources:")
-	cli.AssertContains(t, stdout, "#   global: "+globalPath)
+	cli.AssertContains(t, stdout, "# sources")
+	cli.AssertContains(t, stdout, "global_config="+globalPath)
 }
 
 func TestPrintConfig_ShowsProjectSource(t *testing.T) {
@@ -500,8 +500,8 @@ func TestPrintConfig_ShowsProjectSource(t *testing.T) {
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stdout := c.MustRun("print-config")
 
-	cli.AssertContains(t, stdout, "# Sources:")
-	cli.AssertContains(t, stdout, "#   project: "+projectPath)
+	cli.AssertContains(t, stdout, "# sources")
+	cli.AssertContains(t, stdout, "project_config="+projectPath)
 }
 
 func TestPrintConfig_ShowsBothSources(t *testing.T) {
@@ -519,7 +519,7 @@ func TestPrintConfig_ShowsBothSources(t *testing.T) {
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stdout := c.MustRun("print-config")
 
-	cli.AssertContains(t, stdout, "# Sources:")
-	cli.AssertContains(t, stdout, "#   global: "+globalPath)
-	cli.AssertContains(t, stdout, "#   project: "+projectPath)
+	cli.AssertContains(t, stdout, "# sources")
+	cli.AssertContains(t, stdout, "global_config="+globalPath)
+	cli.AssertContains(t, stdout, "project_config="+projectPath)
 }

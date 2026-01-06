@@ -28,7 +28,7 @@ const createHelp = `  create <title>         Create ticket, prints ID
     -a, --assignee         Assignee
     --blocked-by           Blocker ticket ID (repeatable)`
 
-func cmdCreate(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
+func cmdCreate(o *IO, cfg ticket.Config, args []string) error {
 	var helpBuf bytes.Buffer
 
 	flagSet := flag.NewFlagSet("create", flag.ContinueOnError)
@@ -101,7 +101,7 @@ func cmdCreate(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) err
 			return fmt.Errorf("%w: --blocked-by", errEmptyValue)
 		}
 
-		if !ticket.Exists(ticketDirAbs, blocker) {
+		if !ticket.Exists(cfg.TicketDirAbs, blocker) {
 			return fmt.Errorf("%w: %s", errInvalidBlocker, blocker)
 		}
 	}
@@ -121,7 +121,7 @@ func cmdCreate(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) err
 		Acceptance:    *acceptance,
 	}
 
-	ticketID, ticketPath, writeErr := ticket.WriteTicketAtomic(ticketDirAbs, &tkt)
+	ticketID, ticketPath, writeErr := ticket.WriteTicketAtomic(cfg.TicketDirAbs, &tkt)
 	if writeErr != nil {
 		return writeErr
 	}
@@ -131,7 +131,7 @@ func cmdCreate(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) err
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}

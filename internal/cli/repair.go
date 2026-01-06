@@ -13,7 +13,7 @@ import (
 
 const repairHelp = `  repair <id>            Repair ticket inconsistencies`
 
-func cmdRepair(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
+func cmdRepair(o *IO, cfg ticket.Config, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
 		printRepairHelp(o)
@@ -36,7 +36,7 @@ func cmdRepair(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) err
 	remaining := flagSet.Args()
 
 	if *rebuildCache {
-		results, err := ticket.BuildCacheParallelLocked(ticketDirAbs, nil)
+		results, err := ticket.BuildCacheParallelLocked(cfg.TicketDirAbs, nil)
 		if err != nil {
 			return err
 		}
@@ -61,12 +61,12 @@ func cmdRepair(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) err
 	}
 
 	if *allFlag {
-		return repairAllTickets(o, ticketDirAbs, *dryRun)
+		return repairAllTickets(o, cfg.TicketDirAbs, *dryRun)
 	}
 
 	ticketID := remaining[0]
 
-	return repairSingleTicket(o, ticketDirAbs, ticketID, *dryRun)
+	return repairSingleTicket(o, cfg.TicketDirAbs, ticketID, *dryRun)
 }
 
 func repairSingleTicket(o *IO, ticketDirAbs, ticketID string, dryRun bool) error {

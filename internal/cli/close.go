@@ -9,7 +9,7 @@ import (
 
 const closeHelp = `  close <id>             Set status to closed`
 
-func cmdClose(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
+func cmdClose(o *IO, cfg ticket.Config, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
 		o.Println("Usage: tk close <id>")
@@ -26,11 +26,11 @@ func cmdClose(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) erro
 	ticketID := args[0]
 
 	// Check if ticket exists
-	if !ticket.Exists(ticketDirAbs, ticketID) {
+	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDirAbs, ticketID)
+	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
 	// Use locked operation to atomically check status and update with closed timestamp
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
@@ -73,7 +73,7 @@ func cmdClose(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) erro
 		return parseErr
 	}
 
-	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
+	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
 		return cacheErr
 	}

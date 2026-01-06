@@ -85,7 +85,6 @@ func runEditor(editor, path string) error {
 func cmdEditor(
 	o *IO,
 	cfg ticket.Config,
-	ticketDirAbs string,
 	args []string,
 	env map[string]string,
 ) error {
@@ -105,11 +104,11 @@ func cmdEditor(
 	ticketID := args[0]
 
 	// Check if ticket exists
-	if !ticket.Exists(ticketDirAbs, ticketID) {
+	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDirAbs, ticketID)
+	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
 	// Resolve editor
 	editor, resolveErr := resolveEditor(cfg, env)

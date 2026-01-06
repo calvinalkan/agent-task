@@ -8,7 +8,7 @@ import (
 
 const showHelp = `  show <id>              Show ticket details`
 
-func cmdShow(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
+func cmdShow(o *IO, cfg ticket.Config, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
 		o.Println("Usage: tk show <id>")
@@ -25,11 +25,11 @@ func cmdShow(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error
 	ticketID := args[0]
 
 	// Check if ticket exists
-	if !ticket.Exists(ticketDirAbs, ticketID) {
+	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
-	path := ticket.Path(ticketDirAbs, ticketID)
+	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
 	// Read ticket contents
 	content, err := ticket.ReadTicket(path)

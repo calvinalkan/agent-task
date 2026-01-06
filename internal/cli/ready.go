@@ -12,7 +12,7 @@ import (
 
 const readyHelp = `  ready                  List actionable tickets (unblocked, not closed)`
 
-func cmdReady(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) error {
+func cmdReady(o *IO, cfg ticket.Config, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
 		printReadyHelp(o)
@@ -21,7 +21,7 @@ func cmdReady(o *IO, cfg ticket.Config, ticketDirAbs string, args []string) erro
 	}
 
 	// List all tickets (need all for blocker resolution)
-	results, err := ticket.ListTickets(ticketDirAbs, ticket.ListTicketsOptions{Limit: 0}, nil)
+	results, err := ticket.ListTickets(cfg.TicketDirAbs, ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
 		return err
 	}
