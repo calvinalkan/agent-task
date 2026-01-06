@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,12 +13,12 @@ import (
 
 const readyHelp = `  ready                  List actionable tickets (unblocked, not closed)`
 
-func cmdReady(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdReady(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		printReadyHelp(out)
+		printReadyHelp(io)
 
-		return 0
+		return nil
 	}
 
 	// Resolve ticket directory
@@ -29,20 +28,17 @@ func cmdReady(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 	}
 
 	// List all tickets (need all for blocker resolution)
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, errOut)
+	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
 	// Build status map and filter ready tickets (parallel)
 	ready, warnings := filterReadyTickets(results)
 
-	// Output warnings
-	hasWarnings := len(warnings) > 0
+	// Collect warnings via IO
 	for _, w := range warnings {
-		fprintln(errOut, w)
+		io.WarnLLM(w.issue, w.action)
 	}
 
 	// Sort by priority (ascending, P1 first), then by ID
@@ -57,38 +53,42 @@ func cmdReady(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 	// Output formatted lines
 	for _, summary := range ready {
 		line := formatReadyLine(summary)
-		fprintln(out, line)
+		io.Println(line)
 	}
 
-	// Return 1 if there were parse errors (warnings)
-	if hasWarnings {
-		return 1
-	}
+	return nil
+}
 
-	return 0
+// readyWarning holds a warning with issue and action for WarnLLM.
+type readyWarning struct {
+	issue  string
+	action string
 }
 
 // readyCheckResult holds the result of checking if a ticket is ready.
 type readyCheckResult struct {
 	summary  *ticket.Summary
 	isReady  bool
-	warnings []string
+	warnings []readyWarning
 }
 
 // filterReadyTickets builds status map and returns ready tickets.
 // Uses parallel processing for blocker resolution checks.
-func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []string) {
+func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarning) {
 	// Build map: ticketID → status (for blocker lookup)
 	statusMap := make(map[string]string)
 
 	// Collect valid summaries and parse errors
 	var candidates []*ticket.Summary
 
-	var allWarnings []string
+	var allWarnings []readyWarning
 
 	for _, result := range results {
 		if result.Err != nil {
-			allWarnings = append(allWarnings, fmt.Sprintf("warning: %s: %v", result.Path, result.Err))
+			allWarnings = append(allWarnings, readyWarning{
+				issue:  fmt.Sprintf("%s: %v", result.Path, result.Err),
+				action: "fix the ticket file or delete it if invalid",
+			})
 
 			continue
 		}
@@ -144,17 +144,19 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []string) {
 // checkBlockersResolved checks if a ticket has all its blockers resolved.
 // A blocker is resolved if it's closed or doesn't exist (missing = resolved with warning).
 // Returns (isReady, warnings). Thread-safe: only reads from statusMap.
-func checkBlockersResolved(summary *ticket.Summary, statusMap map[string]string) (bool, []string) {
-	var warnings []string
+func checkBlockersResolved(summary *ticket.Summary, statusMap map[string]string) (bool, []readyWarning) {
+	var warnings []readyWarning
 
 	for _, blockerID := range summary.BlockedBy {
 		status, exists := statusMap[blockerID]
 
 		if !exists {
 			// Missing blocker - treat as resolved, collect warning
-			warnings = append(warnings, fmt.Sprintf(
-				"warning: %s blocked by non-existent ticket %s (treating as resolved)",
-				summary.ID, blockerID))
+			warnings = append(warnings, readyWarning{
+				issue: fmt.Sprintf("%s blocked by non-existent ticket %s (treating as resolved)",
+					summary.ID, blockerID),
+				action: "remove the blocker reference or create the missing ticket",
+			})
 
 			continue
 		}
@@ -182,11 +184,11 @@ func formatReadyLine(summary *ticket.Summary) string {
 	return builder.String()
 }
 
-func printReadyHelp(out io.Writer) {
-	fprintln(out, "Usage: tk ready")
-	fprintln(out, "")
-	fprintln(out, "List actionable tickets that can be worked on now.")
-	fprintln(out, "Shows open tickets with all blockers closed.")
-	fprintln(out, "")
-	fprintln(out, "Output sorted by priority (P1 first), then by ID.")
+func printReadyHelp(io *IO) {
+	io.Println("Usage: tk ready")
+	io.Println("")
+	io.Println("List actionable tickets that can be worked on now.")
+	io.Println("Shows open tickets with all blockers closed.")
+	io.Println("")
+	io.Println("Output sorted by priority (P1 first), then by ID.")
 }

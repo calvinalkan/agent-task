@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"strings"
 
@@ -23,17 +22,17 @@ type lsOptions struct {
 	offset     int
 }
 
-func cmdLs(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdLs(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		printLsHelp(out)
+		printLsHelp(io)
 
-		return 0
+		return nil
 	}
 
-	opts, parseCode := parseLsFlags(errOut, args)
-	if parseCode != 0 {
-		return parseCode
+	opts, err := parseLsFlags(args)
+	if err != nil {
+		return err
 	}
 
 	// Resolve ticket directory
@@ -51,26 +50,38 @@ func cmdLs(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, a
 		Offset:   opts.offset,
 	}
 
-	results, err := ticket.ListTickets(ticketDir, listOpts, errOut)
+	results, err := ticket.ListTickets(ticketDir, listOpts, nil)
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
-	// Output tickets and track errors
-	hasErrors := outputTickets(out, errOut, results)
+	// Separate valid tickets from errors
+	var valid []*ticket.Summary
 
-	if hasErrors {
-		return 1
+	for _, result := range results {
+		if result.Err != nil {
+			io.WarnLLM(
+				fmt.Sprintf("%s: %v", result.Path, result.Err),
+				"fix the ticket file or delete it if invalid",
+			)
+
+			continue
+		}
+
+		valid = append(valid, result.Summary)
 	}
 
-	return 0
+	// Output valid tickets
+	for _, summary := range valid {
+		io.Println(formatTicketLine(summary))
+	}
+
+	return nil
 }
 
-func parseLsFlags(errOut io.Writer, args []string) (lsOptions, int) {
+func parseLsFlags(args []string) (lsOptions, error) {
 	flagSet := flag.NewFlagSet("ls", flag.ContinueOnError)
-	flagSet.SetOutput(io.Discard)
+	flagSet.SetOutput(&strings.Builder{}) // discard output
 
 	status := flagSet.String("status", "", "Filter by status")
 	priority := flagSet.Int("priority", 0, "Filter by priority (1-4)")
@@ -80,51 +91,39 @@ func parseLsFlags(errOut io.Writer, args []string) (lsOptions, int) {
 
 	parseErr := flagSet.Parse(args)
 	if parseErr != nil {
-		fprintln(errOut, "error:", parseErr)
-
-		return lsOptions{}, 1
+		return lsOptions{}, parseErr
 	}
 
 	// Validate status if provided
 	if flagSet.Changed("status") {
 		validateErr := validateStatusFlag(*status)
 		if validateErr != nil {
-			fprintln(errOut, "error:", validateErr)
-
-			return lsOptions{}, 1
+			return lsOptions{}, validateErr
 		}
 	}
 
 	// Validate priority if provided
 	if flagSet.Changed("priority") {
 		if *priority < 1 || *priority > 4 {
-			fprintln(errOut, "error: --priority must be 1-4")
-
-			return lsOptions{}, 1
+			return lsOptions{}, errors.New("--priority must be 1-4")
 		}
 	}
 
 	// Validate type if provided
 	if flagSet.Changed("type") {
 		if !ticket.IsValidTicketType(*ticketType) {
-			fprintln(errOut, "error: invalid type:", *ticketType)
-
-			return lsOptions{}, 1
+			return lsOptions{}, fmt.Errorf("invalid type: %s", *ticketType)
 		}
 	}
 
 	// Validate limit
 	if *limit < 0 {
-		fprintln(errOut, "error: --limit must be non-negative")
-
-		return lsOptions{}, 1
+		return lsOptions{}, errors.New("--limit must be non-negative")
 	}
 
 	// Validate offset
 	if *offset < 0 {
-		fprintln(errOut, "error: --offset must be non-negative")
-
-		return lsOptions{}, 1
+		return lsOptions{}, errors.New("--offset must be non-negative")
 	}
 
 	return lsOptions{
@@ -133,20 +132,20 @@ func parseLsFlags(errOut io.Writer, args []string) (lsOptions, int) {
 		ticketType: *ticketType,
 		limit:      *limit,
 		offset:     *offset,
-	}, 0
+	}, nil
 }
 
-func printLsHelp(out io.Writer) {
-	fprintln(out, "Usage: tk ls [options]")
-	fprintln(out, "")
-	fprintln(out, "List all tickets. Output sorted by ID (oldest first).")
-	fprintln(out, "")
-	fprintln(out, "Options:")
-	fprintln(out, "  --status=<status>    Filter by status (open|in_progress|closed)")
-	fprintln(out, "  --priority=N         Filter by priority (1-4)")
-	fprintln(out, "  --type=<type>        Filter by type (bug|feature|task|epic|chore)")
-	fprintln(out, "  --limit=N            Max tickets to show [default: 100]")
-	fprintln(out, "  --offset=N           Skip first N tickets [default: 0]")
+func printLsHelp(io *IO) {
+	io.Println("Usage: tk ls [options]")
+	io.Println("")
+	io.Println("List all tickets. Output sorted by ID (oldest first).")
+	io.Println("")
+	io.Println("Options:")
+	io.Println("  --status=<status>    Filter by status (open|in_progress|closed)")
+	io.Println("  --priority=N         Filter by priority (1-4)")
+	io.Println("  --type=<type>        Filter by type (bug|feature|task|epic|chore)")
+	io.Println("  --limit=N            Max tickets to show [default: 100]")
+	io.Println("  --offset=N           Skip first N tickets [default: 0]")
 }
 
 var errInvalidStatus = errors.New("invalid status")
@@ -161,29 +160,6 @@ func validateStatusFlag(status string) error {
 	}
 
 	return nil
-}
-
-func outputTickets(
-	out io.Writer,
-	errOut io.Writer,
-	results []ticket.Result,
-) bool {
-	hasErrors := false
-
-	for _, result := range results {
-		if result.Err != nil {
-			fprintln(errOut, "warning:", result.Path+":", result.Err)
-
-			hasErrors = true
-
-			continue
-		}
-
-		line := formatTicketLine(result.Summary)
-		fprintln(out, line)
-	}
-
-	return hasErrors
 }
 
 func isValidStatus(status string) bool {

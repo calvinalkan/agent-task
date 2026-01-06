@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"path/filepath"
 
 	"tk/internal/ticket"
@@ -10,19 +9,17 @@ import (
 
 const startHelp = `  start <id>             Set status to in_progress`
 
-func cmdStart(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdStart(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	if hasHelpFlag(args) {
-		fprintln(out, "Usage: tk start <id>")
-		fprintln(out, "")
-		fprintln(out, "Set ticket status to in_progress. Only works on open tickets.")
+		io.Println("Usage: tk start <id>")
+		io.Println("")
+		io.Println("Set ticket status to in_progress. Only works on open tickets.")
 
-		return 0
+		return nil
 	}
 
 	if len(args) == 0 {
-		fprintln(errOut, "error:", ticket.ErrIDRequired)
-
-		return 1
+		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
@@ -33,9 +30,7 @@ func cmdStart(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 	}
 
 	if !ticket.Exists(ticketDir, ticketID) {
-		fprintln(errOut, "error:", ticket.ErrTicketNotFound, ticketID)
-
-		return 1
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(ticketDir, ticketID)
@@ -54,40 +49,28 @@ func cmdStart(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 		return ticket.UpdateStatusInContent(content, ticket.StatusInProgress)
 	})
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		fprintln(errOut, "error:", parseErr)
-
-		return 1
+		return parseErr
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
 	if cacheErr != nil {
-		fprintln(errOut, "error:", cacheErr)
-
-		return 1
+		return cacheErr
 	}
 
-	return printStartOutput(out, errOut, ticketID, path)
-}
-
-func printStartOutput(out io.Writer, errOut io.Writer, ticketID, path string) int {
-	fprintln(out, "Started", ticketID)
-	fprintln(out)
+	io.Println("Started", ticketID)
+	io.Println()
 
 	content, err := ticket.ReadTicket(path)
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
-	_, _ = io.WriteString(out, content)
+	io.Printf("%s", content)
 
-	return 0
+	return nil
 }

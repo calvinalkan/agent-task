@@ -1,9 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"time"
 
@@ -29,14 +29,16 @@ const createHelp = `  create <title>         Create ticket, prints ID
     -a, --assignee         Assignee
     --blocked-by           Blocker ticket ID (repeatable)`
 
-func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdCreate(io *IO, cfg ticket.Config, workDir string, args []string) error {
+	var helpBuf bytes.Buffer
+
 	flagSet := flag.NewFlagSet("create", flag.ContinueOnError)
-	flagSet.SetOutput(errOut)
+	flagSet.SetOutput(&helpBuf)
 	flagSet.Usage = func() {
 		w := flagSet.Output()
-		fprintf(w, "Usage: tk create <title> [options]\n\n")
-		fprintf(w, "Create a new ticket. Prints ticket ID on success.\n\n")
-		fprintf(w, "Options:\n")
+		fmt.Fprintf(w, "Usage: tk create <title> [options]\n\n")
+		fmt.Fprintf(w, "Create a new ticket. Prints ticket ID on success.\n\n")
+		fmt.Fprintf(w, "Options:\n")
 		flagSet.PrintDefaults()
 	}
 
@@ -49,18 +51,15 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 	blockedBy := flagSet.StringArray("blocked-by", nil, "Blocker ticket ID (repeatable)")
 
 	if hasHelpFlag(args) {
-		flagSet.SetOutput(out)
 		flagSet.Usage()
+		io.Printf("%s", helpBuf.String())
 
-		return 0
+		return nil
 	}
 
 	parseErr := flagSet.Parse(args)
 	if parseErr != nil {
-		fprintf(errOut, "error: %v\n\n", parseErr)
-		flagSet.Usage()
-
-		return 1
+		return fmt.Errorf("%w\n\n%s", parseErr, helpBuf.String())
 	}
 
 	// Title is first positional argument
@@ -70,9 +69,7 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 	}
 
 	if title == "" {
-		fprintln(errOut, "error:", errTitleRequired)
-
-		return 1
+		return errTitleRequired
 	}
 
 	// Validate no empty values for flags that were explicitly set
@@ -85,24 +82,18 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 	} {
 		err := validateNotEmpty(flagSet, check.name, check.value)
 		if err != nil {
-			fprintln(errOut, "error:", err)
-
-			return 1
+			return err
 		}
 	}
 
 	// Validate type
 	if !ticket.IsValidType(*ticketType) {
-		fprintln(errOut, "error:", errInvalidType, *ticketType)
-
-		return 1
+		return fmt.Errorf("%w: %s", errInvalidType, *ticketType)
 	}
 
 	// Validate priority
 	if !ticket.IsValidPriority(*priority) {
-		fprintln(errOut, "error:", errInvalidPriority)
-
-		return 1
+		return errInvalidPriority
 	}
 
 	// Resolve ticket directory
@@ -114,15 +105,11 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 	// Validate blockers exist
 	for _, blocker := range *blockedBy {
 		if blocker == "" {
-			fprintln(errOut, "error:", errEmptyValue, "--blocked-by")
-
-			return 1
+			return fmt.Errorf("%w: --blocked-by", errEmptyValue)
 		}
 
 		if !ticket.Exists(ticketDir, blocker) {
-			fprintln(errOut, "error:", errInvalidBlocker, blocker)
-
-			return 1
+			return fmt.Errorf("%w: %s", errInvalidBlocker, blocker)
 		}
 	}
 
@@ -143,28 +130,22 @@ func cmdCreate(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 
 	ticketID, ticketPath, writeErr := ticket.WriteTicketAtomic(ticketDir, &tkt)
 	if writeErr != nil {
-		fprintln(errOut, "error:", writeErr)
-
-		return 1
+		return writeErr
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(ticketPath)
 	if parseErr != nil {
-		fprintln(errOut, "error:", parseErr)
-
-		return 1
+		return parseErr
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
 	if cacheErr != nil {
-		fprintln(errOut, "error:", cacheErr)
-
-		return 1
+		return cacheErr
 	}
 
-	fprintln(out, ticketID)
+	io.Println(ticketID)
 
-	return 0
+	return nil
 }
 
 func validateNotEmpty(flagSet *flag.FlagSet, name, value string) error {

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"path/filepath"
 	"slices"
 
@@ -11,26 +10,22 @@ import (
 
 const unblockHelp = `  unblock <id> <blocker> Remove blocker from ticket`
 
-func cmdUnblock(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdUnblock(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		fprintln(out, "Usage: tk unblock <id> <blocker-id>")
-		fprintln(out, "")
-		fprintln(out, "Remove a blocker from a ticket's blocked-by list.")
+		io.Println("Usage: tk unblock <id> <blocker-id>")
+		io.Println("")
+		io.Println("Remove a blocker from a ticket's blocked-by list.")
 
-		return 0
+		return nil
 	}
 
 	if len(args) == 0 {
-		fprintln(errOut, "error:", ticket.ErrIDRequired)
-
-		return 1
+		return ticket.ErrIDRequired
 	}
 
 	if len(args) < 2 {
-		fprintln(errOut, "error:", ticket.ErrBlockerIDRequired)
-
-		return 1
+		return ticket.ErrBlockerIDRequired
 	}
 
 	ticketID := args[0]
@@ -44,9 +39,7 @@ func cmdUnblock(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir stri
 
 	// Check if ticket exists
 	if !ticket.Exists(ticketDir, ticketID) {
-		fprintln(errOut, "error:", ticket.ErrTicketNotFound, ticketID)
-
-		return 1
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(ticketDir, ticketID)
@@ -62,7 +55,7 @@ func cmdUnblock(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir stri
 		// Check if actually blocked by this blocker
 		idx := slices.Index(blockedBy, blockerID)
 		if idx == -1 {
-			return nil, fmt.Errorf("%w %s", ticket.ErrNotBlockedBy, blockerID)
+			return nil, fmt.Errorf("%w: %s", ticket.ErrNotBlockedBy, blockerID)
 		}
 
 		// Remove blocker
@@ -72,26 +65,20 @@ func cmdUnblock(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir stri
 		return ticket.UpdateBlockedByInContent(content, blockedBy)
 	})
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		fprintln(errOut, "error:", parseErr)
-
-		return 1
+		return parseErr
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
 	if cacheErr != nil {
-		fprintln(errOut, "error:", cacheErr)
-
-		return 1
+		return cacheErr
 	}
 
-	fprintln(out, "Unblocked", ticketID, "from", blockerID)
+	io.Println("Unblocked", ticketID, "from", blockerID)
 
-	return 0
+	return nil
 }

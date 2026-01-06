@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"path/filepath"
 
 	"tk/internal/ticket"
@@ -10,20 +9,18 @@ import (
 
 const reopenHelp = `  reopen <id>            Set status to open`
 
-func cmdReopen(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdReopen(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		fprintln(out, "Usage: tk reopen <id>")
-		fprintln(out, "")
-		fprintln(out, "Set ticket status back to open. Only works on closed tickets.")
+		io.Println("Usage: tk reopen <id>")
+		io.Println("")
+		io.Println("Set ticket status back to open. Only works on closed tickets.")
 
-		return 0
+		return nil
 	}
 
 	if len(args) == 0 {
-		fprintln(errOut, "error:", ticket.ErrIDRequired)
-
-		return 1
+		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
@@ -36,9 +33,7 @@ func cmdReopen(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 
 	// Check if ticket exists
 	if !ticket.Exists(ticketDir, ticketID) {
-		fprintln(errOut, "error:", ticket.ErrTicketNotFound, ticketID)
-
-		return 1
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(ticketDir, ticketID)
@@ -79,26 +74,20 @@ func cmdReopen(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir strin
 		return result, nil
 	})
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		fprintln(errOut, "error:", parseErr)
-
-		return 1
+		return parseErr
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
 	if cacheErr != nil {
-		fprintln(errOut, "error:", cacheErr)
-
-		return 1
+		return cacheErr
 	}
 
-	fprintln(out, "Reopened", ticketID)
+	io.Println("Reopened", ticketID)
 
-	return 0
+	return nil
 }

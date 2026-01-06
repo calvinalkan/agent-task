@@ -3,7 +3,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"path/filepath"
 	"slices"
 
@@ -12,26 +11,22 @@ import (
 
 const blockHelp = `  block <id> <blocker>   Add blocker to ticket`
 
-func cmdBlock(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdBlock(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		fprintln(out, "Usage: tk block <id> <blocker-id>")
-		fprintln(out, "")
-		fprintln(out, "Add a blocker to a ticket's blocked-by list.")
+		io.Println("Usage: tk block <id> <blocker-id>")
+		io.Println("")
+		io.Println("Add a blocker to a ticket's blocked-by list.")
 
-		return 0
+		return nil
 	}
 
 	if len(args) == 0 {
-		fprintln(errOut, "error:", ticket.ErrIDRequired)
-
-		return 1
+		return ticket.ErrIDRequired
 	}
 
 	if len(args) < 2 {
-		fprintln(errOut, "error:", ticket.ErrBlockerIDRequired)
-
-		return 1
+		return ticket.ErrBlockerIDRequired
 	}
 
 	ticketID := args[0]
@@ -45,23 +40,17 @@ func cmdBlock(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 
 	// Check if ticket exists
 	if !ticket.Exists(ticketDir, ticketID) {
-		fprintln(errOut, "error:", ticket.ErrTicketNotFound, ticketID)
-
-		return 1
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	// Check if blocker ticket exists
 	if !ticket.Exists(ticketDir, blockerID) {
-		fprintln(errOut, "error:", ticket.ErrTicketNotFound, blockerID)
-
-		return 1
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, blockerID)
 	}
 
 	// Cannot block self
 	if ticketID == blockerID {
-		fprintln(errOut, "error:", ticket.ErrCannotBlockSelf)
-
-		return 1
+		return ticket.ErrCannotBlockSelf
 	}
 
 	path := ticket.Path(ticketDir, ticketID)
@@ -76,7 +65,7 @@ func cmdBlock(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 
 		// Check if already blocked by this blocker
 		if slices.Contains(blockedBy, blockerID) {
-			return nil, fmt.Errorf("%w %s", ticket.ErrAlreadyBlockedBy, blockerID)
+			return nil, fmt.Errorf("%w: %s", ticket.ErrAlreadyBlockedBy, blockerID)
 		}
 
 		// Add blocker
@@ -86,26 +75,20 @@ func cmdBlock(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 		return ticket.UpdateBlockedByInContent(content, blockedBy)
 	})
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		fprintln(errOut, "error:", parseErr)
-
-		return 1
+		return parseErr
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
 	if cacheErr != nil {
-		fprintln(errOut, "error:", cacheErr)
-
-		return 1
+		return cacheErr
 	}
 
-	fprintln(out, "Blocked", ticketID, "by", blockerID)
+	io.Println("Blocked", ticketID, "by", blockerID)
 
-	return 0
+	return nil
 }

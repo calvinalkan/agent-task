@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"path/filepath"
 	"time"
 
@@ -11,20 +10,18 @@ import (
 
 const closeHelp = `  close <id>             Set status to closed`
 
-func cmdClose(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdClose(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		fprintln(out, "Usage: tk close <id>")
-		fprintln(out, "")
-		fprintln(out, "Set ticket status to closed. Only works on in_progress tickets.")
+		io.Println("Usage: tk close <id>")
+		io.Println("")
+		io.Println("Set ticket status to closed. Only works on in_progress tickets.")
 
-		return 0
+		return nil
 	}
 
 	if len(args) == 0 {
-		fprintln(errOut, "error:", ticket.ErrIDRequired)
-
-		return 1
+		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
@@ -37,9 +34,7 @@ func cmdClose(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 
 	// Check if ticket exists
 	if !ticket.Exists(ticketDir, ticketID) {
-		fprintln(errOut, "error:", ticket.ErrTicketNotFound, ticketID)
-
-		return 1
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(ticketDir, ticketID)
@@ -77,26 +72,20 @@ func cmdClose(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string
 		return ticket.AddFieldToContent(newContent, "closed", closedTime)
 	})
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		fprintln(errOut, "error:", parseErr)
-
-		return 1
+		return parseErr
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDir, ticketID+".md", &summary)
 	if cacheErr != nil {
-		fprintln(errOut, "error:", cacheErr)
-
-		return 1
+		return cacheErr
 	}
 
-	fprintln(out, "Closed", ticketID)
+	io.Println("Closed", ticketID)
 
-	return 0
+	return nil
 }

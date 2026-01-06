@@ -71,37 +71,53 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 		return 0
 	}
 
+	// Create IO for command
+	ioCtx := NewIO(out, errOut)
+
+	// Dispatch to command
+	var cmdErr error
+
 	switch cmd {
 	case "create":
-		return cmdCreate(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdCreate(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "show":
-		return cmdShow(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdShow(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "ls":
-		return cmdLs(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdLs(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "start":
-		return cmdStart(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdStart(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "close":
-		return cmdClose(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdClose(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "reopen":
-		return cmdReopen(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdReopen(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "block":
-		return cmdBlock(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdBlock(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "unblock":
-		return cmdUnblock(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdUnblock(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "ready":
-		return cmdReady(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdReady(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "repair":
-		return cmdRepair(out, errOut, cfg, workDir, flags.remaining[1:])
+		cmdErr = cmdRepair(ioCtx, cfg, workDir, flags.remaining[1:])
 	case "editor":
-		return cmdEditor(out, errOut, cfg, workDir, flags.remaining[1:], env)
+		cmdErr = cmdEditor(ioCtx, cfg, workDir, flags.remaining[1:], env)
 	case "print-config":
-		return cmdPrintConfig(out, errOut, cfg, sources)
+		cmdErr = cmdPrintConfig(ioCtx, cfg, sources)
 	default:
 		fprintln(errOut, "error: unknown command:", cmd)
 		printUsage(errOut)
 
 		return 1
 	}
+
+	// Fatal error
+	if cmdErr != nil {
+		fprintln(errOut, "error:", cmdErr)
+
+		return 1
+	}
+
+	// Finish handles warnings and exit code
+	return ioCtx.Finish()
 }
 
 type globalFlags struct {
@@ -210,41 +226,35 @@ func parseFlag(args []string, idx int, flags *globalFlags) (int, error) {
 	return consumedNone, nil
 }
 
-func cmdPrintConfig(out io.Writer, errOut io.Writer, cfg ticket.Config, sources ticket.ConfigSources) int {
+func cmdPrintConfig(o *IO, cfg ticket.Config, sources ticket.ConfigSources) error {
 	formatted, err := ticket.FormatConfig(cfg)
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
-	fprintln(out, formatted)
+	o.Println(formatted)
 
 	// Print sources
-	fprintln(out, "")
-	fprintln(out, "# Sources:")
+	o.Println("")
+	o.Println("# Sources:")
 
 	if sources.Global != "" {
-		fprintln(out, "#   global:", sources.Global)
+		o.Println("#   global:", sources.Global)
 	}
 
 	if sources.Project != "" {
-		fprintln(out, "#   project:", sources.Project)
+		o.Println("#   project:", sources.Project)
 	}
 
 	if sources.Global == "" && sources.Project == "" {
-		fprintln(out, "#   (using defaults only)")
+		o.Println("#   (using defaults only)")
 	}
 
-	return 0
+	return nil
 }
 
 func fprintln(w io.Writer, a ...any) {
 	_, _ = fmt.Fprintln(w, a...)
-}
-
-func fprintf(w io.Writer, format string, a ...any) {
-	_, _ = fmt.Fprintf(w, format, a...)
 }
 
 func hasHelpFlag(args []string) bool {

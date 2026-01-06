@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"io"
+	"fmt"
 	"path/filepath"
 
 	"tk/internal/ticket"
@@ -9,20 +9,18 @@ import (
 
 const showHelp = `  show <id>              Show ticket details`
 
-func cmdShow(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string, args []string) int {
+func cmdShow(io *IO, cfg ticket.Config, workDir string, args []string) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		fprintln(out, "Usage: tk show <id>")
-		fprintln(out, "")
-		fprintln(out, "Display the full contents of a ticket.")
+		io.Println("Usage: tk show <id>")
+		io.Println("")
+		io.Println("Display the full contents of a ticket.")
 
-		return 0
+		return nil
 	}
 
 	if len(args) == 0 {
-		fprintln(errOut, "error:", ticket.ErrIDRequired)
-
-		return 1
+		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
@@ -35,9 +33,7 @@ func cmdShow(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string,
 
 	// Check if ticket exists
 	if !ticket.Exists(ticketDir, ticketID) {
-		fprintln(errOut, "error:", ticket.ErrTicketNotFound, ticketID)
-
-		return 1
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(ticketDir, ticketID)
@@ -45,13 +41,11 @@ func cmdShow(out io.Writer, errOut io.Writer, cfg ticket.Config, workDir string,
 	// Read ticket contents
 	content, err := ticket.ReadTicket(path)
 	if err != nil {
-		fprintln(errOut, "error:", err)
-
-		return 1
+		return err
 	}
 
-	// Print content without adding extra newline (content already ends with newline)
-	_, _ = io.WriteString(out, content)
+	// Print content (Printf to avoid extra newline since content already ends with newline)
+	io.Printf("%s", content)
 
-	return 0
+	return nil
 }

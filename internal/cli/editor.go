@@ -3,7 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,10 +53,10 @@ func resolveEditor(cfg ticket.Config, env map[string]string) (string, error) {
 	return "", ticket.ErrNoEditorFound
 }
 
-func runEditor(editor, path string, errOut io.Writer) int {
+func runEditor(editor, path string) error {
 	ctx := context.Background()
 
-	// Build command args - zed needs -w flag to wait
+	// Build command args - zed needs -n flag
 	var cmd *exec.Cmd
 
 	if filepath.Base(editor) == "zed" {
@@ -73,38 +73,33 @@ func runEditor(editor, path string, errOut io.Writer) int {
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
-			return exitErr.ExitCode()
+			return fmt.Errorf("editor exited with code %d", exitErr.ExitCode())
 		}
 
-		fprintln(errOut, "error: failed to run editor:", runErr)
-
-		return 1
+		return fmt.Errorf("failed to run editor: %w", runErr)
 	}
 
-	return 0
+	return nil
 }
 
 func cmdEditor(
-	out io.Writer,
-	errOut io.Writer,
+	io *IO,
 	cfg ticket.Config,
 	workDir string,
 	args []string,
 	env map[string]string,
-) int {
+) error {
 	// Handle --help/-h
 	if hasHelpFlag(args) {
-		fprintln(out, "Usage: tk editor <id>")
-		fprintln(out, "")
-		fprintln(out, "Open a ticket in your preferred editor.")
+		io.Println("Usage: tk editor <id>")
+		io.Println("")
+		io.Println("Open a ticket in your preferred editor.")
 
-		return 0
+		return nil
 	}
 
 	if len(args) == 0 {
-		fprintln(errOut, "error:", ticket.ErrIDRequired)
-
-		return 1
+		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
@@ -117,9 +112,7 @@ func cmdEditor(
 
 	// Check if ticket exists
 	if !ticket.Exists(ticketDir, ticketID) {
-		fprintln(errOut, "error:", ticket.ErrTicketNotFound, ticketID)
-
-		return 1
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(ticketDir, ticketID)
@@ -127,10 +120,8 @@ func cmdEditor(
 	// Resolve editor
 	editor, resolveErr := resolveEditor(cfg, env)
 	if resolveErr != nil {
-		fprintln(errOut, "error:", resolveErr)
-
-		return 1
+		return resolveErr
 	}
 
-	return runEditor(editor, path, errOut)
+	return runEditor(editor, path)
 }
