@@ -29,7 +29,7 @@ var (
 	ErrConfigFileNotFound         = errors.New("config file not found")
 	ErrConfigFileRead             = errors.New("cannot read config file")
 	ErrConfigInvalid              = errors.New("invalid config file")
-	ErrTicketDirEmpty             = errors.New("ticket_dir cannot be empty")
+	ErrTicketDirEmpty             = errors.New("ticket-dir cannot be empty")
 	ErrFlagRequiresArg            = errors.New("flag requires an argument")
 	ErrUnknownFlag                = errors.New("unknown flag")
 	ErrIDGenerationFailed         = errors.New("no unique id after repeated attempts")

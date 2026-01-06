@@ -18,6 +18,9 @@ type Config struct {
 	// Resolved paths (computed, not serialized)
 	EffectiveCwd string `json:"-"` // Absolute working directory (from -C flag or os.Getwd)
 	TicketDirAbs string `json:"-"` // Absolute path to ticket directory
+
+	// Sources tracks which config files were loaded (for diagnostics)
+	Sources ConfigSources `json:"-"`
 }
 
 // ConfigSources tracks which config files were loaded.
@@ -67,7 +70,7 @@ type LoadConfigInput struct {
 // 5. CLI overrides.
 //
 // All paths in the returned Config are resolved to absolute paths.
-func LoadConfig(input LoadConfigInput) (Config, ConfigSources, error) {
+func LoadConfig(input LoadConfigInput) (Config, error) {
 	// Resolve effective working directory
 	workDir := input.WorkDirOverride
 	if workDir == "" {
@@ -75,30 +78,28 @@ func LoadConfig(input LoadConfigInput) (Config, ConfigSources, error) {
 
 		workDir, err = os.Getwd()
 		if err != nil {
-			return Config{}, ConfigSources{}, fmt.Errorf("cannot get working directory: %w", err)
+			return Config{}, fmt.Errorf("cannot get working directory: %w", err)
 		}
 	}
 
 	cfg := DefaultConfig()
 
-	var sources ConfigSources
-
 	// Load global config if it exists
 	globalCfg, globalPath, err := loadGlobalConfig(input.Env)
 	if err != nil {
-		return Config{}, ConfigSources{}, err
+		return Config{}, err
 	}
 
-	sources.Global = globalPath
+	cfg.Sources.Global = globalPath
 	cfg = mergeConfig(cfg, globalCfg)
 
 	// Load project/explicit config file
 	projectCfg, projectPath, err := loadProjectConfig(workDir, input.ConfigPath)
 	if err != nil {
-		return Config{}, ConfigSources{}, err
+		return Config{}, err
 	}
 
-	sources.Project = projectPath
+	cfg.Sources.Project = projectPath
 	cfg = mergeConfig(cfg, projectCfg)
 
 	// Apply CLI overrides
@@ -109,7 +110,7 @@ func LoadConfig(input LoadConfigInput) (Config, ConfigSources, error) {
 	// Validate
 	validateErr := validateConfig(cfg)
 	if validateErr != nil {
-		return Config{}, ConfigSources{}, validateErr
+		return Config{}, validateErr
 	}
 
 	// Resolve all paths to absolute
@@ -121,7 +122,7 @@ func LoadConfig(input LoadConfigInput) (Config, ConfigSources, error) {
 		cfg.TicketDirAbs = filepath.Join(workDir, cfg.TicketDir)
 	}
 
-	return cfg, sources, nil
+	return cfg, nil
 }
 
 // loadGlobalConfig loads the global user config file if it exists.

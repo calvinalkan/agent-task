@@ -239,6 +239,9 @@ func WriteTicketAtomic(ticketDir string, ticket *Ticket) (string, string, error)
 	}
 
 	// Generate base ID and lock on it to serialize concurrent creates
+	// TODO: Consider binding ticket.Created to the same timestamp/time source used
+	// for ID generation so ordering assumptions like "sort by ID == sort by
+	// created time" hold even under contention.
 	baseID := GenerateID()
 	lockPath := filepath.Join(ticketDir, baseID+".md")
 

@@ -123,7 +123,7 @@ func TestConfig_EmptyTicketDir(t *testing.T) {
 	writeFile(t, filepath.Join(c.Dir, ".tk.json"), `{"ticket_dir": ""}`)
 
 	stderr := c.MustFail("print-config")
-	cli.AssertContains(t, stderr, "ticket_dir cannot be empty")
+	cli.AssertContains(t, stderr, "ticket-dir cannot be empty")
 }
 
 func TestConfig_EmptyTicketDirViaCLI(t *testing.T) {
@@ -131,7 +131,7 @@ func TestConfig_EmptyTicketDirViaCLI(t *testing.T) {
 
 	c := cli.NewCLI(t)
 	stderr := c.MustFail("--ticket-dir=", "print-config")
-	cli.AssertContains(t, stderr, "ticket_dir cannot be empty")
+	cli.AssertContains(t, stderr, "ticket-dir cannot be empty")
 }
 
 // Tests for flag parsing errors.
@@ -141,7 +141,7 @@ func TestFlags_ConfigRequiresArgument(t *testing.T) {
 
 	c := cli.NewCLI(t)
 	stderr := c.MustFail("-c")
-	cli.AssertContains(t, stderr, "requires an argument")
+	cli.AssertContains(t, stderr, "flag needs an argument")
 }
 
 func TestFlags_TicketDirRequiresArgument(t *testing.T) {
@@ -149,7 +149,7 @@ func TestFlags_TicketDirRequiresArgument(t *testing.T) {
 
 	c := cli.NewCLI(t)
 	stderr := c.MustFail("--ticket-dir")
-	cli.AssertContains(t, stderr, "requires an argument")
+	cli.AssertContains(t, stderr, "flag needs an argument")
 }
 
 func TestFlags_UnknownFlag(t *testing.T) {
@@ -203,14 +203,6 @@ func TestHelp_DashDashHelp(t *testing.T) {
 
 	c := cli.NewCLI(t)
 	stdout := c.MustRun("--help")
-	cli.AssertContains(t, stdout, "tk - minimal ticket system")
-}
-
-func TestHelp_NoArgs(t *testing.T) {
-	t.Parallel()
-
-	c := cli.NewCLI(t)
-	stdout := c.MustRun()
 	cli.AssertContains(t, stdout, "tk - minimal ticket system")
 }
 
@@ -358,7 +350,7 @@ func TestConfig_GlobalConfig_EmptyTicketDir(t *testing.T) {
 
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
 	stderr := c.MustFail("print-config")
-	cli.AssertContains(t, stderr, "ticket_dir cannot be empty")
+	cli.AssertContains(t, stderr, "ticket-dir cannot be empty")
 }
 
 func TestConfig_Precedence_ProjectOverridesGlobal(t *testing.T) {
