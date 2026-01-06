@@ -1,289 +1,180 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"time"
 
 	"tk/internal/ticket"
-)
 
-const (
-	minArgs      = 2
-	consumedOne  = 1
-	consumedTwo  = 2
-	consumedNone = 0
-	helpFlag     = "--help"
+	flag "github.com/spf13/pflag"
 )
 
 // Run is the main entry point. Returns exit code.
-func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[string]string) int {
-	if len(args) < minArgs {
-		printUsage(out)
+// sigCh can be nil if signal handling is not needed (e.g., in tests).
+func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[string]string, sigCh <-chan os.Signal) int {
+	// Create fresh global flags for this invocation
+	globalFlags := flag.NewFlagSet("tk", flag.ContinueOnError)
+	globalFlags.SetInterspersed(false)
+	globalFlags.Usage = func() {}
+	globalFlags.SetOutput(&strings.Builder{})
+	flagHelp := globalFlags.BoolP("help", "h", false, "Show help")
+	flagCwd := globalFlags.StringP("cwd", "C", "", "Run as if started in `dir`")
+	flagConfig := globalFlags.StringP("config", "c", "", "Use specified config `file`")
+	flagTicketDir := globalFlags.String("ticket-dir", "", "Override ticket `directory`")
 
-		return 0
-	}
-
-	// Parse global flags
-	flags, err := parseGlobalFlags(args[1:])
-	if err != nil {
+	// Validate global flags.
+	if err := globalFlags.Parse(args[1:]); err != nil {
 		fprintln(errOut, "error:", err)
+		printGlobalOptions(errOut)
 
 		return 1
 	}
 
-	// Load and validate config (resolves all paths internally)
-	cfg, sources, err := ticket.LoadConfig(ticket.LoadConfigInput{
-		WorkDirOverride:   flags.workDir,
-		ConfigPath:        flags.configPath,
-		TicketDirOverride: flags.ticketDir,
+	if globalFlags.Changed("ticket-dir") && *flagTicketDir == "" {
+		fprintln(errOut, "error:", ticket.ErrTicketDirEmpty)
+		printGlobalOptions(errOut)
+
+		return 1
+	}
+
+	// Ensure that configuration can be loaded an is valid.
+	cfg, err := ticket.LoadConfig(ticket.LoadConfigInput{
+		WorkDirOverride:   *flagCwd,
+		ConfigPath:        *flagConfig,
+		TicketDirOverride: *flagTicketDir,
 		Env:               env,
 	})
 	if err != nil {
 		fprintln(errOut, "error:", err)
-		printUsage(errOut)
+		printGlobalOptions(errOut)
 
 		return 1
 	}
 
-	if len(flags.remaining) == 0 {
-		printUsage(out)
+	// Create all commands so that from now on, we can show
+	// all of them inside error output/help.
+	commands := allCommands(cfg, env)
+
+	commandMap := make(map[string]*Command, len(commands))
+	for _, cmd := range commands {
+		commandMap[cmd.Name()] = cmd
+	}
+
+	commandAndArgs := globalFlags.Args()
+
+	// Show help: explicit --help or bare `tk` with no args
+	if *flagHelp || (len(commandAndArgs) == 0 && globalFlags.NFlag() == 0) {
+		printUsage(out, commands)
 
 		return 0
 	}
 
-	cmd := flags.remaining[0]
-	_ = flags.remaining[1:] // remaining args for command
+	// Flags provided but no command: `tk --cwd /tmp`
+	if len(commandAndArgs) == 0 {
+		fprintln(errOut, "error: no command provided")
+		printUsage(errOut, commands)
 
-	// Handle help flags
-	if cmd == "-h" || cmd == helpFlag {
-		printUsage(out)
-
-		return 0
+		return 1
 	}
-
-	// Create IO for command
-	ioCtx := NewIO(out, errOut)
 
 	// Dispatch to command
-	var cmdErr error
-
-	switch cmd {
-	case "create":
-		cmdErr = cmdCreate(ioCtx, cfg, flags.remaining[1:])
-	case "show":
-		cmdErr = cmdShow(ioCtx, cfg, flags.remaining[1:])
-	case "ls":
-		cmdErr = cmdLs(ioCtx, cfg, flags.remaining[1:])
-	case "start":
-		cmdErr = cmdStart(ioCtx, cfg, flags.remaining[1:])
-	case "close":
-		cmdErr = cmdClose(ioCtx, cfg, flags.remaining[1:])
-	case "reopen":
-		cmdErr = cmdReopen(ioCtx, cfg, flags.remaining[1:])
-	case "block":
-		cmdErr = cmdBlock(ioCtx, cfg, flags.remaining[1:])
-	case "unblock":
-		cmdErr = cmdUnblock(ioCtx, cfg, flags.remaining[1:])
-	case "ready":
-		cmdErr = cmdReady(ioCtx, cfg, flags.remaining[1:])
-	case "repair":
-		cmdErr = cmdRepair(ioCtx, cfg, flags.remaining[1:])
-	case "editor":
-		cmdErr = cmdEditor(ioCtx, cfg, flags.remaining[1:], env)
-	case "print-config":
-		cmdErr = cmdPrintConfig(ioCtx, cfg, sources)
-	default:
-		fprintln(errOut, "error: unknown command:", cmd)
-		printUsage(errOut)
+	cmdName := commandAndArgs[0]
+	cmd, ok := commandMap[cmdName]
+	if !ok {
+		fprintln(errOut, "error: unknown command:", cmdName)
+		printUsage(errOut, commands)
 
 		return 1
 	}
 
-	// Fatal error
-	if cmdErr != nil {
-		fprintln(errOut, "error:", cmdErr)
+	cmdIO := NewIO(out, errOut)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		return 1
+	// Run command in goroutine so we can handle signals
+	done := make(chan int, 1)
+	go func() {
+		done <- cmd.Run(ctx, cmdIO, commandAndArgs[1:])
+	}()
+
+	// Wait for completion or first signal (nil channel never fires)
+	select {
+	case exitCode := <-done:
+		if exitCode != 0 {
+			return exitCode
+		}
+		return cmdIO.Finish()
+	case <-sigCh:
+		fprintln(errOut, "shutting down with 5s timeout...")
+		cancel()
 	}
 
-	// Finish handles warnings and exit code
-	return ioCtx.Finish()
+	// Wait for completion, timeout, or second signal
+	select {
+	case <-done:
+		fprintln(errOut, "graceful shutdown ok (130)")
+		return 130
+	case <-time.After(5 * time.Second):
+		fprintln(errOut, "graceful shutdown timed out, forced exit (130)")
+		return 130
+	case <-sigCh:
+		fprintln(errOut, "graceful shutdown interrupted, forced exit (130)")
+		return 130
+	}
 }
 
-type globalFlags struct {
-	workDir    string
-	configPath string
-	ticketDir  string
-	remaining  []string
-}
-
-func parseGlobalFlags(args []string) (globalFlags, error) {
-	var flags globalFlags
-
-	idx := 0
-	for idx < len(args) {
-		consumed, err := parseFlag(args, idx, &flags)
-		if err != nil {
-			return globalFlags{}, err
-		}
-
-		if consumed == 0 {
-			// Not a flag, this is the command
-			flags.remaining = args[idx:]
-
-			break
-		}
-
-		idx += consumed
+// allCommands returns all commands in display order.
+// Dependencies are captured via closures in each command constructor.
+func allCommands(cfg ticket.Config, env map[string]string) []*Command {
+	return []*Command{
+		ShowCmd(cfg),
+		CreateCmd(cfg),
+		LsCmd(cfg),
+		StartCmd(cfg),
+		CloseCmd(cfg),
+		ReopenCmd(cfg),
+		BlockCmd(cfg),
+		UnblockCmd(cfg),
+		ReadyCmd(cfg),
+		RepairCmd(cfg),
+		EditorCmd(cfg, env),
+		PrintConfigCmd(cfg),
 	}
-
-	return flags, nil
-}
-
-// parseFlag tries to parse a flag at args[idx]. Returns number of args consumed (0 if not a flag).
-func parseFlag(args []string, idx int, flags *globalFlags) (int, error) {
-	arg := args[idx]
-
-	// -C/--cwd flag (work directory)
-	if (arg == "-C" || arg == "--cwd") && idx+1 < len(args) {
-		flags.workDir = args[idx+1]
-
-		return consumedTwo, nil
-	}
-
-	if after, ok := strings.CutPrefix(arg, "-C"); ok {
-		flags.workDir = after
-
-		return consumedOne, nil
-	}
-
-	if after, ok := strings.CutPrefix(arg, "--cwd="); ok {
-		flags.workDir = after
-
-		return consumedOne, nil
-	}
-
-	// -c/--config flag
-	if arg == "-c" || arg == "--config" {
-		if idx+1 >= len(args) {
-			return consumedNone, fmt.Errorf("%w: %s", ticket.ErrFlagRequiresArg, arg)
-		}
-
-		flags.configPath = args[idx+1]
-
-		return consumedTwo, nil
-	}
-
-	if after, ok := strings.CutPrefix(arg, "--config="); ok {
-		flags.configPath = after
-
-		return consumedOne, nil
-	}
-
-	// --ticket-dir flag
-	if arg == "--ticket-dir" {
-		if idx+1 >= len(args) {
-			return consumedNone, fmt.Errorf("%w: %s", ticket.ErrFlagRequiresArg, arg)
-		}
-
-		if args[idx+1] == "" {
-			return consumedNone, ticket.ErrTicketDirEmpty
-		}
-
-		flags.ticketDir = args[idx+1]
-
-		return consumedTwo, nil
-	}
-
-	if after, ok := strings.CutPrefix(arg, "--ticket-dir="); ok {
-		if after == "" {
-			return consumedNone, ticket.ErrTicketDirEmpty
-		}
-
-		flags.ticketDir = after
-
-		return consumedOne, nil
-	}
-
-	// -h/--help flags
-	if arg == "-h" || arg == helpFlag {
-		flags.remaining = []string{helpFlag}
-
-		return len(args) - idx, nil
-	}
-
-	// Unknown flag
-	if strings.HasPrefix(arg, "-") && arg != "-" {
-		return consumedNone, fmt.Errorf("%w: %s", ticket.ErrUnknownFlag, arg)
-	}
-
-	// Not a flag
-	return consumedNone, nil
-}
-
-func cmdPrintConfig(o *IO, cfg ticket.Config, sources ticket.ConfigSources) error {
-	// Print config values (omit empty)
-	o.Println("effective_cwd=" + cfg.EffectiveCwd)
-	o.Println("ticket_dir=" + cfg.TicketDirAbs)
-
-	if cfg.Editor != "" {
-		o.Println("editor=" + cfg.Editor)
-	}
-
-	// Print sources
-	o.Println("")
-	o.Println("# sources")
-
-	if sources.Global == "" && sources.Project == "" {
-		o.Println("(defaults only)")
-	} else {
-		if sources.Global != "" {
-			o.Println("global_config=" + sources.Global)
-		}
-
-		if sources.Project != "" {
-			o.Println("project_config=" + sources.Project)
-		}
-	}
-
-	return nil
 }
 
 func fprintln(w io.Writer, a ...any) {
 	_, _ = fmt.Fprintln(w, a...)
 }
 
-func hasHelpFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "-h" || arg == helpFlag {
-			return true
-		}
-	}
+const globalOptionsHelp = `  -h, --help             Show help
+  -C, --cwd <dir>        Run as if started in <dir>
+  -c, --config <file>    Use specified config file
+  --ticket-dir <dir>     Override ticket directory`
 
-	return false
+func printGlobalOptions(w io.Writer) {
+	fprintln(w, "Usage: tk [flags] <command> [args]")
+	fprintln(w)
+	fprintln(w, "Global flags:")
+	fprintln(w, globalOptionsHelp)
+	fprintln(w)
+	fprintln(w, "Run 'tk --help' for a list of commands.")
 }
 
-func printUsage(writer io.Writer) {
-	fprintln(writer, `tk - minimal ticket system
+func printUsage(w io.Writer, commands []*Command) {
+	fprintln(w, "tk - minimal ticket system")
+	fprintln(w)
+	fprintln(w, "Usage: tk [flags] <command> [args]")
+	fprintln(w)
+	fprintln(w, "Flags:")
+	fprintln(w, globalOptionsHelp)
+	fprintln(w)
+	fprintln(w, "Commands:")
 
-Usage: tk [options] <command> [args]
-
-Options:
-  -C, --cwd <dir>    Run as if started in <dir>
-  -c, --config       Use specified config file
-
-Commands:`)
-	fprintln(writer, createHelp)
-	fprintln(writer, showHelp)
-	fprintln(writer, `  ls [--status=X]        List tickets`)
-	fprintln(writer, startHelp)
-	fprintln(writer, closeHelp)
-	fprintln(writer, reopenHelp)
-	fprintln(writer, blockHelp)
-	fprintln(writer, unblockHelp)
-	fprintln(writer, readyHelp)
-	fprintln(writer, repairHelp)
-	fprintln(writer, editorHelp)
-	fprintln(writer, `  print-config           Show resolved configuration`)
+	for _, cmd := range commands {
+		fprintln(w, cmd.HelpLine())
+	}
 }

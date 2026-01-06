@@ -1,45 +1,46 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"tk/internal/ticket"
+
+	flag "github.com/spf13/pflag"
 )
 
-const reopenHelp = `  reopen <id>            Set status to open`
-
-func cmdReopen(o *IO, cfg ticket.Config, args []string) error {
-	// Handle --help/-h
-	if hasHelpFlag(args) {
-		o.Println("Usage: tk reopen <id>")
-		o.Println("")
-		o.Println("Set ticket status back to open. Only works on closed tickets.")
-
-		return nil
+// ReopenCmd returns the reopen command.
+func ReopenCmd(cfg ticket.Config) *Command {
+	return &Command{
+		Flags: flag.NewFlagSet("reopen", flag.ContinueOnError),
+		Usage: "reopen <id>",
+		Short: "Set status to open",
+		Long:  "Set ticket status back to open. Only works on closed tickets.",
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execReopen(io, cfg, args)
+		},
 	}
+}
 
+func execReopen(io *IO, cfg ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
 
-	// Check if ticket exists
 	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
-	// Use locked operation to atomically check status and update
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
-		// Read current status
 		status, statusErr := ticket.GetStatusFromContent(content)
 		if statusErr != nil {
 			return nil, fmt.Errorf("reading status: %w", statusErr)
 		}
 
-		// Only allow reopening closed tickets
 		if status == ticket.StatusOpen {
 			return nil, ticket.ErrTicketAlreadyOpen
 		}
@@ -52,16 +53,14 @@ func cmdReopen(o *IO, cfg ticket.Config, args []string) error {
 			return nil, fmt.Errorf("%w (current status: %s)", ticket.ErrTicketNotClosed, status)
 		}
 
-		// Update status to open
 		newContent, updateErr := ticket.UpdateStatusInContent(content, ticket.StatusOpen)
 		if updateErr != nil {
 			return nil, fmt.Errorf("updating status: %w", updateErr)
 		}
 
-		// Remove closed timestamp
 		result := ticket.RemoveFieldFromContent(newContent, "closed")
 		if result == nil {
-			return newContent, nil // field wasn't there, just return status update
+			return newContent, nil
 		}
 
 		return result, nil
@@ -80,7 +79,7 @@ func cmdReopen(o *IO, cfg ticket.Config, args []string) error {
 		return cacheErr
 	}
 
-	o.Println("Reopened", ticketID)
+	io.Println("Reopened", ticketID)
 
 	return nil
 }

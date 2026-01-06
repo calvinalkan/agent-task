@@ -1,46 +1,47 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"tk/internal/ticket"
+
+	flag "github.com/spf13/pflag"
 )
 
-const closeHelp = `  close <id>             Set status to closed`
-
-func cmdClose(o *IO, cfg ticket.Config, args []string) error {
-	// Handle --help/-h
-	if hasHelpFlag(args) {
-		o.Println("Usage: tk close <id>")
-		o.Println("")
-		o.Println("Set ticket status to closed. Only works on in_progress tickets.")
-
-		return nil
+// CloseCmd returns the close command.
+func CloseCmd(cfg ticket.Config) *Command {
+	return &Command{
+		Flags: flag.NewFlagSet("close", flag.ContinueOnError),
+		Usage: "close <id>",
+		Short: "Set status to closed",
+		Long:  "Set ticket status to closed. Only works on in_progress tickets.",
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execClose(io, cfg, args)
+		},
 	}
+}
 
+func execClose(io *IO, cfg ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
 
-	// Check if ticket exists
 	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
-	// Use locked operation to atomically check status and update with closed timestamp
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
-		// Read current status
 		status, statusErr := ticket.GetStatusFromContent(content)
 		if statusErr != nil {
 			return nil, fmt.Errorf("reading status: %w", statusErr)
 		}
 
-		// Only allow closing in_progress tickets
 		if status == ticket.StatusOpen {
 			return nil, ticket.ErrTicketNotStarted
 		}
@@ -53,13 +54,11 @@ func cmdClose(o *IO, cfg ticket.Config, args []string) error {
 			return nil, fmt.Errorf("%w (current status: %s)", ticket.ErrTicketNotInProgress, status)
 		}
 
-		// Update status to closed
 		newContent, updateErr := ticket.UpdateStatusInContent(content, ticket.StatusClosed)
 		if updateErr != nil {
 			return nil, fmt.Errorf("updating status: %w", updateErr)
 		}
 
-		// Add closed timestamp
 		closedTime := time.Now().UTC().Format(time.RFC3339)
 
 		return ticket.AddFieldToContent(newContent, "closed", closedTime)
@@ -78,7 +77,7 @@ func cmdClose(o *IO, cfg ticket.Config, args []string) error {
 		return cacheErr
 	}
 
-	o.Println("Closed", ticketID)
+	io.Println("Closed", ticketID)
 
 	return nil
 }

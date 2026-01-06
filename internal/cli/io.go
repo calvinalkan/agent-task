@@ -48,6 +48,11 @@ func (o *IO) Printf(format string, a ...any) {
 	_, _ = fmt.Fprintf(o.out, format, a...)
 }
 
+// ErrPrintln writes to stderr.
+func (o *IO) ErrPrintln(a ...any) {
+	_, _ = fmt.Fprintln(o.errOut, a...)
+}
+
 // Finish prints warnings to stderr and returns exit code.
 // Returns 1 if any warnings, 0 otherwise.
 func (o *IO) Finish() int {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strconv"
@@ -8,33 +9,38 @@ import (
 	"sync"
 
 	"tk/internal/ticket"
+
+	flag "github.com/spf13/pflag"
 )
 
-const readyHelp = `  ready                  List actionable tickets (unblocked, not closed)`
+// ReadyCmd returns the ready command.
+func ReadyCmd(cfg ticket.Config) *Command {
+	return &Command{
+		Flags: flag.NewFlagSet("ready", flag.ContinueOnError),
+		Usage: "ready",
+		Short: "List actionable tickets (unblocked, not closed)",
+		Long: `List actionable tickets that can be worked on now.
+Shows open tickets with all blockers closed.
 
-func cmdReady(o *IO, cfg ticket.Config, args []string) error {
-	// Handle --help/-h
-	if hasHelpFlag(args) {
-		printReadyHelp(o)
-
-		return nil
+Output sorted by priority (P1 first), then by ID.`,
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execReady(io, cfg)
+		},
 	}
+}
 
-	// List all tickets (need all for blocker resolution)
+func execReady(io *IO, cfg ticket.Config) error {
 	results, err := ticket.ListTickets(cfg.TicketDirAbs, ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
 		return err
 	}
 
-	// Build status map and filter ready tickets (parallel)
 	ready, warnings := filterReadyTickets(results)
 
-	// Collect warnings via IO
 	for _, w := range warnings {
-		o.WarnLLM(w.issue, w.action)
+		io.WarnLLM(w.issue, w.action)
 	}
 
-	// Sort by priority (ascending, P1 first), then by ID
 	slices.SortFunc(ready, func(a, b *ticket.Summary) int {
 		if a.Priority != b.Priority {
 			return a.Priority - b.Priority
@@ -43,10 +49,8 @@ func cmdReady(o *IO, cfg ticket.Config, args []string) error {
 		return strings.Compare(a.ID, b.ID)
 	})
 
-	// Output formatted lines
 	for _, summary := range ready {
-		line := formatReadyLine(summary)
-		o.Println(line)
+		io.Println(formatReadyLine(summary))
 	}
 
 	return nil
@@ -66,12 +70,9 @@ type readyCheckResult struct {
 }
 
 // filterReadyTickets builds status map and returns ready tickets.
-// Uses parallel processing for blocker resolution checks.
 func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarning) {
-	// Build map: ticketID → status (for blocker lookup)
 	statusMap := make(map[string]string)
 
-	// Collect valid summaries and parse errors
 	var candidates []*ticket.Summary
 
 	var allWarnings []readyWarning
@@ -88,7 +89,6 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 
 		statusMap[result.Summary.ID] = result.Summary.Status
 
-		// Only consider open tickets as candidates
 		if result.Summary.Status == ticket.StatusOpen {
 			candidates = append(candidates, result.Summary)
 		}
@@ -98,7 +98,6 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 		return nil, allWarnings
 	}
 
-	// Check blockers in parallel
 	checkResults := make([]readyCheckResult, len(candidates))
 
 	var waitGroup sync.WaitGroup
@@ -120,7 +119,6 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 
 	waitGroup.Wait()
 
-	// Collect ready tickets and warnings
 	var ready []*ticket.Summary
 
 	for _, r := range checkResults {
@@ -135,8 +133,6 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 }
 
 // checkBlockersResolved checks if a ticket has all its blockers resolved.
-// A blocker is resolved if it's closed or doesn't exist (missing = resolved with warning).
-// Returns (isReady, warnings). Thread-safe: only reads from statusMap.
 func checkBlockersResolved(summary *ticket.Summary, statusMap map[string]string) (bool, []readyWarning) {
 	var warnings []readyWarning
 
@@ -144,7 +140,6 @@ func checkBlockersResolved(summary *ticket.Summary, statusMap map[string]string)
 		status, exists := statusMap[blockerID]
 
 		if !exists {
-			// Missing blocker - treat as resolved, collect warning
 			warnings = append(warnings, readyWarning{
 				issue: fmt.Sprintf("%s blocked by non-existent ticket %s (treating as resolved)",
 					summary.ID, blockerID),
@@ -155,7 +150,6 @@ func checkBlockersResolved(summary *ticket.Summary, statusMap map[string]string)
 		}
 
 		if status != ticket.StatusClosed {
-			// Blocker is not closed - ticket is not ready
 			return false, warnings
 		}
 	}
@@ -175,13 +169,4 @@ func formatReadyLine(summary *ticket.Summary) string {
 	builder.WriteString(summary.Title)
 
 	return builder.String()
-}
-
-func printReadyHelp(o *IO) {
-	o.Println("Usage: tk ready")
-	o.Println("")
-	o.Println("List actionable tickets that can be worked on now.")
-	o.Println("Shows open tickets with all blockers closed.")
-	o.Println("")
-	o.Println("Output sorted by priority (P1 first), then by ID.")
 }

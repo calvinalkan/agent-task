@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,35 +13,65 @@ import (
 
 const defaultLimit = 100
 
-// lsOptions holds parsed ls command options.
-type lsOptions struct {
-	status     string
-	priority   int
-	ticketType string
-	limit      int
-	offset     int
+// LsCmd returns the ls command.
+func LsCmd(cfg ticket.Config) *Command {
+	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+	fs.String("status", "", "Filter by status (open|in_progress|closed)")
+	fs.Int("priority", 0, "Filter by priority (1-4)")
+	fs.String("type", "", "Filter by type (bug|feature|task|epic|chore)")
+	fs.Int("limit", defaultLimit, "Maximum tickets to show")
+	fs.Int("offset", 0, "Skip first N tickets")
+
+	return &Command{
+		Flags: fs,
+		Usage: "ls [flags]",
+		Short: "List tickets",
+		Long:  "List all tickets. Output sorted by ID (oldest first).",
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execLs(io, cfg, fs)
+		},
+	}
 }
 
-func cmdLs(o *IO, cfg ticket.Config, args []string) error {
-	// Handle --help/-h
-	if hasHelpFlag(args) {
-		printLsHelp(o)
-
-		return nil
+func execLs(io *IO, cfg ticket.Config, fs *flag.FlagSet) error {
+	status, _ := fs.GetString("status")
+	if fs.Changed("status") {
+		err := validateStatusFlag(status)
+		if err != nil {
+			return err
+		}
 	}
 
-	opts, err := parseLsFlags(args)
-	if err != nil {
-		return err
+	priority, _ := fs.GetInt("priority")
+	if fs.Changed("priority") {
+		if priority < 1 || priority > 4 {
+			return errors.New("--priority must be 1-4")
+		}
 	}
 
-	// List tickets with options - filtering happens in ListTickets
+	ticketType, _ := fs.GetString("type")
+	if fs.Changed("type") {
+		if !ticket.IsValidTicketType(ticketType) {
+			return fmt.Errorf("invalid type: %s", ticketType)
+		}
+	}
+
+	limit, _ := fs.GetInt("limit")
+	if limit < 0 {
+		return errors.New("--limit must be non-negative")
+	}
+
+	offset, _ := fs.GetInt("offset")
+	if offset < 0 {
+		return errors.New("--offset must be non-negative")
+	}
+
 	listOpts := ticket.ListTicketsOptions{
-		Status:   opts.status,
-		Priority: opts.priority,
-		Type:     opts.ticketType,
-		Limit:    opts.limit,
-		Offset:   opts.offset,
+		Status:   status,
+		Priority: priority,
+		Type:     ticketType,
+		Limit:    limit,
+		Offset:   offset,
 	}
 
 	results, err := ticket.ListTickets(cfg.TicketDirAbs, listOpts, nil)
@@ -48,12 +79,11 @@ func cmdLs(o *IO, cfg ticket.Config, args []string) error {
 		return err
 	}
 
-	// Separate valid tickets from errors
 	var valid []*ticket.Summary
 
 	for _, result := range results {
 		if result.Err != nil {
-			o.WarnLLM(
+			io.WarnLLM(
 				fmt.Sprintf("%s: %v", result.Path, result.Err),
 				"fix the ticket file or delete it if invalid",
 			)
@@ -64,81 +94,11 @@ func cmdLs(o *IO, cfg ticket.Config, args []string) error {
 		valid = append(valid, result.Summary)
 	}
 
-	// Output valid tickets
 	for _, summary := range valid {
-		o.Println(formatTicketLine(summary))
+		io.Println(formatTicketLine(summary))
 	}
 
 	return nil
-}
-
-func parseLsFlags(args []string) (lsOptions, error) {
-	flagSet := flag.NewFlagSet("ls", flag.ContinueOnError)
-	flagSet.SetOutput(&strings.Builder{}) // discard output
-
-	status := flagSet.String("status", "", "Filter by status")
-	priority := flagSet.Int("priority", 0, "Filter by priority (1-4)")
-	ticketType := flagSet.String("type", "", "Filter by type")
-	limit := flagSet.Int("limit", defaultLimit, "Maximum tickets to show")
-	offset := flagSet.Int("offset", 0, "Skip first N tickets")
-
-	parseErr := flagSet.Parse(args)
-	if parseErr != nil {
-		return lsOptions{}, parseErr
-	}
-
-	// Validate status if provided
-	if flagSet.Changed("status") {
-		validateErr := validateStatusFlag(*status)
-		if validateErr != nil {
-			return lsOptions{}, validateErr
-		}
-	}
-
-	// Validate priority if provided
-	if flagSet.Changed("priority") {
-		if *priority < 1 || *priority > 4 {
-			return lsOptions{}, errors.New("--priority must be 1-4")
-		}
-	}
-
-	// Validate type if provided
-	if flagSet.Changed("type") {
-		if !ticket.IsValidTicketType(*ticketType) {
-			return lsOptions{}, fmt.Errorf("invalid type: %s", *ticketType)
-		}
-	}
-
-	// Validate limit
-	if *limit < 0 {
-		return lsOptions{}, errors.New("--limit must be non-negative")
-	}
-
-	// Validate offset
-	if *offset < 0 {
-		return lsOptions{}, errors.New("--offset must be non-negative")
-	}
-
-	return lsOptions{
-		status:     *status,
-		priority:   *priority,
-		ticketType: *ticketType,
-		limit:      *limit,
-		offset:     *offset,
-	}, nil
-}
-
-func printLsHelp(o *IO) {
-	o.Println("Usage: tk ls [options]")
-	o.Println("")
-	o.Println("List all tickets. Output sorted by ID (oldest first).")
-	o.Println("")
-	o.Println("Options:")
-	o.Println("  --status=<status>    Filter by status (open|in_progress|closed)")
-	o.Println("  --priority=N         Filter by priority (1-4)")
-	o.Println("  --type=<type>        Filter by type (bug|feature|task|epic|chore)")
-	o.Println("  --limit=N            Max tickets to show [default: 100]")
-	o.Println("  --offset=N           Skip first N tickets [default: 0]")
 }
 
 var errInvalidStatus = errors.New("invalid status")

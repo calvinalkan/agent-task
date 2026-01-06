@@ -1,24 +1,29 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
 	"tk/internal/ticket"
+
+	flag "github.com/spf13/pflag"
 )
 
-const unblockHelp = `  unblock <id> <blocker> Remove blocker from ticket`
-
-func cmdUnblock(o *IO, cfg ticket.Config, args []string) error {
-	// Handle --help/-h
-	if hasHelpFlag(args) {
-		o.Println("Usage: tk unblock <id> <blocker-id>")
-		o.Println("")
-		o.Println("Remove a blocker from a ticket's blocked-by list.")
-
-		return nil
+// UnblockCmd returns the unblock command.
+func UnblockCmd(cfg ticket.Config) *Command {
+	return &Command{
+		Flags: flag.NewFlagSet("unblock", flag.ContinueOnError),
+		Usage: "unblock <id> <blocker>",
+		Short: "Remove blocker from ticket",
+		Long:  "Remove a blocker from a ticket's blocked-by list.",
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execUnblock(io, cfg, args)
+		},
 	}
+}
 
+func execUnblock(io *IO, cfg ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
@@ -30,31 +35,25 @@ func cmdUnblock(o *IO, cfg ticket.Config, args []string) error {
 	ticketID := args[0]
 	blockerID := args[1]
 
-	// Check if ticket exists
 	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
-	// Use locked operation to atomically check and update blocked-by list
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
-		// Read current blocked-by list
 		blockedBy, readErr := ticket.GetBlockedByFromContent(content)
 		if readErr != nil {
 			return nil, fmt.Errorf("reading blocked-by: %w", readErr)
 		}
 
-		// Check if actually blocked by this blocker
 		idx := slices.Index(blockedBy, blockerID)
 		if idx == -1 {
 			return nil, fmt.Errorf("%w: %s", ticket.ErrNotBlockedBy, blockerID)
 		}
 
-		// Remove blocker
 		blockedBy = slices.Delete(blockedBy, idx, idx+1)
 
-		// Update the ticket
 		return ticket.UpdateBlockedByInContent(content, blockedBy)
 	})
 	if err != nil {
@@ -71,7 +70,7 @@ func cmdUnblock(o *IO, cfg ticket.Config, args []string) error {
 		return cacheErr
 	}
 
-	o.Println("Unblocked", ticketID, "from", blockerID)
+	io.Println("Unblocked", ticketID, "from", blockerID)
 
 	return nil
 }

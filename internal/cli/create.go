@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -19,52 +19,32 @@ var (
 	errInvalidBlocker  = errors.New("blocker not found")
 )
 
-const createHelp = `  create <title>         Create ticket, prints ID
-    -d, --description      Description text
-    --design               Design notes
-    --acceptance           Acceptance criteria
-    -t, --type             Type (bug|feature|task|epic|chore) [default: task]
-    -p, --priority         Priority 1-4, 1=most urgent [default: 2]
-    -a, --assignee         Assignee
-    --blocked-by           Blocker ticket ID (repeatable)`
+// CreateCmd returns the create command.
+func CreateCmd(cfg ticket.Config) *Command {
+	fs := flag.NewFlagSet("create", flag.ContinueOnError)
+	fs.StringP("description", "d", "", "Description text")
+	fs.String("design", "", "Design notes")
+	fs.String("acceptance", "", "Acceptance criteria")
+	fs.StringP("type", "t", "task", "Type: bug|feature|task|epic|chore")
+	fs.IntP("priority", "p", ticket.DefaultPriority, "Priority 1-4 (1=most urgent)")
+	fs.StringP("assignee", "a", "", "Assignee name")
+	fs.StringArray("blocked-by", nil, "Blocker ticket ID (repeatable)")
 
-func cmdCreate(o *IO, cfg ticket.Config, args []string) error {
-	var helpBuf bytes.Buffer
-
-	flagSet := flag.NewFlagSet("create", flag.ContinueOnError)
-	flagSet.SetOutput(&helpBuf)
-	flagSet.Usage = func() {
-		w := flagSet.Output()
-		fmt.Fprintf(w, "Usage: tk create <title> [options]\n\n")
-		fmt.Fprintf(w, "Create a new ticket. Prints ticket ID on success.\n\n")
-		fmt.Fprintf(w, "Options:\n")
-		flagSet.PrintDefaults()
+	return &Command{
+		Flags: fs,
+		Usage: "create <title>",
+		Short: "Create ticket, prints ID",
+		Long:  "Create a new ticket. Prints ticket ID on success.",
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execCreate(io, cfg, fs, args)
+		},
 	}
+}
 
-	description := flagSet.StringP("description", "d", "", "Description text")
-	design := flagSet.String("design", "", "Design notes")
-	acceptance := flagSet.String("acceptance", "", "Acceptance criteria")
-	ticketType := flagSet.StringP("type", "t", "task", "Type: bug|feature|task|epic|chore")
-	priority := flagSet.IntP("priority", "p", ticket.DefaultPriority, "Priority 1-4 (1=most urgent)")
-	assignee := flagSet.StringP("assignee", "a", "", "Assignee name")
-	blockedBy := flagSet.StringArray("blocked-by", nil, "Blocker ticket ID (repeatable)")
-
-	if hasHelpFlag(args) {
-		flagSet.Usage()
-		o.Printf("%s", helpBuf.String())
-
-		return nil
-	}
-
-	parseErr := flagSet.Parse(args)
-	if parseErr != nil {
-		return fmt.Errorf("%w\n\n%s", parseErr, helpBuf.String())
-	}
-
-	// Title is first positional argument
+func execCreate(io *IO, cfg ticket.Config, fs *flag.FlagSet, args []string) error {
 	title := ""
-	if flagSet.NArg() > 0 {
-		title = flagSet.Arg(0)
+	if len(args) > 0 {
+		title = args[0]
 	}
 
 	if title == "" {
@@ -72,31 +52,25 @@ func cmdCreate(o *IO, cfg ticket.Config, args []string) error {
 	}
 
 	// Validate no empty values for flags that were explicitly set
-	for _, check := range []struct{ name, value string }{
-		{"description", *description},
-		{"design", *design},
-		{"acceptance", *acceptance},
-		{"type", *ticketType},
-		{"assignee", *assignee},
-	} {
-		err := validateNotEmpty(flagSet, check.name, check.value)
-		if err != nil {
-			return err
+	for _, name := range []string{"description", "design", "acceptance", "type", "assignee"} {
+		v, _ := fs.GetString(name)
+		if fs.Changed(name) && v == "" {
+			return fmt.Errorf("%w: --%s", errEmptyValue, name)
 		}
 	}
 
-	// Validate type
-	if !ticket.IsValidType(*ticketType) {
-		return fmt.Errorf("%w: %s", errInvalidType, *ticketType)
+	ticketType, _ := fs.GetString("type")
+	if !ticket.IsValidType(ticketType) {
+		return fmt.Errorf("%w: %s", errInvalidType, ticketType)
 	}
 
-	// Validate priority
-	if !ticket.IsValidPriority(*priority) {
+	priority, _ := fs.GetInt("priority")
+	if !ticket.IsValidPriority(priority) {
 		return errInvalidPriority
 	}
 
-	// Validate blockers exist
-	for _, blocker := range *blockedBy {
+	blockedBy, _ := fs.GetStringArray("blocked-by")
+	for _, blocker := range blockedBy {
 		if blocker == "" {
 			return fmt.Errorf("%w: --blocked-by", errEmptyValue)
 		}
@@ -106,19 +80,23 @@ func cmdCreate(o *IO, cfg ticket.Config, args []string) error {
 		}
 	}
 
-	// Create ticket (ID will be generated atomically)
+	description, _ := fs.GetString("description")
+	design, _ := fs.GetString("design")
+	acceptance, _ := fs.GetString("acceptance")
+	assignee, _ := fs.GetString("assignee")
+
 	tkt := ticket.Ticket{
 		SchemaVersion: 1,
 		Status:        "open",
-		BlockedBy:     *blockedBy,
+		BlockedBy:     blockedBy,
 		Created:       time.Now(),
-		Type:          *ticketType,
-		Priority:      *priority,
-		Assignee:      *assignee,
+		Type:          ticketType,
+		Priority:      priority,
+		Assignee:      assignee,
 		Title:         title,
-		Description:   *description,
-		Design:        *design,
-		Acceptance:    *acceptance,
+		Description:   description,
+		Design:        design,
+		Acceptance:    acceptance,
 	}
 
 	ticketID, ticketPath, writeErr := ticket.WriteTicketAtomic(cfg.TicketDirAbs, &tkt)
@@ -136,15 +114,7 @@ func cmdCreate(o *IO, cfg ticket.Config, args []string) error {
 		return cacheErr
 	}
 
-	o.Println(ticketID)
-
-	return nil
-}
-
-func validateNotEmpty(flagSet *flag.FlagSet, name, value string) error {
-	if flagSet.Changed(name) && value == "" {
-		return fmt.Errorf("%w: --%s", errEmptyValue, name)
-	}
+	io.Println(ticketID)
 
 	return nil
 }

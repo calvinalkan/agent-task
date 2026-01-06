@@ -9,14 +9,13 @@ import (
 	"path/filepath"
 
 	"tk/internal/ticket"
-)
 
-const editorHelp = `  editor <id>            Open ticket in users editor`
+	flag "github.com/spf13/pflag"
+)
 
 // resolveEditor checks for an available editor using the env map.
 // Priority: config.Editor -> $EDITOR -> zed -> vi -> nano -> error.
 func resolveEditor(cfg ticket.Config, env map[string]string) (string, error) {
-	// 1. Check config.Editor
 	if cfg.Editor != "" {
 		_, lookErr := exec.LookPath(cfg.Editor)
 		if lookErr == nil {
@@ -24,7 +23,6 @@ func resolveEditor(cfg ticket.Config, env map[string]string) (string, error) {
 		}
 	}
 
-	// 2. Check $EDITOR from env map
 	if editor := env["EDITOR"]; editor != "" {
 		_, lookErr := exec.LookPath(editor)
 		if lookErr == nil {
@@ -32,19 +30,16 @@ func resolveEditor(cfg ticket.Config, env map[string]string) (string, error) {
 		}
 	}
 
-	// 3. Try zed
 	_, zedErr := exec.LookPath("zed")
 	if zedErr == nil {
 		return "zed", nil
 	}
 
-	// 4. Try vi
 	_, viErr := exec.LookPath("vi")
 	if viErr == nil {
 		return "vi", nil
 	}
 
-	// 5. Try nano
 	_, nanoErr := exec.LookPath("nano")
 	if nanoErr == nil {
 		return "nano", nil
@@ -56,7 +51,6 @@ func resolveEditor(cfg ticket.Config, env map[string]string) (string, error) {
 func runEditor(editor, path string) error {
 	ctx := context.Background()
 
-	// Build command args - zed needs -n flag
 	var cmd *exec.Cmd
 
 	if filepath.Base(editor) == "zed" {
@@ -82,35 +76,32 @@ func runEditor(editor, path string) error {
 	return nil
 }
 
-func cmdEditor(
-	o *IO,
-	cfg ticket.Config,
-	args []string,
-	env map[string]string,
-) error {
-	// Handle --help/-h
-	if hasHelpFlag(args) {
-		o.Println("Usage: tk editor <id>")
-		o.Println("")
-		o.Println("Open a ticket in your preferred editor.")
-
-		return nil
+// EditorCmd returns the editor command.
+func EditorCmd(cfg ticket.Config, env map[string]string) *Command {
+	return &Command{
+		Flags: flag.NewFlagSet("editor", flag.ContinueOnError),
+		Usage: "editor <id>",
+		Short: "Open ticket in editor",
+		Long:  "Open a ticket in your preferred editor.",
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execEditor(io, cfg, env, args)
+		},
 	}
+}
 
+func execEditor(io *IO, cfg ticket.Config, env map[string]string, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
 
-	// Check if ticket exists
 	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
-	// Resolve editor
 	editor, resolveErr := resolveEditor(cfg, env)
 	if resolveErr != nil {
 		return resolveErr

@@ -1,22 +1,28 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"tk/internal/ticket"
+
+	flag "github.com/spf13/pflag"
 )
 
-const startHelp = `  start <id>             Set status to in_progress`
-
-func cmdStart(o *IO, cfg ticket.Config, args []string) error {
-	if hasHelpFlag(args) {
-		o.Println("Usage: tk start <id>")
-		o.Println("")
-		o.Println("Set ticket status to in_progress. Only works on open tickets.")
-
-		return nil
+// StartCmd returns the start command.
+func StartCmd(cfg ticket.Config) *Command {
+	return &Command{
+		Flags: flag.NewFlagSet("start", flag.ContinueOnError),
+		Usage: "start <id>",
+		Short: "Set status to in_progress",
+		Long:  "Set ticket status to in_progress. Only works on open tickets.",
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execStart(io, cfg, args)
+		},
 	}
+}
 
+func execStart(io *IO, cfg ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
@@ -29,7 +35,6 @@ func cmdStart(o *IO, cfg ticket.Config, args []string) error {
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
-	// Use locked operation to atomically check status and update
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		status, statusErr := ticket.GetStatusFromContent(content)
 		if statusErr != nil {
@@ -56,15 +61,15 @@ func cmdStart(o *IO, cfg ticket.Config, args []string) error {
 		return cacheErr
 	}
 
-	o.Println("Started", ticketID)
-	o.Println()
+	io.Println("Started", ticketID)
+	io.Println()
 
 	content, err := ticket.ReadTicket(path)
 	if err != nil {
 		return err
 	}
 
-	o.Printf("%s", content)
+	io.Printf("%s", content)
 
 	return nil
 }

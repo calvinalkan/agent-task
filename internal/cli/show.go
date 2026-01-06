@@ -1,44 +1,46 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"tk/internal/ticket"
+
+	flag "github.com/spf13/pflag"
 )
 
-const showHelp = `  show <id>              Show ticket details`
-
-func cmdShow(o *IO, cfg ticket.Config, args []string) error {
-	// Handle --help/-h
-	if hasHelpFlag(args) {
-		o.Println("Usage: tk show <id>")
-		o.Println("")
-		o.Println("Display the full contents of a ticket.")
-
-		return nil
+// ShowCmd returns the show command.
+func ShowCmd(cfg ticket.Config) *Command {
+	return &Command{
+		Flags: flag.NewFlagSet("show", flag.ContinueOnError),
+		Usage: "show <id>",
+		Short: "Show ticket details",
+		Long:  "Display the full contents of a ticket.",
+		Exec: func(_ context.Context, io *IO, args []string) error {
+			return execShow(io, cfg, args)
+		},
 	}
+}
 
+func execShow(io *IO, cfg ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
 
 	ticketID := args[0]
 
-	// Check if ticket exists
 	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
 
-	// Read ticket contents
 	content, err := ticket.ReadTicket(path)
 	if err != nil {
 		return err
 	}
 
-	// Print content (Printf to avoid extra newline since content already ends with newline)
-	o.Printf("%s", content)
+	io.Printf("%s", content)
 
 	return nil
 }

@@ -35,7 +35,7 @@ func (r *CLI) Run(args ...string) (string, string, int) {
 	var outBuf, errBuf bytes.Buffer
 
 	fullArgs := append([]string{"tk", "--cwd", r.Dir}, args...)
-	code := Run(nil, &outBuf, &errBuf, fullArgs, r.Env)
+	code := Run(nil, &outBuf, &errBuf, fullArgs, r.Env, nil)
 
 	return outBuf.String(), errBuf.String(), code
 }
@@ -56,7 +56,7 @@ func (r *CLI) RunWithInput(stdin any, args ...string) (string, string, int) {
 	var outBuf, errBuf bytes.Buffer
 
 	fullArgs := append([]string{"tk", "--cwd", r.Dir}, args...)
-	code := Run(inReader, &outBuf, &errBuf, fullArgs, r.Env)
+	code := Run(inReader, &outBuf, &errBuf, fullArgs, r.Env, nil)
 
 	return outBuf.String(), errBuf.String(), code
 }
