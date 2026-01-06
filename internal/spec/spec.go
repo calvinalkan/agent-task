@@ -79,7 +79,6 @@ const (
 	ErrBlockerCycle         ErrCode = "blocker_cycle"
 	ErrParentNotFound       ErrCode = "parent_not_found"
 	ErrParentAlreadyClosed  ErrCode = "parent_already_closed"
-	ErrParentCycle          ErrCode = "parent_cycle"
 	ErrParentNotStarted     ErrCode = "parent_not_started"
 	ErrHasOpenChildren      ErrCode = "has_open_children"
 	ErrHasOpenBlockers      ErrCode = "has_open_blockers"
@@ -90,11 +89,16 @@ const (
 	ErrCantReopenOpen       ErrCode = "cant_reopen_open"
 	ErrCantReopenInProgress ErrCode = "cant_reopen_in_progress"
 	ErrClosedBeforeCreated  ErrCode = "closed_before_created"
+	ErrStartedBeforeCreated ErrCode = "started_before_created"
 	ErrInvalidOffset        ErrCode = "invalid_offset"
 	ErrInvalidLimit         ErrCode = "invalid_limit"
 	ErrOffsetOutOfBounds    ErrCode = "offset_out_of_bounds"
 	ErrDuplicateBlocker     ErrCode = "duplicate_blocker"
 	ErrTicketClosed         ErrCode = "ticket_closed"
+	ErrClaimedByRequired    ErrCode = "claimed_by_required"
+	ErrContentRequired      ErrCode = "content_required"
+	ErrEmptyTag             ErrCode = "empty_tag"
+	ErrDuplicateTag         ErrCode = "duplicate_tag"
 )
 
 // KV is a key-value pair for error context.
@@ -176,19 +180,19 @@ const (
 // Ticket represents the complete state of a single ticket.
 // All fields are set by Create and may be modified by state transitions.
 type Ticket struct {
-	ID          string
-	CreatedAt   time.Time
-	Title       string
-	Description string
-	Design      string
-	Acceptance  string
-	Type        Type
-	Priority    Priority
-	Assignee    string
-	Status      Status
-	ParentID    string // empty if no parent
-	BlockedBy   []string
-	ClosedAt    time.Time // zero value if not closed
+	ID        string
+	CreatedAt time.Time
+	Title     string
+	Content   string // freeform markdown body; must be non-empty
+	Type      Type
+	Priority  Priority
+	Status    Status
+	ParentID  string // empty if no parent
+	BlockedBy []string
+	Tags      []string  // free-form tags; immutable after creation
+	ClaimedBy string    // who is working on it; empty if not claimed
+	ClaimedAt time.Time // when it was claimed; zero if not claimed
+	ClosedAt  time.Time // zero value if not closed
 }
 
 // Model tracks the expected state of all tickets.
@@ -220,17 +224,15 @@ type FuzzCreateInput struct {
 //   - Type == "" uses DefaultType (task)
 //   - Priority == 0 uses DefaultPriority (high)
 //
-// All other zero values are valid (empty description, no assignee, etc).
+// All other zero values are valid (no parent, no blockers, no tags).
 type UserCreateInput struct {
-	Title       string
-	Description string
-	Design      string
-	Acceptance  string
-	Type        string
-	Priority    int
-	Assignee    string
-	ParentID    string // empty if no parent
-	BlockedBy   []string
+	Title     string
+	Content   string // freeform markdown body; must be non-empty
+	Type      string
+	Priority  int
+	ParentID  string // empty if no parent
+	BlockedBy []string
+	Tags      []string // free-form tags; no empty strings, no duplicates
 }
 
 // Create creates a new ticket and returns the ID.
@@ -243,10 +245,12 @@ type UserCreateInput struct {
 //   - fuzz.CreatedAt is not a valid ISO 8601 timestamp
 //   - a ticket with the given ID already exists
 //   - Title is empty or whitespace-only
+//   - Content is empty or whitespace-only
 //   - Type is non-empty but not a valid Type
 //   - Priority is non-zero but not in range 1-4
 //   - ParentID is non-empty but references a non-existent or closed ticket
 //   - any BlockedBy ID is empty, references a non-existent ticket, or is duplicated
+//   - any Tag is empty or duplicated
 //
 // Panics if:
 //   - fuzz.ID is lexicographically less than or equal to the previous ID (violates ordering invariant)
@@ -267,6 +271,10 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 
 	if strings.TrimSpace(user.Title) == "" {
 		return "", newErr(ErrTitleRequired, kv("title", user.Title))
+	}
+
+	if strings.TrimSpace(user.Content) == "" {
+		return "", newErr(ErrContentRequired)
 	}
 
 	if user.Type != "" {
@@ -295,6 +303,7 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 	}
 
 	seen := make(map[string]bool)
+
 	for _, blockerID := range user.BlockedBy {
 		if blockerID == "" {
 			return "", newErr(ErrBlockerIDRequired, kv("blocker_id", blockerID))
@@ -307,7 +316,22 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 		if seen[blockerID] {
 			return "", newErr(ErrDuplicateBlocker, kv("blocker_id", blockerID))
 		}
+
 		seen[blockerID] = true
+	}
+
+	seenTags := make(map[string]bool)
+
+	for _, tag := range user.Tags {
+		if tag == "" {
+			return "", newErr(ErrEmptyTag)
+		}
+
+		if seenTags[tag] {
+			return "", newErr(ErrDuplicateTag, kv("tag", tag))
+		}
+
+		seenTags[tag] = true
 	}
 
 	// Enforce ordering invariants
@@ -335,19 +359,19 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 	}
 
 	m.tickets[fuzz.ID] = &Ticket{
-		ID:          fuzz.ID,
-		CreatedAt:   createdAt,
-		Title:       user.Title,
-		Description: user.Description,
-		Design:      user.Design,
-		Acceptance:  user.Acceptance,
-		Type:        ticketType,
-		Priority:    priority,
-		Assignee:    user.Assignee,
-		Status:      StatusOpen,
-		ParentID:    user.ParentID,
-		BlockedBy:   slices.Clone(user.BlockedBy),
-		ClosedAt:    time.Time{},
+		ID:        fuzz.ID,
+		CreatedAt: createdAt,
+		Title:     user.Title,
+		Content:   user.Content,
+		Type:      ticketType,
+		Priority:  priority,
+		Status:    StatusOpen,
+		ParentID:  user.ParentID,
+		BlockedBy: slices.Clone(user.BlockedBy),
+		Tags:      slices.Clone(user.Tags),
+		ClaimedBy: "",
+		ClaimedAt: time.Time{},
+		ClosedAt:  time.Time{},
 	}
 	m.order = append(m.order, fuzz.ID)
 
@@ -356,10 +380,18 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 
 // UserStartInput contains user-provided values for starting a ticket.
 type UserStartInput struct {
-	ID string // ticket ID to start
+	ID        string // ticket ID to start
+	ClaimedBy string // who is claiming the ticket
+}
+
+// FuzzStartInput contains values provided by the fuzz test runner for starting a ticket.
+type FuzzStartInput struct {
+	ClaimedAt string // ISO 8601 timestamp of when the ticket was claimed
 }
 
 // Start transitions a ticket from StatusOpen to StatusInProgress.
+//
+// Sets ClaimedBy and ClaimedAt to record who is working on it and when.
 //
 // A ticket can be started if:
 //   - Status is Open
@@ -368,12 +400,28 @@ type UserStartInput struct {
 //   - all ancestors are unblocked (no ancestor has open blockers)
 //
 // Returns an error if:
+//   - user.ClaimedBy is empty
+//   - fuzz.ClaimedAt is not a valid ISO 8601 timestamp
+//   - fuzz.ClaimedAt is before the ticket's CreatedAt
 //   - the ticket doesn't exist
 //   - the ticket cannot be started (see canStart for details)
-func (m *Model) Start(user UserStartInput) *Error {
+func (m *Model) Start(user UserStartInput, fuzz FuzzStartInput) *Error {
+	if user.ClaimedBy == "" {
+		return newErr(ErrClaimedByRequired)
+	}
+
+	claimedAt, err := toISO8601(fuzz.ClaimedAt)
+	if err != nil {
+		return err
+	}
+
 	tk, ok := m.tickets[user.ID]
 	if !ok {
 		return newErr(ErrTicketNotFound, kv("id", user.ID))
+	}
+
+	if claimedAt.Before(tk.CreatedAt) {
+		return newErr(ErrStartedBeforeCreated, kv("claimed_at", fuzz.ClaimedAt), kv("created_at", tk.CreatedAt.Format(time.RFC3339)))
 	}
 
 	if err := m.canStart(tk); err != nil {
@@ -381,6 +429,8 @@ func (m *Model) Start(user UserStartInput) *Error {
 	}
 
 	tk.Status = StatusInProgress
+	tk.ClaimedBy = user.ClaimedBy
+	tk.ClaimedAt = claimedAt
 
 	return nil
 }
@@ -440,6 +490,8 @@ func (m *Model) Close(user UserCloseInput, fuzz FuzzCloseInput) *Error {
 
 	tk.ClosedAt = closedAt
 	tk.Status = StatusClosed
+	tk.ClaimedBy = ""
+	tk.ClaimedAt = time.Time{}
 
 	return nil
 }
@@ -789,6 +841,7 @@ func (m *Model) Ready(user UserReadyInput) ([]Ticket, *Error) {
 	if user.Limit < 0 {
 		return nil, newErr(ErrInvalidLimit, kv("limit", strconv.Itoa(user.Limit)))
 	}
+
 	var ready []Ticket
 
 	for _, id := range m.order {
@@ -851,7 +904,8 @@ func (m *Model) canStart(tk *Ticket) *Error {
 	}
 
 	// Recursively check parent can start (which checks parent's blockers and ancestors)
-	if err := m.canStart(parent); err != nil {
+	err := m.canStart(parent)
+	if err != nil {
 		// Wrap with context that it's an ancestor issue
 		return newErr(ErrAncestorNotReady, kv("id", tk.ID), kv("ancestor_id", parent.ID))
 	}

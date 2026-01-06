@@ -158,7 +158,7 @@ func createTicket(m *Model, id string) {
 	timestamp := fmt.Sprintf("2024-01-01T00:00:%02dZ", ticketCounter)
 
 	_, err := m.Create(
-		UserCreateInput{Title: "ticket " + id},
+		UserCreateInput{Title: "ticket " + id, Content: "content for " + id},
 		FuzzCreateInput{ID: id, CreatedAt: timestamp},
 	)
 	if err != nil {
