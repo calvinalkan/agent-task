@@ -11,8 +11,11 @@ import (
 )
 
 var (
-	// ErrWouldBlock is returned by TryLock/TryRLock when the lock is held by
-	// another process, or by *WithTimeout when the acquisition timeout expires.
+	// ErrWouldBlock is returned when a lock cannot be acquired without waiting.
+	//
+	// It is returned by [Locker.TryLock]/[Locker.TryRLock] when the lock is held
+	// by another process, and by the *WithTimeout methods when the acquisition
+	// timeout expires.
 	ErrWouldBlock = errors.New("lock would block")
 
 	// ErrInvalidTimeout is returned when a timeout is <= 0.
@@ -23,15 +26,32 @@ var (
 	errInodeMismatch = errors.New("inode mismatch")
 )
 
-// Locker provides file-based locking using flock(2).
+// Locker provides file-based locking using flock(2) (via [syscall.Flock]).
 //
-// flock locks an inode (the open file), not a pathname. In most cases, callers
-// should lock a dedicated, stable lock file path (for example "ticket.md.lock")
-// and avoid replacing/unlinking that lock file while locks may be held.
+// flock is advisory and applies to an inode (an open file), not a pathname. All
+// cooperating readers/writers must take the lock for it to have effect.
+//
+// To lock a logical resource, prefer a dedicated lock file that is stable on
+// disk (for example "ticket.md.lock"). Do not replace or unlink that lock file
+// while locks may be held.
+//
+// Locker verifies that the file descriptor it locked still refers to the file
+// currently at path at the moment the lock is acquired (protecting the
+// open→lock window). If the lock file is replaced after acquisition, the lock
+// no longer guards the pathname.
+//
+// Exclusive locks open the file with O_RDWR; shared locks open with O_RDONLY.
+// If you need to exclusively lock a read-only resource, lock a separate lock
+// file instead of the resource itself.
+//
+// This implementation is Unix-only.
 //
 // Locker has no internal mutable state beyond its dependencies. It is safe for
 // concurrent use as long as the underlying [FS] implementation is safe for
-// concurrent use (see [FS] docs).
+// concurrent use (see [FS] docs). Custom [FS]/[File] implementations must
+// provide a real OS file descriptor via [File.Fd] (usable with flock), and
+// [File.Stat]/[FS.Stat] must return [os.FileInfo] whose Sys() is a
+// *syscall.Stat_t for inode checking.
 type Locker struct {
 	fs    FS
 	flock func(fd int, how int) error
@@ -68,6 +88,9 @@ type Lock struct {
 // the file descriptor may or may not be closed. In practice, errors here are
 // rare (kernel issues or bugs) and there is little the caller can do to
 // recover. Logging the error is reasonable; retrying is unlikely to help.
+//
+// If both unlocking and closing fail, Close returns an error that wraps both
+// underlying errors (see [errors.Join]).
 func (lk *Lock) Close() error {
 	lk.mu.Lock()
 	defer lk.mu.Unlock()
@@ -83,22 +106,15 @@ func (lk *Lock) Close() error {
 	lk.file = nil
 
 	if unlockErr != nil {
-		return fmt.Errorf("unlocking lock: %w", unlockErr)
+		unlockErr = fmt.Errorf("unlocking lock: %w", unlockErr)
 	}
 
 	if closeErr != nil {
-		return fmt.Errorf("closing lock fd: %w", closeErr)
+		closeErr = fmt.Errorf("closing lock fd: %w", closeErr)
 	}
 
-	return nil
+	return errors.Join(unlockErr, closeErr)
 }
-
-type lockType int
-
-const (
-	sharedLock    lockType = syscall.LOCK_SH
-	exclusiveLock lockType = syscall.LOCK_EX
-)
 
 // Lock acquires an exclusive lock on the file at path, blocking until the lock
 // is available.
@@ -108,8 +124,8 @@ const (
 //
 // This method blocks in the kernel with no timeout. It can block indefinitely
 // if another process holds the lock and never releases it. Use
-// [Locker.LockWithTimeout] or [Locker.TryLock] if you need cancellation or
-// timeout behavior.
+// [Locker.LockWithTimeout] or [Locker.TryLock] if you need a timeout or want to
+// avoid unbounded blocking.
 //
 // Race conditions where the file is replaced (renamed, deleted+recreated)
 // during lock acquisition are handled automatically - the lock is always
@@ -137,12 +153,16 @@ func (l *Locker) RLock(path string) (*Lock, error) {
 //
 // Unlike [Locker.Lock], this method uses non-blocking flock calls internally
 // and polls with sleeps (1ms to 25ms backoff). This is slightly less efficient
-// than true blocking but allows for timeout/cancellation.
+// than true blocking but allows for timeouts.
 //
 // The timeout is best-effort: because this method polls and sleeps, it may
 // overshoot slightly under scheduler delay.
 //
-// Returns [ErrWouldBlock] if the timeout expires before the lock is acquired.
+// This method does not take a context; if you need cancellation integrate it by
+// choosing an appropriate timeout and retrying while your context is active.
+//
+// Returns an error satisfying [errors.Is] with [ErrWouldBlock] if the timeout
+// expires before the lock is acquired.
 // Returns [ErrInvalidTimeout] if timeout <= 0.
 func (l *Locker) LockWithTimeout(path string, timeout time.Duration) (*Lock, error) {
 	if timeout <= 0 {
@@ -157,6 +177,10 @@ func (l *Locker) LockWithTimeout(path string, timeout time.Duration) (*Lock, err
 //
 // See [Locker.RLock] for shared lock semantics and [Locker.LockWithTimeout] for
 // timeout behavior.
+//
+// Returns an error satisfying [errors.Is] with [ErrWouldBlock] if the timeout
+// expires before the lock is acquired.
+// Returns [ErrInvalidTimeout] if timeout <= 0.
 func (l *Locker) RLockWithTimeout(path string, timeout time.Duration) (*Lock, error) {
 	if timeout <= 0 {
 		return nil, fmt.Errorf("%w: timeout must be > 0", ErrInvalidTimeout)
@@ -167,19 +191,34 @@ func (l *Locker) RLockWithTimeout(path string, timeout time.Duration) (*Lock, er
 
 // TryLock attempts to acquire an exclusive lock without blocking.
 //
-// Returns immediately with [ErrWouldBlock] if the lock is held by another
-// process. Use this for opportunistic locking where you have a fallback.
+// Returns immediately with [ErrWouldBlock] if the lock cannot be acquired
+// immediately. Use this for opportunistic locking where you have a fallback.
 func (l *Locker) TryLock(path string) (*Lock, error) {
 	return l.lockPolling(path, exclusiveLock, 0)
 }
 
 // TryRLock attempts to acquire a shared lock without blocking.
 //
-// Returns immediately with [ErrWouldBlock] if an exclusive lock is held by
-// another process. Multiple shared locks can be held simultaneously.
+// Returns immediately with [ErrWouldBlock] if the lock cannot be acquired
+// immediately (for example, if an exclusive lock is held). Multiple shared
+// locks can be held simultaneously.
 func (l *Locker) TryRLock(path string) (*Lock, error) {
 	return l.lockPolling(path, sharedLock, 0)
 }
+
+type lockType int
+
+const (
+	sharedLock    lockType = syscall.LOCK_SH
+	exclusiveLock lockType = syscall.LOCK_EX
+)
+
+type lockMode int
+
+const (
+	lockModeBlocking lockMode = iota + 1
+	lockModeNonBlocking
+)
 
 func (l *Locker) lockBlocking(path string, lt lockType) (*Lock, error) {
 	openFlag := openFlagForLockType(lt)
@@ -190,7 +229,7 @@ func (l *Locker) lockBlocking(path string, lt lockType) (*Lock, error) {
 			return nil, fmt.Errorf("opening lockfile: %w", err)
 		}
 
-		err = l.acquire(file, path, lt, false)
+		err = l.acquire(file, path, lt, lockModeBlocking)
 		if err == nil {
 			return &Lock{file: file, flock: l.flock}, nil
 		}
@@ -224,7 +263,7 @@ func (l *Locker) lockPolling(path string, lt lockType, timeout time.Duration) (*
 			return nil, fmt.Errorf("opening lockfile: %w", err)
 		}
 
-		err = l.acquire(file, path, lt, true)
+		err = l.acquire(file, path, lt, lockModeNonBlocking)
 		if err == nil {
 			return &Lock{file: file, flock: l.flock}, nil
 		}
@@ -253,10 +292,7 @@ func (l *Locker) lockPolling(path string, lt lockType, timeout time.Duration) (*
 			return nil, fmt.Errorf("%w: timed out after %s", ErrWouldBlock, timeout)
 		}
 
-		sleep := backoff
-		if sleep > remaining {
-			sleep = remaining
-		}
+		sleep := min(backoff, remaining)
 
 		time.Sleep(sleep)
 
@@ -275,14 +311,14 @@ func (l *Locker) lockPolling(path string, lt lockType, timeout time.Duration) (*
 //
 // Returns:
 //   - nil: lock acquired successfully
-//   - ErrWouldBlock: lock held by another process (only when nonBlocking=true)
+//   - ErrWouldBlock: lock held by another process (only when mode==lockModeNonBlocking)
 //   - errInodeMismatch: file at path was replaced, caller should retry
 //   - other error: something went wrong
-func (l *Locker) acquire(file File, path string, lt lockType, nonBlocking bool) error {
+func (l *Locker) acquire(file File, path string, lt lockType, mode lockMode) error {
 	fd := int(file.Fd())
 
 	flags := int(lt)
-	if nonBlocking {
+	if mode == lockModeNonBlocking {
 		flags |= syscall.LOCK_NB
 	}
 
@@ -290,7 +326,7 @@ func (l *Locker) acquire(file File, path string, lt lockType, nonBlocking bool) 
 		if isWouldBlock(err) {
 			return ErrWouldBlock
 		}
-		return err
+		return fmt.Errorf("flock: %w", err)
 	}
 
 	match, err := l.inodeMatchesPath(path, file)
