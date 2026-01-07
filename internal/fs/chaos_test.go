@@ -23,7 +23,7 @@ import (
 // Chaos never injects ENOENT: missing-path errors must come from the wrapped FS.
 // =============================================================================
 
-func TestChaos_PassesThrough_WhenModeIsNoOp(t *testing.T) {
+func Test_Chaos_Passes_Through_When_Mode_Is_NoOp(t *testing.T) {
 	realFS := NewReal()
 	chaosFS := NewChaos(realFS, 12345, ChaosConfig{
 		ReadFailRate:   1.0,
@@ -51,7 +51,7 @@ func TestChaos_PassesThrough_WhenModeIsNoOp(t *testing.T) {
 	}
 }
 
-func TestChaos_TogglesInjection_WhenModeChanges(t *testing.T) {
+func Test_Chaos_Toggles_Injection_When_Mode_Changes(t *testing.T) {
 	realFS := NewReal()
 	chaosFS := NewChaos(realFS, 12345, ChaosConfig{WriteFailRate: 1.0})
 
@@ -80,7 +80,7 @@ func TestChaos_TogglesInjection_WhenModeChanges(t *testing.T) {
 	}
 }
 
-func TestChaos_InjectsWriteError_WhenWriteFailRateIsOne(t *testing.T) {
+func Test_Chaos_Injects_Write_Error_When_Write_Fail_Rate_Is_One(t *testing.T) {
 	realFS := NewReal()
 	chaosFS := NewChaos(realFS, 12345, ChaosConfig{WriteFailRate: 1.0})
 
@@ -117,7 +117,7 @@ func TestChaos_InjectsWriteError_WhenWriteFailRateIsOne(t *testing.T) {
 	t.Fatalf("err=%v, want one of %v", err, validErrs)
 }
 
-func TestChaos_InjectsReadError_WhenReadFailRateIsOne(t *testing.T) {
+func Test_Chaos_Injects_Read_Error_When_Read_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -142,7 +142,7 @@ func TestChaos_InjectsReadError_WhenReadFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaos_InjectsOpenError_WhenOpenFailRateIsOne(t *testing.T) {
+func Test_Chaos_Injects_Open_Error_When_Open_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -176,7 +176,7 @@ func TestChaos_InjectsOpenError_WhenOpenFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaos_InjectsMkdirAllError_WhenMkdirAllFailRateIsOne(t *testing.T) {
+func Test_Chaos_Injects_MkdirAll_Error_When_MkdirAll_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "newdir", "subdir")
 
@@ -239,7 +239,7 @@ func TestChaos_InjectsMkdirAllError_WhenMkdirAllFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaos_MkdirAllSucceeds_WhenModeIsNoOp(t *testing.T) {
+func Test_Chaos_MkdirAll_Succeeds_When_Mode_Is_NoOp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "newdir", "subdir")
 
@@ -262,7 +262,7 @@ func TestChaos_MkdirAllSucceeds_WhenModeIsNoOp(t *testing.T) {
 	}
 }
 
-func TestChaos_InjectsRemoveAllError_WhenRemoveFailRateIsOne(t *testing.T) {
+func Test_Chaos_Injects_RemoveAll_Error_When_Remove_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist")
 
@@ -284,7 +284,7 @@ func TestChaos_InjectsRemoveAllError_WhenRemoveFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaos_ReturnsLinkError_WhenRenameFailRateIsOne(t *testing.T) {
+func Test_Chaos_Returns_Link_Error_When_Rename_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	oldpath := filepath.Join(dir, "old.txt")
 	newpath := filepath.Join(dir, "new.txt")
@@ -353,7 +353,7 @@ func TestChaos_ReturnsLinkError_WhenRenameFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestNewChaos_Panics_WhenFSIsNil(t *testing.T) {
+func Test_NewChaos_Panics_When_FS_Is_Nil(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatalf("expected panic for nil FS")
@@ -363,7 +363,7 @@ func TestNewChaos_Panics_WhenFSIsNil(t *testing.T) {
 	_ = NewChaos(nil, 0, ChaosConfig{})
 }
 
-func TestChaos_CountsFaults_WhenFaultsAreInjected(t *testing.T) {
+func Test_Chaos_Counts_Faults_When_Faults_Are_Injected(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -390,7 +390,7 @@ func TestChaos_CountsFaults_WhenFaultsAreInjected(t *testing.T) {
 	}
 }
 
-func TestChaos_TotalFaultsReturnsSum_WhenMultipleFaultTypesInjected(t *testing.T) {
+func Test_Chaos_TotalFaults_Returns_Sum_When_Multiple_Fault_Types_Injected(t *testing.T) {
 	realFS := NewReal()
 	chaosFS := NewChaos(realFS, 12345, ChaosConfig{
 		WriteFailRate:    1.0,
@@ -409,7 +409,7 @@ func TestChaos_TotalFaultsReturnsSum_WhenMultipleFaultTypesInjected(t *testing.T
 	}
 }
 
-func TestChaosFile_SeekSucceeds_WhenNoFaultConfigured(t *testing.T) {
+func Test_ChaosFile_Seek_Succeeds_When_No_Fault_Configured(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -446,7 +446,7 @@ func TestChaosFile_SeekSucceeds_WhenNoFaultConfigured(t *testing.T) {
 	}
 }
 
-func TestChaosFile_StatReturnsPathError_WhenFileStatFailRateIsOne(t *testing.T) {
+func Test_ChaosFile_Stat_Returns_Path_Error_When_File_Stat_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -501,7 +501,7 @@ func TestChaosFile_StatReturnsPathError_WhenFileStatFailRateIsOne(t *testing.T) 
 	}
 }
 
-func TestChaosFile_SyncReturnsPathError_WhenSyncFailRateIsOne(t *testing.T) {
+func Test_ChaosFile_Sync_Returns_Path_Error_When_Sync_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -568,7 +568,7 @@ func TestChaosFile_SyncReturnsPathError_WhenSyncFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaosFile_SeekReturnsZeroAndPreservesOffset_WhenSeekFailRateIsOne(t *testing.T) {
+func Test_ChaosFile_Seek_Returns_Zero_And_Preserves_Offset_When_Seek_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -641,7 +641,7 @@ func TestChaosFile_SeekReturnsZeroAndPreservesOffset_WhenSeekFailRateIsOne(t *te
 	}
 }
 
-func TestChaosFile_CloseStillClosesFile_WhenCloseFailRateIsOne(t *testing.T) {
+func Test_ChaosFile_Close_Still_Closes_File_When_Close_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -695,7 +695,7 @@ func TestChaosFile_CloseStillClosesFile_WhenCloseFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaos_ReadFileReturnsPrefixAndError_WhenPartialReadRateIsOne(t *testing.T) {
+func Test_Chaos_ReadFile_Returns_Prefix_And_Error_When_Partial_Read_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -725,7 +725,7 @@ func TestChaos_ReadFileReturnsPrefixAndError_WhenPartialReadRateIsOne(t *testing
 	}
 }
 
-func TestChaos_ReadDirReturnsSubsetAndError_WhenReadDirPartialRateIsOne(t *testing.T) {
+func Test_Chaos_ReadDir_Returns_Subset_And_Error_When_ReadDir_Partial_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	realFS := NewReal()
 
@@ -765,7 +765,7 @@ func TestChaos_ReadDirReturnsSubsetAndError_WhenReadDirPartialRateIsOne(t *testi
 	}
 }
 
-func TestChaosFile_WriteReturnsPrefixAndError_WhenPartialWriteRateIsOne(t *testing.T) {
+func Test_ChaosFile_Write_Returns_Prefix_And_Error_When_Partial_Write_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -805,7 +805,7 @@ func TestChaosFile_WriteReturnsPrefixAndError_WhenPartialWriteRateIsOne(t *testi
 	}
 }
 
-func TestChaosFile_WriteReturnsShortWriteError_WhenShortWriteRateIsNonZero(t *testing.T) {
+func Test_ChaosFile_Write_Returns_Short_Write_Error_When_Short_Write_Rate_Is_Non_Zero(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -866,7 +866,7 @@ func TestChaosFile_WriteReturnsShortWriteError_WhenShortWriteRateIsNonZero(t *te
 	}
 }
 
-func TestChaos_DoesNotRaceOrPanic_WhenAccessedConcurrently(t *testing.T) {
+func Test_Chaos_Does_Not_Race_Or_Panic_When_Accessed_Concurrently(t *testing.T) {
 	dir := t.TempDir()
 	realFS := NewReal()
 
@@ -916,7 +916,7 @@ func TestChaos_DoesNotRaceOrPanic_WhenAccessedConcurrently(t *testing.T) {
 	wg.Wait()
 }
 
-func TestChaos_DoesNotDeadlock_WhenErrorIsInjected(t *testing.T) {
+func Test_Chaos_Does_Not_Deadlock_When_Error_Is_Injected(t *testing.T) {
 	realFS := NewReal()
 	chaosFS := NewChaos(realFS, 0, ChaosConfig{
 		WriteFailRate: 1.0, // Always inject an error (exercise pickError/pickRandom).
@@ -951,7 +951,7 @@ func TestChaos_DoesNotDeadlock_WhenErrorIsInjected(t *testing.T) {
 	}
 }
 
-func TestChaosFile_ReadDoesNotSkipBytes_WhenPartialReadRateIsOne(t *testing.T) {
+func Test_ChaosFile_Read_Does_Not_Skip_Bytes_When_Partial_Read_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -981,7 +981,7 @@ func TestChaosFile_ReadDoesNotSkipBytes_WhenPartialReadRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaosError_PreservesErrorsIs_WhenWrappingPathError(t *testing.T) {
+func Test_ChaosError_Preserves_Errors_Is_When_Wrapping_Path_Error(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "path")
 
 	cases := []struct {
@@ -1040,7 +1040,7 @@ func TestChaosError_PreservesErrorsIs_WhenWrappingPathError(t *testing.T) {
 	}
 }
 
-func TestChaosError_PreservesErrorsIs_WhenWrappingStandardError(t *testing.T) {
+func Test_ChaosError_Preserves_Errors_Is_When_Wrapping_Standard_Error(t *testing.T) {
 	base := os.ErrDeadlineExceeded
 	injected := &ChaosError{Err: base}
 
@@ -1057,7 +1057,7 @@ func TestChaosError_PreservesErrorsIs_WhenWrappingStandardError(t *testing.T) {
 	}
 }
 
-func TestChaos_RemoveAllSucceeds_WhenPathMissingAndModeIsNoOp(t *testing.T) {
+func Test_Chaos_RemoveAll_Succeeds_When_Path_Missing_And_Mode_Is_NoOp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist")
 
@@ -1079,7 +1079,7 @@ func TestChaos_RemoveAllSucceeds_WhenPathMissingAndModeIsNoOp(t *testing.T) {
 	}
 }
 
-func TestChaos_RemoveAllInjectsError_WhenPathMissingAndRemoveFailRateIsOne(t *testing.T) {
+func Test_Chaos_RemoveAll_Injects_Error_When_Path_Missing_And_Remove_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist")
 
@@ -1103,7 +1103,7 @@ func TestChaos_RemoveAllInjectsError_WhenPathMissingAndRemoveFailRateIsOne(t *te
 	}
 }
 
-func TestChaosFile_WriteDoesNotModifyFile_WhenWriteFailRateIsOne(t *testing.T) {
+func Test_ChaosFile_Write_Does_Not_Modify_File_When_Write_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
@@ -1135,7 +1135,7 @@ func TestChaosFile_WriteDoesNotModifyFile_WhenWriteFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestIsChaosErr_ReturnsTrue_WhenErrorIsInjected(t *testing.T) {
+func Test_IsChaosErr_Returns_True_When_Error_Is_Injected(t *testing.T) {
 	realFS := NewReal()
 	chaosFS := NewChaos(realFS, 0, ChaosConfig{WriteFailRate: 1.0})
 
@@ -1157,7 +1157,7 @@ func TestIsChaosErr_ReturnsTrue_WhenErrorIsInjected(t *testing.T) {
 	}
 }
 
-func TestIsChaosErr_ReturnsFalse_WhenErrorIsReal(t *testing.T) {
+func Test_IsChaosErr_Returns_False_When_Error_Is_Real(t *testing.T) {
 	realFS := NewReal()
 
 	dir := t.TempDir()
@@ -1212,7 +1212,7 @@ func writeFileOnce(fs FS, path string, data []byte, perm os.FileMode) (int, erro
 // These tests verify Chaos tracing captures operations with injection details.
 // =============================================================================
 
-func TestChaosTrace_IsEmpty_WhenNoOpsPerformed(t *testing.T) {
+func Test_ChaosTrace_Is_Empty_When_No_Ops_Performed(t *testing.T) {
 	t.Parallel()
 
 	chaos := NewChaos(NewReal(), 0, ChaosConfig{TraceCapacity: 100})
@@ -1222,7 +1222,7 @@ func TestChaosTrace_IsEmpty_WhenNoOpsPerformed(t *testing.T) {
 	}
 }
 
-func TestChaosTrace_IsEmpty_WhenTraceCapacityIsZero(t *testing.T) {
+func Test_ChaosTrace_Is_Empty_When_Trace_Capacity_Is_Zero(t *testing.T) {
 	t.Parallel()
 
 	chaos := NewChaos(NewReal(), 0, ChaosConfig{TraceCapacity: 0})
@@ -1251,7 +1251,7 @@ func TestChaosTrace_IsEmpty_WhenTraceCapacityIsZero(t *testing.T) {
 	}
 }
 
-func TestChaosTrace_DropsOldestEvents_WhenCapacityExceeded(t *testing.T) {
+func Test_ChaosTrace_Drops_Oldest_Events_When_Capacity_Exceeded(t *testing.T) {
 	t.Parallel()
 
 	t.Run("DefaultCapacityIsZero", func(t *testing.T) {
@@ -1313,7 +1313,7 @@ func TestChaosTrace_DropsOldestEvents_WhenCapacityExceeded(t *testing.T) {
 	})
 }
 
-func TestChaosTrace_RecordsOpsInOrder_WhenMultipleOpsPerformed(t *testing.T) {
+func Test_ChaosTrace_Records_Ops_In_Order_When_Multiple_Ops_Performed(t *testing.T) {
 	t.Parallel()
 
 	chaos := NewChaos(NewReal(), 0, ChaosConfig{TraceCapacity: 100})
@@ -1418,7 +1418,7 @@ func TestChaosTrace_RecordsOpsInOrder_WhenMultipleOpsPerformed(t *testing.T) {
 	}
 }
 
-func TestChaosTrace_RecordsInjectedFault_WhenOpenFailRateIsOne(t *testing.T) {
+func Test_ChaosTrace_Records_Injected_Fault_When_Open_Fail_Rate_Is_One(t *testing.T) {
 	t.Parallel()
 
 	chaos := NewChaos(NewReal(), 0, ChaosConfig{
@@ -1466,7 +1466,7 @@ func TestChaosTrace_RecordsInjectedFault_WhenOpenFailRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaosTrace_RecordsShortRead_WhenPartialReadRateIsOne(t *testing.T) {
+func Test_ChaosTrace_Records_Short_Read_When_Partial_Read_Rate_Is_One(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1538,7 +1538,7 @@ func TestChaosTrace_RecordsShortRead_WhenPartialReadRateIsOne(t *testing.T) {
 	}
 }
 
-func TestChaosTrace_RecordsPartialWrite_WhenPartialWriteRateIsOne(t *testing.T) {
+func Test_ChaosTrace_Records_Partial_Write_When_Partial_Write_Rate_Is_One(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1591,7 +1591,7 @@ func TestChaosTrace_RecordsPartialWrite_WhenPartialWriteRateIsOne(t *testing.T) 
 	}
 }
 
-func TestChaosTrace_RecordsPassthroughOk_WhenModeIsNoOp(t *testing.T) {
+func Test_ChaosTrace_Records_Passthrough_Ok_When_Mode_Is_NoOp(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1631,7 +1631,7 @@ func TestChaosTrace_RecordsPassthroughOk_WhenModeIsNoOp(t *testing.T) {
 	}
 }
 
-func TestTraceEvent_FormatsCorrectly_WhenFieldsAreSet(t *testing.T) {
+func Test_TraceEvent_Formats_Correctly_When_Fields_Are_Set(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
