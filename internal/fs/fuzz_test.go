@@ -2,7 +2,9 @@ package fs
 
 import (
 	"bytes"
+	"fmt"
 	"math"
+	"math/rand"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,136 +14,138 @@ import (
 // Fuzz Tests
 //
 // These tests verify PROPERTIES that should hold across many random inputs:
-//   - Chaos disabled behaves exactly like Real
+//   - Same seeds produce identical fault sequences (determinism)
 //   - Partial reads always return valid prefix of original
-//   - Fault rates are approximately correct
+//   - Partial writes always write valid prefix of original
 //
 // Unlike example tests which check specific scenarios, these explore the
 // input space to find edge cases.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
-// FuzzChaos_DisabledMatchesReal
+// Fuzz_Chaos_Produces_Identical_Results_When_Seeds_Are_Same
 //
-// Property: When chaos is disabled, it should behave EXACTLY like the real FS.
+// Property: Given the same opSeed and chaosSeed, running the same sequence of
+// random operations twice must produce identical results.
 //
-// This verifies that the Chaos wrapper doesn't accidentally change behavior
-// even when fault injection is off.
+// This verifies that seed-based determinism works across all seed values,
+// not just the hardcoded ones in unit tests.
 // -----------------------------------------------------------------------------
 
-func FuzzChaos_DisabledMatchesReal(f *testing.F) {
-	// Boundary values for RNG seeding
-	f.Add(int64(0))             // Zero - deterministic baseline
-	f.Add(int64(1))             // Minimal positive
-	f.Add(int64(-1))            // Negative seed
-	f.Add(int64(math.MaxInt64)) // Maximum int64
-	f.Add(int64(math.MinInt64)) // Minimum int64
+func Fuzz_Chaos_Produces_Identical_Results_When_Seeds_Are_Same(f *testing.F) {
+	// Boundary seeds
+	f.Add(int64(0), int64(0))
+	f.Add(int64(-1), int64(-1))
+	f.Add(int64(math.MaxInt64), int64(math.MinInt64))
 
-	// Powers of 2
-	f.Add(int64(1 << 32)) // 32-bit boundary
+	// Arbitrary pairs
+	f.Add(int64(11111), int64(22222))
+	f.Add(int64(99999), int64(12345))
 
-	// Arbitrary for diversity
-	f.Add(int64(12345))
-
-	f.Fuzz(func(t *testing.T, seed int64) {
-		dir := t.TempDir()
-
-		realFS := NewReal()
-		chaosFS := NewChaos(NewReal(), seed, ChaosConfig{
-			ReadFailRate:       100,
-			PartialReadRate:    100,
-			WriteFailRate:      100,
-			PartialWriteRate:   100,
-			ShortWriteRate:     100,
-			FileStatFailRate:   100,
-			SeekFailRate:       100,
-			SyncFailRate:       100,
-			CloseFailRate:      100,
-			OpenFailRate:       100,
-			RemoveFailRate:     100,
-			RenameFailRate:     100,
-			StatFailRate:       100,
-			MkdirAllFailRate:   100,
-			ReadDirFailRate:    100,
-			ReadDirPartialRate: 100,
-		})
-		chaosFS.SetMode(ChaosModeNoOp) // Passthrough - should match Real exactly
-
-		path := filepath.Join(dir, "test.txt")
-		content := []byte("hello world")
-
-		// Write
-		_, realErr := writeFileOnce(realFS, path, content, 0644)
-
-		_, chaosErr := writeFileOnce(chaosFS, path, content, 0644)
-		if got, want := (chaosErr == nil), (realErr == nil); got != want {
-			t.Fatalf("write: real=%v chaos=%v", realErr, chaosErr)
+	f.Fuzz(func(t *testing.T, opSeed, chaosSeed int64) {
+		config := ChaosConfig{
+			ReadFailRate:     0.3,
+			WriteFailRate:    0.3,
+			OpenFailRate:     0.3,
+			PartialReadRate:  0.3,
+			PartialWriteRate: 0.3,
+			StatFailRate:     0.3,
+			RemoveFailRate:   0.3,
 		}
 
-		// ReadFile
-		realData, realErr := realFS.ReadFile(path)
-
-		chaosData, chaosErr := chaosFS.ReadFile(path)
-		if got, want := (chaosErr == nil), (realErr == nil); got != want {
-			t.Fatalf("ReadFile: real=%v chaos=%v", realErr, chaosErr)
+		type result struct {
+			op      string
+			failed  bool
+			n       int
+			content string
 		}
 
-		if got, want := chaosData, realData; !bytes.Equal(got, want) {
-			t.Fatalf("ReadFile data: got=%q, want=%q", got, want)
+		run := func() []result {
+			dir := t.TempDir()
+			realFS := NewReal()
+			opRng := rand.New(rand.NewSource(opSeed))
+			chaos := NewChaos(realFS, chaosSeed, config)
+
+			var results []result
+
+			existingContent := "test content"
+
+			// Pre-create some files for read operations
+			for i := range 5 {
+				path := filepath.Join(dir, fmt.Sprintf("existing%d.txt", i))
+				if err := realFS.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				f, err := realFS.Create(path)
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				_, _ = f.Write([]byte(existingContent))
+				_ = f.Close()
+			}
+
+			for i := range 30 {
+				op := opRng.Intn(4)
+
+				switch op {
+				case 0: // create and write
+					path := filepath.Join(dir, fmt.Sprintf("new%d.txt", i))
+					writeData := []byte("data")
+					f, err := chaos.Create(path)
+					if err != nil {
+						results = append(results, result{"create", true, 0, ""})
+						continue
+					}
+					n, writeErr := f.Write(writeData)
+					_ = f.Close()
+
+					var onDisk string
+					if data, err := realFS.ReadFile(path); err == nil {
+						onDisk = string(data)
+					}
+
+					results = append(results, result{"write", writeErr != nil, n, onDisk})
+
+				case 1: // read existing file
+					path := filepath.Join(dir, fmt.Sprintf("existing%d.txt", opRng.Intn(5)))
+					data, err := chaos.ReadFile(path)
+					results = append(results, result{"read", err != nil, len(data), string(data)})
+
+				case 2: // stat existing file
+					path := filepath.Join(dir, fmt.Sprintf("existing%d.txt", opRng.Intn(5)))
+					info, err := chaos.Stat(path)
+					size := 0
+					if info != nil {
+						size = int(info.Size())
+					}
+					results = append(results, result{"stat", err != nil, size, ""})
+
+				case 3: // remove (may or may not exist)
+					path := filepath.Join(dir, fmt.Sprintf("new%d.txt", opRng.Intn(i+1)))
+					err := chaos.Remove(path)
+					results = append(results, result{"remove", IsChaosErr(err), 0, ""})
+				}
+			}
+			return results
 		}
 
-		// Stat
-		realInfo, realErr := realFS.Stat(path)
+		first := run()
+		second := run()
 
-		chaosInfo, chaosErr := chaosFS.Stat(path)
-		if got, want := (chaosErr == nil), (realErr == nil); got != want {
-			t.Fatalf("Stat: real=%v chaos=%v", realErr, chaosErr)
+		if len(first) != len(second) {
+			t.Fatalf("different result lengths: %d vs %d", len(first), len(second))
 		}
 
-		if got, want := chaosInfo.Size(), realInfo.Size(); got != want {
-			t.Fatalf("Stat size: got=%d, want=%d", got, want)
-		}
-
-		// Exists
-		realExists, realErr := realFS.Exists(path)
-
-		chaosExists, chaosErr := chaosFS.Exists(path)
-		if got, want := chaosExists, realExists; got != want {
-			t.Fatalf("Exists: got=%v, want=%v", got, want)
-		}
-
-		if got, want := (chaosErr == nil), (realErr == nil); got != want {
-			t.Fatalf("Exists err: real=%v chaos=%v", realErr, chaosErr)
-		}
-
-		// ReadDir
-		realEntries, realErr := realFS.ReadDir(dir)
-
-		chaosEntries, chaosErr := chaosFS.ReadDir(dir)
-		if got, want := (chaosErr == nil), (realErr == nil); got != want {
-			t.Fatalf("ReadDir: real=%v chaos=%v", realErr, chaosErr)
-		}
-
-		if got, want := len(chaosEntries), len(realEntries); got != want {
-			t.Fatalf("ReadDir count: got=%d, want=%d", got, want)
-		}
-
-		// Remove
-		realFS.Remove(path)  // Remove with real
-		chaosFS.Remove(path) // Already gone, should also fail
-
-		// Exists after remove
-		realExists, _ = realFS.Exists(path)
-
-		chaosExists, _ = chaosFS.Exists(path)
-		if got, want := chaosExists, realExists; got != want {
-			t.Fatalf("Exists after remove: got=%v, want=%v", got, want)
+		for i := range first {
+			if first[i] != second[i] {
+				t.Fatalf("diverged at operation %d:\n  first:  %+v\n  second: %+v", i, first[i], second[i])
+			}
 		}
 	})
 }
 
 // -----------------------------------------------------------------------------
-// FuzzChaos_PartialReadIsPrefix
+// Fuzz_Chaos_Returns_Prefix_When_Partial_Read_Rate_Is_One
 //
 // Property: Partial reads should ALWAYS return a prefix of the original data.
 //
@@ -149,7 +153,7 @@ func FuzzChaos_DisabledMatchesReal(f *testing.F) {
 // real data, just truncated, not garbage or data from wrong offset.
 // -----------------------------------------------------------------------------
 
-func FuzzChaos_PartialReadIsPrefix(f *testing.F) {
+func Fuzz_Chaos_Returns_Prefix_When_Partial_Read_Rate_Is_One(f *testing.F) {
 	// === Seed boundaries + simple content ===
 	f.Add(int64(0), []byte("ab"))                  // Minimal content, zero seed
 	f.Add(int64(-1), []byte("hello world"))        // Negative seed
@@ -203,7 +207,7 @@ func FuzzChaos_PartialReadIsPrefix(f *testing.F) {
 }
 
 // -----------------------------------------------------------------------------
-// FuzzChaos_PartialWriteIsPrefix
+// Fuzz_Chaos_Writes_Prefix_When_Partial_Write_Rate_Is_One
 //
 // Property: Partial writes should write a prefix of the original data.
 //
@@ -211,7 +215,7 @@ func FuzzChaos_PartialReadIsPrefix(f *testing.F) {
 // should be a valid prefix, not corrupted garbage.
 // -----------------------------------------------------------------------------
 
-func FuzzChaos_PartialWriteIsPrefix(f *testing.F) {
+func Fuzz_Chaos_Writes_Prefix_When_Partial_Write_Rate_Is_One(f *testing.F) {
 	// === Seed boundaries + diverse content ===
 	f.Add(int64(0), []byte("ab"))                       // Minimal
 	f.Add(int64(-1), []byte("hello world"))             // Negative seed
@@ -259,65 +263,6 @@ func FuzzChaos_PartialWriteIsPrefix(f *testing.F) {
 		// PROPERTY: data must be prefix of content
 		if got, want := bytes.HasPrefix(content, data), true; got != want {
 			t.Fatalf("partial write should be prefix\noriginal: %q\ngot: %q", content, data)
-		}
-	})
-}
-
-// -----------------------------------------------------------------------------
-// FuzzChaos_DifferentSeedsProduceDifferentResults
-//
-// Property: Different seeds should produce different random sequences.
-//
-// This verifies that the RNG seeding works - same config but different seeds
-// should give different (but valid) results.
-// -----------------------------------------------------------------------------
-
-func FuzzChaos_DifferentSeedsProduceDifferentResults(f *testing.F) {
-	// Adjacent values (should still produce different RNG sequences)
-	f.Add(int64(0), int64(1))
-	f.Add(int64(-1), int64(0))
-	f.Add(int64(math.MaxInt64-1), int64(math.MaxInt64))
-
-	// Boundary pairs
-	f.Add(int64(math.MinInt64), int64(math.MaxInt64))
-
-	// Arbitrary diverse pairs
-	f.Add(int64(12345), int64(67890))
-
-	f.Fuzz(func(t *testing.T, seed1 int64, seed2 int64) {
-		if seed1 == seed2 {
-			return // Same seed = same results, skip
-		}
-
-		dir := t.TempDir()
-		path := filepath.Join(dir, "test.txt")
-		realFS := NewReal()
-
-		mustWriteFile(t, path, []byte("hello world test content"), 0644)
-
-		config := ChaosConfig{PartialReadRate: 1.0} // Always partial
-
-		chaos1 := NewChaos(realFS, seed1, config)
-		chaos1.SetMode(ChaosModeActive)
-
-		chaos2 := NewChaos(realFS, seed2, config)
-		chaos2.SetMode(ChaosModeActive)
-
-		// Read with both - should get different truncation points
-		data1, _ := chaos1.ReadFile(path)
-		data2, _ := chaos2.ReadFile(path)
-
-		// With different seeds, lengths should differ (usually)
-		// We don't assert they MUST differ (could be same by chance)
-		// but we verify both are valid partial reads
-		content, _ := realFS.ReadFile(path)
-
-		if got, want := bytes.HasPrefix(content, data1), true; got != want {
-			t.Errorf("seed1 data should be prefix")
-		}
-
-		if got, want := bytes.HasPrefix(content, data2), true; got != want {
-			t.Errorf("seed2 data should be prefix")
 		}
 	})
 }

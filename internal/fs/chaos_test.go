@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	iofs "io/fs"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +177,224 @@ func Test_Chaos_Injects_Open_Error_When_Open_Fail_Rate_Is_One(t *testing.T) {
 	}
 }
 
+func Test_Chaos_Passes_Through_Real_NotExist_Errors_When_Path_Is_Missing(t *testing.T) {
+	dir := t.TempDir()
+	missingFile := filepath.Join(dir, "missing.txt")
+	missingDir := filepath.Join(dir, "missing-dir")
+
+	t.Run("Open", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{})
+
+		_, err := chaosFS.Open(missingFile)
+		if err == nil {
+			t.Fatalf("Open unexpectedly succeeded")
+		}
+
+		if got, want := IsChaosErr(err), false; got != want {
+			t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := os.IsNotExist(err), true; got != want {
+			t.Fatalf("os.IsNotExist(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := errors.Is(err, syscall.ENOENT), true; got != want {
+			t.Fatalf("errors.Is(err, ENOENT)=%t, want %t (err=%v)", got, want, err)
+		}
+	})
+
+	t.Run("OpenFileReadOnly", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{})
+
+		_, err := chaosFS.OpenFile(missingFile, os.O_RDONLY, 0)
+		if err == nil {
+			t.Fatalf("OpenFile unexpectedly succeeded")
+		}
+
+		if got, want := IsChaosErr(err), false; got != want {
+			t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := os.IsNotExist(err), true; got != want {
+			t.Fatalf("os.IsNotExist(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := errors.Is(err, syscall.ENOENT), true; got != want {
+			t.Fatalf("errors.Is(err, ENOENT)=%t, want %t (err=%v)", got, want, err)
+		}
+	})
+
+	t.Run("ReadFile", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{})
+
+		data, err := chaosFS.ReadFile(missingFile)
+		if err == nil {
+			t.Fatalf("ReadFile unexpectedly succeeded")
+		}
+
+		if data != nil {
+			t.Fatalf("ReadFile data=%v, want nil on error", data)
+		}
+
+		if got, want := IsChaosErr(err), false; got != want {
+			t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := os.IsNotExist(err), true; got != want {
+			t.Fatalf("os.IsNotExist(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := errors.Is(err, syscall.ENOENT), true; got != want {
+			t.Fatalf("errors.Is(err, ENOENT)=%t, want %t (err=%v)", got, want, err)
+		}
+	})
+
+	t.Run("ReadDir", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{})
+
+		entries, err := chaosFS.ReadDir(missingDir)
+		if err == nil {
+			t.Fatalf("ReadDir unexpectedly succeeded")
+		}
+
+		if entries != nil {
+			t.Fatalf("ReadDir entries=%v, want nil on error", entries)
+		}
+
+		if got, want := IsChaosErr(err), false; got != want {
+			t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := os.IsNotExist(err), true; got != want {
+			t.Fatalf("os.IsNotExist(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := errors.Is(err, syscall.ENOENT), true; got != want {
+			t.Fatalf("errors.Is(err, ENOENT)=%t, want %t (err=%v)", got, want, err)
+		}
+	})
+
+	t.Run("Stat", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{})
+
+		info, err := chaosFS.Stat(missingFile)
+		if err == nil {
+			t.Fatalf("Stat unexpectedly succeeded")
+		}
+
+		if info != nil {
+			t.Fatalf("Stat info=%v, want nil on error", info)
+		}
+
+		if got, want := IsChaosErr(err), false; got != want {
+			t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := os.IsNotExist(err), true; got != want {
+			t.Fatalf("os.IsNotExist(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := errors.Is(err, syscall.ENOENT), true; got != want {
+			t.Fatalf("errors.Is(err, ENOENT)=%t, want %t (err=%v)", got, want, err)
+		}
+	})
+
+	t.Run("Remove", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{})
+
+		err := chaosFS.Remove(missingFile)
+		if err == nil {
+			t.Fatalf("Remove unexpectedly succeeded")
+		}
+
+		if got, want := IsChaosErr(err), false; got != want {
+			t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := os.IsNotExist(err), true; got != want {
+			t.Fatalf("os.IsNotExist(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := errors.Is(err, syscall.ENOENT), true; got != want {
+			t.Fatalf("errors.Is(err, ENOENT)=%t, want %t (err=%v)", got, want, err)
+		}
+	})
+
+	t.Run("Rename", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{})
+		newpath := filepath.Join(dir, "new.txt")
+
+		err := chaosFS.Rename(missingFile, newpath)
+		if err == nil {
+			t.Fatalf("Rename unexpectedly succeeded")
+		}
+
+		if got, want := IsChaosErr(err), false; got != want {
+			t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := os.IsNotExist(err), true; got != want {
+			t.Fatalf("os.IsNotExist(err)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		if got, want := errors.Is(err, syscall.ENOENT), true; got != want {
+			t.Fatalf("errors.Is(err, ENOENT)=%t, want %t (err=%v)", got, want, err)
+		}
+
+		var linkErr *os.LinkError
+		if got, want := errors.As(err, &linkErr), true; got != want {
+			t.Fatalf("Rename err should be *os.LinkError, got %T (%v)", err, err)
+		}
+	})
+}
+
+func Test_Chaos_OpenFile_Uses_Open_Or_Create_Op_Based_On_Flags(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+
+	t.Run("ReadOnlyUsesOpen", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{
+			OpenFailRate:   1.0,
+			TraceCapacity:  10,
+			WriteFailRate:  1.0,
+			ReadFailRate:   1.0,
+			RemoveFailRate: 1.0,
+		})
+
+		_, _ = chaosFS.OpenFile(path, os.O_RDONLY, 0)
+
+		events := chaosFS.TraceEvents()
+		if got, want := len(events), 1; got != want {
+			t.Fatalf("TraceEvents() count: want %d, got %d\ntrace:\n%s", want, got, chaosFS.Trace())
+		}
+
+		if got, want := events[0].Op, "open"; got != want {
+			t.Fatalf("TraceEvents()[0].Op=%q, want %q\ntrace:\n%s", got, want, chaosFS.Trace())
+		}
+	})
+
+	t.Run("WriteUsesCreate", func(t *testing.T) {
+		chaosFS := NewChaos(NewReal(), 0, ChaosConfig{
+			OpenFailRate:   1.0,
+			TraceCapacity:  10,
+			WriteFailRate:  1.0,
+			ReadFailRate:   1.0,
+			RemoveFailRate: 1.0,
+		})
+
+		_, _ = chaosFS.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+
+		events := chaosFS.TraceEvents()
+		if got, want := len(events), 1; got != want {
+			t.Fatalf("TraceEvents() count: want %d, got %d\ntrace:\n%s", want, got, chaosFS.Trace())
+		}
+
+		if got, want := events[0].Op, "create"; got != want {
+			t.Fatalf("TraceEvents()[0].Op=%q, want %q\ntrace:\n%s", got, want, chaosFS.Trace())
+		}
+	})
+}
+
 func Test_Chaos_Injects_MkdirAll_Error_When_MkdirAll_Fail_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "newdir", "subdir")
@@ -259,6 +478,213 @@ func Test_Chaos_MkdirAll_Succeeds_When_Mode_Is_NoOp(t *testing.T) {
 
 	if !exists {
 		t.Fatalf("directory should exist after MkdirAll")
+	}
+}
+
+func Test_Chaos_Injects_Stat_Error_When_Stat_Fail_Rate_Is_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+
+	mustWriteFile(t, path, []byte("hello"), 0o644)
+
+	chaosFS := NewChaos(realFS, 0, ChaosConfig{StatFailRate: 1.0})
+
+	info, err := chaosFS.Stat(path)
+	if err == nil {
+		t.Fatalf("Stat unexpectedly succeeded")
+	}
+
+	if info != nil {
+		t.Fatalf("Stat info=%v, want nil on error", info)
+	}
+
+	if got, want := IsChaosErr(err), true; got != want {
+		t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+	}
+
+	if errors.Is(err, syscall.ENOENT) || os.IsNotExist(err) {
+		t.Fatalf("Stat should never inject ENOENT: %v", err)
+	}
+
+	var pathErr *os.PathError
+	if got, want := errors.As(err, &pathErr), true; got != want {
+		t.Fatalf("Stat err should be *os.PathError, got %T (%v)", err, err)
+	}
+
+	if got, want := pathErr.Op, "stat"; got != want {
+		t.Fatalf("PathError.Op=%q, want %q", got, want)
+	}
+
+	validErrs := []error{
+		syscall.EACCES,
+		syscall.EIO,
+	}
+
+	var validErr bool
+
+	for _, e := range validErrs {
+		if errors.Is(err, e) {
+			validErr = true
+
+			break
+		}
+	}
+
+	if !validErr {
+		t.Fatalf("err=%v, want one of %v", err, validErrs)
+	}
+
+	if got, want := chaosFS.Stats().StatFails, int64(1); got != want {
+		t.Fatalf("StatFails=%d, want %d", got, want)
+	}
+
+	exists, err := realFS.Exists(path)
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+
+	if !exists {
+		t.Fatalf("file should still exist after injected Stat failure")
+	}
+}
+
+func Test_Chaos_Injects_Remove_Error_When_Remove_Fail_Rate_Is_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+
+	mustWriteFile(t, path, []byte("hello"), 0o644)
+
+	chaosFS := NewChaos(realFS, 0, ChaosConfig{RemoveFailRate: 1.0})
+
+	err := chaosFS.Remove(path)
+	if err == nil {
+		t.Fatalf("Remove unexpectedly succeeded")
+	}
+
+	if got, want := IsChaosErr(err), true; got != want {
+		t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+	}
+
+	if errors.Is(err, syscall.ENOENT) || os.IsNotExist(err) {
+		t.Fatalf("Remove should never inject ENOENT: %v", err)
+	}
+
+	var pathErr *os.PathError
+	if got, want := errors.As(err, &pathErr), true; got != want {
+		t.Fatalf("Remove err should be *os.PathError, got %T (%v)", err, err)
+	}
+
+	if got, want := pathErr.Op, "remove"; got != want {
+		t.Fatalf("PathError.Op=%q, want %q", got, want)
+	}
+
+	validErrs := []error{
+		syscall.EACCES,
+		syscall.EPERM,
+		syscall.EBUSY,
+		syscall.EIO,
+		syscall.EROFS,
+	}
+
+	var validErr bool
+
+	for _, e := range validErrs {
+		if errors.Is(err, e) {
+			validErr = true
+
+			break
+		}
+	}
+
+	if !validErr {
+		t.Fatalf("err=%v, want one of %v", err, validErrs)
+	}
+
+	if got, want := chaosFS.Stats().RemoveFails, int64(1); got != want {
+		t.Fatalf("RemoveFails=%d, want %d", got, want)
+	}
+
+	exists, err := realFS.Exists(path)
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+
+	if !exists {
+		t.Fatalf("file should still exist after injected Remove failure")
+	}
+}
+
+func Test_Chaos_ReadDir_Prefers_Full_Failure_Over_Partial_When_Both_Rates_Are_One(t *testing.T) {
+	dir := t.TempDir()
+
+	realFS := NewReal()
+
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("x"), 0o644)
+
+	chaosFS := NewChaos(realFS, 0, ChaosConfig{
+		ReadDirFailRate:    1.0,
+		ReadDirPartialRate: 1.0,
+	})
+
+	entries, err := chaosFS.ReadDir(dir)
+	if err == nil {
+		t.Fatalf("ReadDir unexpectedly succeeded")
+	}
+
+	if entries != nil {
+		t.Fatalf("ReadDir entries=%v, want nil on error", entries)
+	}
+
+	if got, want := IsChaosErr(err), true; got != want {
+		t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+	}
+
+	if errors.Is(err, syscall.ENOENT) || os.IsNotExist(err) {
+		t.Fatalf("ReadDir should never inject ENOENT: %v", err)
+	}
+
+	var pathErr *os.PathError
+	if got, want := errors.As(err, &pathErr), true; got != want {
+		t.Fatalf("ReadDir err should be *os.PathError, got %T (%v)", err, err)
+	}
+
+	if got, want := pathErr.Op, "readdir"; got != want {
+		t.Fatalf("PathError.Op=%q, want %q", got, want)
+	}
+
+	validErrs := []error{
+		syscall.EACCES,
+		syscall.EIO,
+		syscall.ENOTDIR,
+		syscall.EMFILE,
+		syscall.ENFILE,
+	}
+
+	var validErr bool
+
+	for _, e := range validErrs {
+		if errors.Is(err, e) {
+			validErr = true
+
+			break
+		}
+	}
+
+	if !validErr {
+		t.Fatalf("err=%v, want one of %v", err, validErrs)
+	}
+
+	stats := chaosFS.Stats()
+	if got, want := stats.ReadDirFails, int64(1); got != want {
+		t.Fatalf("ReadDirFails=%d, want %d", got, want)
+	}
+
+	if got, want := stats.PartialReadDirs, int64(0); got != want {
+		t.Fatalf("PartialReadDirs=%d, want %d", got, want)
 	}
 }
 
@@ -353,6 +779,41 @@ func Test_Chaos_Returns_Link_Error_When_Rename_Fail_Rate_Is_One(t *testing.T) {
 	}
 }
 
+func Test_Chaos_Rename_Succeeds_When_No_Fault_Configured(t *testing.T) {
+	dir := t.TempDir()
+	oldpath := filepath.Join(dir, "old.txt")
+	newpath := filepath.Join(dir, "new.txt")
+
+	realFS := NewReal()
+
+	mustWriteFile(t, oldpath, []byte("hello"), 0o644)
+
+	chaosFS := NewChaos(realFS, 0, ChaosConfig{})
+
+	err := chaosFS.Rename(oldpath, newpath)
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+
+	oldExists, err := realFS.Exists(oldpath)
+	if err != nil {
+		t.Fatalf("Exists(oldpath): %v", err)
+	}
+
+	if oldExists {
+		t.Fatalf("old path should not exist after Rename")
+	}
+
+	newExists, err := realFS.Exists(newpath)
+	if err != nil {
+		t.Fatalf("Exists(newpath): %v", err)
+	}
+
+	if !newExists {
+		t.Fatalf("new path should exist after Rename")
+	}
+}
+
 func Test_NewChaos_Panics_When_FS_Is_Nil(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -443,6 +904,24 @@ func Test_ChaosFile_Seek_Succeeds_When_No_Fault_Configured(t *testing.T) {
 
 	if got, want := string(buf[:n]), "world"; got != want {
 		t.Fatalf("Read=%q, want %q", got, want)
+	}
+}
+
+func Test_ChaosFile_Fd_Returns_Valid_File_Descriptor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fd.txt")
+
+	chaosFS := NewChaos(NewReal(), 0, ChaosConfig{})
+
+	f, err := chaosFS.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer f.Close()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		t.Fatalf("syscall.Fstat: %v", err)
 	}
 }
 
@@ -725,6 +1204,42 @@ func Test_Chaos_ReadFile_Returns_Prefix_And_Error_When_Partial_Read_Rate_Is_One(
 	}
 }
 
+func Test_Chaos_ReadFile_Prefers_Full_Failure_Over_Partial_When_Both_Rates_Are_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+
+	mustWriteFile(t, path, []byte("hello"), 0o644)
+
+	chaosFS := NewChaos(realFS, 0, ChaosConfig{
+		ReadFailRate:    1.0,
+		PartialReadRate: 1.0,
+	})
+
+	data, err := chaosFS.ReadFile(path)
+	if err == nil {
+		t.Fatalf("ReadFile unexpectedly succeeded")
+	}
+
+	if data != nil {
+		t.Fatalf("ReadFile data=%v, want nil on error", data)
+	}
+
+	if got, want := IsChaosErr(err), true; got != want {
+		t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+	}
+
+	stats := chaosFS.Stats()
+	if got, want := stats.ReadFails, int64(1); got != want {
+		t.Fatalf("ReadFails=%d, want %d", got, want)
+	}
+
+	if got, want := stats.PartialReads, int64(0); got != want {
+		t.Fatalf("PartialReads=%d, want %d", got, want)
+	}
+}
+
 func Test_Chaos_ReadDir_Returns_Subset_And_Error_When_ReadDir_Partial_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	realFS := NewReal()
@@ -802,6 +1317,44 @@ func Test_ChaosFile_Write_Returns_Prefix_And_Error_When_Partial_Write_Rate_Is_On
 
 	if got, want := len(data) < len(content), true; got != want {
 		t.Fatalf("len(data)=%d, want < %d", len(data), len(content))
+	}
+}
+
+func Test_ChaosFile_Write_Prefers_Full_Failure_Over_Partial_When_Both_Rates_Are_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	chaosFS := NewChaos(NewReal(), 0, ChaosConfig{
+		WriteFailRate:    1.0,
+		PartialWriteRate: 1.0,
+	})
+
+	f, err := chaosFS.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer f.Close()
+
+	n, err := f.Write([]byte("hello"))
+	if err == nil {
+		t.Fatalf("Write unexpectedly succeeded")
+	}
+
+	if got, want := n, 0; got != want {
+		t.Fatalf("Write n=%d, want %d on full failure", got, want)
+	}
+
+	if got, want := IsChaosErr(err), true; got != want {
+		t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+	}
+
+	stats := chaosFS.Stats()
+	if got, want := stats.WriteFails, int64(1); got != want {
+		t.Fatalf("WriteFails=%d, want %d", got, want)
+	}
+
+	if got, want := stats.PartialWrites, int64(0); got != want {
+		t.Fatalf("PartialWrites=%d, want %d", got, want)
 	}
 }
 
@@ -978,6 +1531,56 @@ func Test_ChaosFile_Read_Does_Not_Skip_Bytes_When_Partial_Read_Rate_Is_One(t *te
 
 	if !bytes.Equal(got, content) {
 		t.Fatalf("partial reads must not drop bytes: got=%d bytes, want=%d", len(got), len(content))
+	}
+}
+
+func Test_ChaosFile_Read_Prefers_Full_Failure_Over_Short_Read_When_Both_Rates_Are_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+
+	mustWriteFile(t, path, []byte("hello"), 0o644)
+
+	chaosFS := NewChaos(realFS, 0, ChaosConfig{
+		ReadFailRate:    1.0,
+		PartialReadRate: 1.0,
+	})
+
+	f, err := chaosFS.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close()
+
+	n, err := f.Read(make([]byte, 5))
+	if err == nil {
+		t.Fatalf("Read unexpectedly succeeded")
+	}
+
+	if got, want := n, 0; got != want {
+		t.Fatalf("Read n=%d, want %d on full failure", got, want)
+	}
+
+	if got, want := IsChaosErr(err), true; got != want {
+		t.Fatalf("IsChaosErr(err)=%t, want %t (err=%v)", got, want, err)
+	}
+
+	if errors.Is(err, syscall.ENOENT) || os.IsNotExist(err) {
+		t.Fatalf("File.Read should never inject ENOENT: %v", err)
+	}
+
+	if got, want := errors.Is(err, syscall.EIO), true; got != want {
+		t.Fatalf("Read err=%v, want EIO", err)
+	}
+
+	stats := chaosFS.Stats()
+	if got, want := stats.ReadFails, int64(1); got != want {
+		t.Fatalf("ReadFails=%d, want %d", got, want)
+	}
+
+	if got, want := stats.PartialReads, int64(0); got != want {
+		t.Fatalf("PartialReads=%d, want %d", got, want)
 	}
 }
 
@@ -1697,5 +2300,197 @@ func Test_TraceEvent_Formats_Correctly_When_Fields_Are_Set(t *testing.T) {
 				t.Fatalf("TraceEvent.String():\ngot:  %q\nwant: %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// =============================================================================
+// Seed Determinism Tests
+//
+// These tests verify that the same seed produces identical fault sequences
+// when operations are called in the same order.
+// =============================================================================
+
+func Test_Chaos_Same_Seed_Produces_Identical_Partial_Read_Length(t *testing.T) {
+	const seed = 98765
+	config := ChaosConfig{PartialReadRate: 1.0}
+	content := []byte("hello world this is test content for determinism")
+
+	run := func() int {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "test.txt")
+		mustWriteFile(t, path, content, 0o644)
+
+		chaos := NewChaos(NewReal(), seed, config)
+		data, err := chaos.ReadFile(path)
+		if err == nil {
+			t.Fatalf("expected partial read error")
+		}
+		return len(data)
+	}
+
+	first := run()
+	second := run()
+	third := run()
+
+	if first != second || second != third {
+		t.Fatalf("same seed produced different lengths: %d, %d, %d", first, second, third)
+	}
+}
+
+func Test_Chaos_Same_Seed_Produces_Identical_Error_Types(t *testing.T) {
+	const seed = 22222
+	config := ChaosConfig{WriteFailRate: 1.0}
+
+	run := func() syscall.Errno {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "test.txt")
+
+		chaos := NewChaos(NewReal(), seed, config)
+		f, err := chaos.Create(path)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		_, err = f.Write([]byte("test"))
+		_ = f.Close()
+
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) {
+			t.Fatalf("expected PathError, got %T", err)
+		}
+
+		errno, ok := pathErr.Err.(syscall.Errno)
+		if !ok {
+			t.Fatalf("expected syscall.Errno, got %T", pathErr.Err)
+		}
+		return errno
+	}
+
+	first := run()
+	second := run()
+	third := run()
+
+	if first != second || second != third {
+		t.Fatalf("same seed produced different errnos: %v, %v, %v", first, second, third)
+	}
+}
+
+func Test_Chaos_Different_Seeds_Produce_Different_Results(t *testing.T) {
+	config := ChaosConfig{PartialReadRate: 1.0}
+	content := []byte("hello world this is a longer test content string for variety")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	mustWriteFile(t, path, content, 0o644)
+
+	realFS := NewReal()
+
+	// Run with many different seeds and collect unique lengths
+	seen := make(map[int]bool)
+	for seed := range int64(100) {
+		chaos := NewChaos(realFS, seed, config)
+		data, _ := chaos.ReadFile(path)
+		seen[len(data)] = true
+	}
+
+	// With 100 seeds and ~60 possible lengths, we should see variety
+	if len(seen) < 5 {
+		t.Fatalf("expected variety in partial read lengths, only got %d unique values", len(seen))
+	}
+}
+
+func Test_Chaos_Same_Seeds_Produce_Identical_Results_With_Random_Ops(t *testing.T) {
+	const opSeed = 11111    // controls which operations are performed
+	const chaosSeed = 22222 // controls fault injection
+
+	config := ChaosConfig{
+		ReadFailRate:     0.3,
+		WriteFailRate:    0.3,
+		OpenFailRate:     0.3,
+		PartialReadRate:  0.3,
+		PartialWriteRate: 0.3,
+	}
+
+	type result struct {
+		op      string
+		failed  bool
+		n       int    // bytes written/read
+		content string // actual content read or written to disk
+	}
+
+	run := func() []result {
+		dir := t.TempDir()
+		realFS := NewReal()
+		opRng := rand.New(rand.NewSource(opSeed))
+		chaos := NewChaos(realFS, chaosSeed, config)
+
+		var results []result
+
+		existingContent := "test content"
+
+		// Pre-create some files for read operations
+		for i := range 5 {
+			path := filepath.Join(dir, fmt.Sprintf("existing%d.txt", i))
+			mustWriteFile(t, path, []byte(existingContent), 0o644)
+		}
+
+		for i := range 30 {
+			op := opRng.Intn(4) // 0=create+write, 1=read, 2=stat, 3=remove
+
+			switch op {
+			case 0: // create and write
+				path := filepath.Join(dir, fmt.Sprintf("new%d.txt", i))
+				writeData := []byte("data")
+				f, err := chaos.Create(path)
+				if err != nil {
+					results = append(results, result{"create", true, 0, ""})
+					continue
+				}
+				n, writeErr := f.Write(writeData)
+				_ = f.Close()
+
+				// Read back what's actually on disk
+				var onDisk string
+				if data, err := realFS.ReadFile(path); err == nil {
+					onDisk = string(data)
+				}
+
+				results = append(results, result{"write", writeErr != nil, n, onDisk})
+
+			case 1: // read existing file
+				path := filepath.Join(dir, fmt.Sprintf("existing%d.txt", opRng.Intn(5)))
+				data, err := chaos.ReadFile(path)
+				results = append(results, result{"read", err != nil, len(data), string(data)})
+
+			case 2: // stat existing file
+				path := filepath.Join(dir, fmt.Sprintf("existing%d.txt", opRng.Intn(5)))
+				info, err := chaos.Stat(path)
+				size := 0
+				if info != nil {
+					size = int(info.Size())
+				}
+				results = append(results, result{"stat", err != nil, size, ""})
+
+			case 3: // remove (may or may not exist)
+				path := filepath.Join(dir, fmt.Sprintf("new%d.txt", opRng.Intn(i+1)))
+				err := chaos.Remove(path)
+				// Only count as chaos failure if it's a chaos error
+				results = append(results, result{"remove", IsChaosErr(err), 0, ""})
+			}
+		}
+		return results
+	}
+
+	first := run()
+	second := run()
+
+	if len(first) != len(second) {
+		t.Fatalf("different result lengths: %d vs %d", len(first), len(second))
+	}
+
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("diverged at operation %d:\n  first:  %+v\n  second: %+v", i, first[i], second[i])
+		}
 	}
 }
