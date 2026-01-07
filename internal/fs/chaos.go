@@ -1,6 +1,8 @@
 package fs
 
 import (
+	"errors"
+	"io"
 	"io/fs"
 	"math/rand"
 	"os"
@@ -11,140 +13,121 @@ import (
 
 // ChaosConfig controls fault injection probabilities.
 // Each rate is a float64 from 0.0 (never) to 1.0 (always).
+//
+// The zero value disables all fault injection. Partially initialized configs
+// only inject faults for the specified rates; unset fields default to 0.0.
+//
+// Fault injection is enabled by default ([ChaosModeActive]). Use
+// [Chaos.SetMode] with [ChaosModeNoOp] to disable injection and pass
+// all operations through to the underlying filesystem.
 type ChaosConfig struct {
-	// Read faults
-	ReadFailRate    float64 // Fail read operations entirely
-	PartialReadRate float64 // Return truncated data on reads
+	// ReadFailRate controls how often FS.ReadFile and File.Read fail entirely,
+	// returning zero bytes and an error. For ReadFile, the error may be an
+	// open-phase failure (EACCES, EMFILE, ENFILE, ENOTDIR) or a read-phase
+	// failure (EIO). For File.Read, always returns EIO.
+	ReadFailRate float64
 
-	// Write faults
-	WriteFailRate    float64 // Fail write operations entirely
-	PartialWriteRate float64 // Write partial data then fail (simulates crash)
+	// PartialReadRate controls how often reads return incomplete data.
+	// For FS.ReadFile: returns a truncated prefix of the file contents along
+	// with an EIO error, simulating a read that fails partway through.
+	// For File.Read: returns a short read (n < len(p), err==nil) by limiting
+	// the underlying read size. This is valid io.Reader behavior, not an error,
+	// and tests that callers correctly loop until EOF.
+	PartialReadRate float64
 
-	// Other faults
-	OpenFailRate       float64 // Fail Open/Create/OpenFile
-	RemoveFailRate     float64 // Fail Remove/RemoveAll
-	RenameFailRate     float64 // Fail Rename
-	StatFailRate       float64 // Fail Stat/Exists
-	ReadDirFailRate    float64 // Fail ReadDir entirely
-	ReadDirPartialRate float64 // Return partial directory listing
-	LockFailRate       float64 // Fail Lock acquisition
+	// WriteFailRate controls how often File.Write fails entirely, writing zero
+	// bytes and returning an error (EIO, ENOSPC, EDQUOT, or EROFS).
+	WriteFailRate float64
+
+	// PartialWriteRate controls how often File.Write writes only some bytes
+	// before failing. Returns n > 0 bytes written along with an error.
+	// The error type is controlled by ShortWriteRate.
+	PartialWriteRate float64
+
+	// ShortWriteRate controls the error type for partial writes. This fraction
+	// of partial writes return io.ErrShortWrite (a write that stopped early
+	// without a syscall error). The remainder return *fs.PathError with an
+	// errno (EIO, ENOSPC, EDQUOT, or EROFS).
+	ShortWriteRate float64
+
+	// FileStatFailRate controls how often File.Stat fails on an open file
+	// handle, returning EIO. This is distinct from StatFailRate which controls
+	// FS.Stat on paths.
+	FileStatFailRate float64
+
+	// SeekFailRate controls how often File.Seek fails, returning position 0
+	// and an EIO error.
+	SeekFailRate float64
+
+	// SyncFailRate controls how often File.Sync (fsync) fails. Returns EIO,
+	// ENOSPC, EDQUOT, or EROFS. Sync failures can surface delayed write errors
+	// that weren't reported during Write.
+	SyncFailRate float64
+
+	// CloseFailRate controls how often File.Close reports an error. The
+	// underlying file descriptor is always closed (to avoid leaks) even when
+	// an error is returned. Returns EIO.
+	CloseFailRate float64
+
+	// OpenFailRate controls how often FS.Open, FS.Create, and FS.OpenFile fail
+	// to open a file. For read-only opens: EACCES, EIO, EMFILE, ENFILE, ENOTDIR.
+	// For write opens (Create, O_WRONLY, etc.): adds ENOSPC, EDQUOT, EROFS.
+	OpenFailRate float64
+
+	// RemoveFailRate controls how often FS.Remove and FS.RemoveAll fail.
+	// Returns EACCES, EPERM, EBUSY, EIO, or EROFS.
+	RemoveFailRate float64
+
+	// RenameFailRate controls how often FS.Rename fails. Returns an
+	// *os.LinkError (not *fs.PathError) with EACCES, EIO, ENOSPC, EXDEV
+	// (cross-device), EROFS, or EPERM.
+	RenameFailRate float64
+
+	// StatFailRate controls how often FS.Stat and FS.Exists fail on a path.
+	// Returns EACCES or EIO. This is distinct from FileStatFailRate which
+	// controls File.Stat on open handles.
+	StatFailRate float64
+
+	// MkdirAllFailRate controls how often FS.MkdirAll fails to create
+	// directories. Returns EACCES, EIO, ENOSPC, EDQUOT, EROFS, or ENOTDIR.
+	MkdirAllFailRate float64
+
+	// ReadDirFailRate controls how often FS.ReadDir fails entirely, returning
+	// no entries. Returns EACCES, EIO, ENOTDIR, EMFILE, or ENFILE.
+	ReadDirFailRate float64
+
+	// ReadDirPartialRate controls how often FS.ReadDir returns an incomplete
+	// directory listing. Returns a random prefix of the entries along with an
+	// EIO error, simulating a directory read that fails partway through.
+	ReadDirPartialRate float64
 }
 
-// DefaultChaosConfig returns a config with reasonable fault rates for testing.
-func DefaultChaosConfig() ChaosConfig {
-	return ChaosConfig{
-		ReadFailRate:       0.02,
-		PartialReadRate:    0.02,
-		WriteFailRate:      0.02,
-		PartialWriteRate:   0.03,
-		OpenFailRate:       0.02,
-		RemoveFailRate:     0.02,
-		RenameFailRate:     0.02,
-		StatFailRate:       0.01,
-		ReadDirFailRate:    0.02,
-		ReadDirPartialRate: 0.02,
-		LockFailRate:       0.02,
+// NewChaos creates a new [Chaos] filesystem wrapping the given [FS].
+// The seed controls random fault injection for reproducibility.
+// Panics if fs is nil.
+func NewChaos(fs FS, seed int64, config ChaosConfig) *Chaos {
+	if fs == nil {
+		panic("fs is nil")
+	}
+
+	return &Chaos{
+		fs:     fs,
+		rng:    rand.New(rand.NewSource(seed)),
+		config: config,
 	}
 }
 
-// PathState tracks the fault state of a path for consistent error injection.
-type PathState int
-
-const (
-	// PathNormal means no persistent fault - errors are transient.
-	// This is the zero value, so untracked paths are normal.
-	PathNormal PathState = iota
-	// PathIOError is sticky - the path has a "bad sector" and always returns EIO.
-	PathIOError
-	// PathReadOnly is sticky for writes - filesystem is read-only, returns EROFS.
-	PathReadOnly
-	// PathNoPermission is semi-sticky - path-based operations return EACCES 80% of the time.
-	PathNoPermission
-)
-
-// ChaosMode controls how Chaos behaves.
+// ChaosMode controls how [Chaos] behaves.
 type ChaosMode uint8
 
 const (
-	// ChaosModePassthrough behaves like the underlying FS.
-	// It ignores fault rates and also ignores any sticky path state.
-	// Sticky state is not cleared; it is simply not consulted while in this mode.
-	ChaosModePassthrough ChaosMode = iota
+	// ChaosModeActive enables fault-rate injection.
+	// This is the default mode for a new [Chaos].
+	ChaosModeActive ChaosMode = iota
 
-	// ChaosModeInject enables fault-rate injection and sticky path state.
-	ChaosModeInject
-
-	// ChaosModeStickyOnly applies only sticky path state. Fault rates are disabled.
-	ChaosModeStickyOnly
+	// ChaosModeNoOp passes every operation directly to the underlying FS.
+	ChaosModeNoOp
 )
-
-// Chaos wraps an [FS] and injects random failures for testing.
-//
-// Errors are state-aware: once a path gets EIO (bad sector), it stays broken.
-// Errors are also reality-aware: ENOENT is only returned if the file really
-// doesn't exist on the underlying filesystem.
-//
-// All injected errors are real OS errors (syscall.Errno wrapped in os.PathError)
-// so they behave identically to real filesystem errors. Code using errors.Is()
-// will work correctly.
-//
-// Use [Chaos.SetMode] to control behavior.
-// Use [Chaos.Stats] to inspect how many faults were injected.
-type Chaos struct {
-	fs     FS
-	rng    *rand.Rand
-	config ChaosConfig
-	mode   atomic.Uint32
-
-	// Path state tracking for consistent errors
-	mu         sync.RWMutex
-	pathStates map[string]PathState
-
-	// Counters for testing verification
-	openFails       atomic.Int64
-	readFails       atomic.Int64
-	writeFails      atomic.Int64
-	readDirFails    atomic.Int64
-	partialReads    atomic.Int64
-	partialWrites   atomic.Int64
-	partialReadDirs atomic.Int64
-	removeFails     atomic.Int64
-	renameFails     atomic.Int64
-	statFails       atomic.Int64
-	lockFails       atomic.Int64
-}
-
-// NewChaos creates a new Chaos filesystem wrapping the given [FS].
-// The seed controls random fault injection for reproducibility.
-func NewChaos(fs FS, seed int64, config ChaosConfig) *Chaos {
-	return &Chaos{
-		fs:         fs,
-		rng:        rand.New(rand.NewSource(seed)),
-		config:     config,
-		pathStates: make(map[string]PathState),
-	}
-}
-
-// SetMode updates Chaos behavior.
-//
-// SetMode is safe to call concurrently with filesystem operations.
-//
-// Modes:
-//   - [ChaosModePassthrough]: behave like the wrapped filesystem; ignore fault
-//     rates and ignore sticky path state.
-//   - [ChaosModeInject]: inject random failures according to [ChaosConfig] and
-//     apply sticky path state (errors may become "sticky" as a consequence of
-//     injection).
-//   - [ChaosModeStickyOnly]: apply existing sticky path state only; fault rates
-//     are disabled.
-//
-// Switching modes never clears sticky path state. In particular, moving to
-// [ChaosModePassthrough] only stops consulting sticky state; switching back to
-// [ChaosModeInject] or [ChaosModeStickyOnly] will make any existing sticky
-// state take effect again.
-//
-// The zero value (and default for a new [Chaos]) is [ChaosModePassthrough].
-func (c *Chaos) SetMode(m ChaosMode) { c.mode.Store(uint32(m)) }
 
 // ChaosStats contains counts of injected faults.
 type ChaosStats struct {
@@ -158,8 +141,132 @@ type ChaosStats struct {
 	RemoveFails     int64
 	RenameFails     int64
 	StatFails       int64
-	LockFails       int64
+	MkdirAllFails   int64
+	FileStatFails   int64
+	SeekFails       int64
+	SyncFails       int64
+	CloseFails      int64
 }
+
+// ChaosError marks an error as intentionally injected by [Chaos].
+//
+// It wraps the underlying error so errors.Is/As continue to work.
+//
+// Note: For errno-style errors, [Chaos] wraps an [*fs.PathError] (or [*os.LinkError]
+// for rename) with a [syscall.Errno] in PathError.Err so os.IsNotExist/os.IsPermission
+// keep working via unwrapping, while [IsChaosErr] can still distinguish chaos vs
+// real OS errors in tests.
+//
+// All methods panic if the receiver or Err is nil.
+type ChaosError struct {
+	Err error
+}
+
+// Error returns a formatted error message.
+// Panics if e or e.Err is nil.
+func (e *ChaosError) Error() string {
+	return "chaos: " + e.Err.Error()
+}
+
+// Unwrap returns the underlying error. Panics if e is nil.
+func (e *ChaosError) Unwrap() error {
+	return e.Err
+}
+
+// IsChaosErr reports whether err (or any wrapped error) was injected by [Chaos].
+// Returns false if err is nil.
+func IsChaosErr(err error) bool {
+	var injected *ChaosError
+
+	return errors.As(err, &injected)
+}
+
+// Chaos wraps an [FS] and injects random failures for testing.
+//
+// The fault model aims to match the surface semantics of Go's os package on
+// Unix-ish systems, without overfitting to edge/undefined kernel behavior.
+// It is a "real filesystem + fault injection" wrapper, not a full filesystem
+// simulator. Chaos does not maintain per-path "sticky" fault state; each call
+// independently decides whether to inject.
+//
+// Error model:
+//   - Most injected filesystem errors are returned as an [*fs.PathError] with a
+//     real [syscall.Errno] in PathError.Err, so [errors.Is] and helpers like
+//     [os.IsPermission] behave like real OS errors.
+//   - Rename failures are returned as an [*os.LinkError] with a real
+//     [syscall.Errno] in LinkError.Err, like [os.Rename].
+//   - Injected errors are marked so tests can distinguish injected vs real
+//     filesystem errors using [IsChaosErr].
+//   - Chaos never injects ENOENT (any os.IsNotExist result originates from the
+//     wrapped [FS]) and never injects EINTR (the stdlib generally retries EINTR
+//     internally). Injection may still overlay other failures regardless of
+//     whether the target exists (e.g. RemoveAll can fail even if the path would
+//     otherwise be missing due to simulated permission errors).
+//   - Chaos does not inject os.ErrInvalid or other "API misuse" failures (nil
+//     receiver/invalid handle); those are caller bugs, not filesystem faults.
+//
+// Return-shape constraints:
+//   - File.Read injected failures return n==0 with a non-nil error (matching
+//     os.File.Read on Unix-ish systems, which forces n=0 on syscall.Read errors).
+//   - File.Write may return n>0 with a non-nil error (partial progress).
+//   - File.Seek injected failures return pos==0 with a non-nil error.
+//   - File.Stat injected failures return (nil, non-nil error).
+//   - File.Sync injected failures return a non-nil error.
+//   - File.Close injected failures still close the underlying file to avoid
+//     descriptor leaks in tests.
+//   - Chaos does not inject impossible anomalies like n>len(p) or "n==0 &&
+//     err==nil" mid-write. EOF is not treated as an injected "failure"; it comes
+//     from the wrapped filesystem as bare io.EOF.
+//
+// Partial operations:
+//   - File.Read short: short read with err==nil by limiting the underlying
+//     read size (does not skip bytes / advance offsets incorrectly). This is
+//     a legal io.Reader outcome, not EOF or an error.
+//   - File.Write partial: writes a prefix and returns a non-nil error; most
+//     partial writes return an errno-style [*fs.PathError], but 10% return
+//     an injected [io.ErrShortWrite] to model "short write without errno".
+//   - FS.ReadFile partial: returns a prefix + non-nil error (like os.ReadFile
+//     returning bytes read so far after a later read fails).
+//   - FS.ReadDir partial: returns a subset + non-nil error (like os.ReadDir
+//     returning entries read so far after a later directory read fails).
+//
+// Use [Chaos.SetMode] to control behavior and [Chaos.Stats] to inspect how many
+// faults were injected.
+type Chaos struct {
+	fs     FS
+	rng    *rand.Rand
+	config ChaosConfig
+	mode   atomic.Uint32
+
+	rngMu sync.Mutex
+
+	// Counters for testing verification
+	openFails       atomic.Int64
+	readFails       atomic.Int64
+	writeFails      atomic.Int64
+	readDirFails    atomic.Int64
+	partialReads    atomic.Int64
+	partialWrites   atomic.Int64
+	partialReadDirs atomic.Int64
+	removeFails     atomic.Int64
+	renameFails     atomic.Int64
+	statFails       atomic.Int64
+	mkdirAllFails   atomic.Int64
+	fileStatFails   atomic.Int64
+	seekFails       atomic.Int64
+	syncFails       atomic.Int64
+	closeFails      atomic.Int64
+}
+
+// SetMode updates [Chaos] behavior.
+//
+// SetMode is safe to call concurrently with filesystem operations.
+//
+// Modes:
+//   - [ChaosModeActive]: inject random failures according to [ChaosConfig].
+//     This is the default.
+//   - [ChaosModeNoOp]: pass all operations to the underlying filesystem.
+func (c *Chaos) SetMode(m ChaosMode) { c.mode.Store(uint32(m)) }
 
 // Stats returns the current fault injection counts.
 func (c *Chaos) Stats() ChaosStats {
@@ -174,7 +281,11 @@ func (c *Chaos) Stats() ChaosStats {
 		RemoveFails:     c.removeFails.Load(),
 		RenameFails:     c.renameFails.Load(),
 		StatFails:       c.statFails.Load(),
-		LockFails:       c.lockFails.Load(),
+		MkdirAllFails:   c.mkdirAllFails.Load(),
+		FileStatFails:   c.fileStatFails.Load(),
+		SeekFails:       c.seekFails.Load(),
+		SyncFails:       c.syncFails.Load(),
+		CloseFails:      c.closeFails.Load(),
 	}
 }
 
@@ -184,319 +295,40 @@ func (c *Chaos) TotalFaults() int64 {
 
 	return s.OpenFails + s.ReadFails + s.WriteFails + s.PartialReads +
 		s.PartialWrites + s.ReadDirFails + s.PartialReadDirs +
-		s.RemoveFails + s.RenameFails + s.StatFails + s.LockFails
+		s.RemoveFails + s.RenameFails + s.StatFails + s.MkdirAllFails +
+		s.FileStatFails + s.SeekFails + s.SyncFails + s.CloseFails
 }
-
-// PathState returns the current fault state for a path (for testing).
-func (c *Chaos) PathState(path string) PathState {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.pathStates[path]
-}
-
-// ResetPathState clears the fault state for a path (for testing).
-func (c *Chaos) ResetPathState(path string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	delete(c.pathStates, path)
-}
-
-// ResetAllPathStates clears all fault states (for testing).
-func (c *Chaos) ResetAllPathStates() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.pathStates = make(map[string]PathState)
-}
-
-// should returns true with the given probability when chaos is injecting.
-func (c *Chaos) should(mode ChaosMode, rate float64) bool {
-	if mode != ChaosModeInject {
-		return false
-	}
-
-	return c.randFloat() < rate
-}
-
-// randFloat returns a random float64 in [0.0, 1.0) (thread-safe).
-func (c *Chaos) randFloat() float64 {
-	c.mu.Lock()
-	result := c.rng.Float64()
-	c.mu.Unlock()
-
-	return result
-}
-
-// randIntn returns a random int in [0, n) (thread-safe).
-func (c *Chaos) randIntn(n int) int {
-	c.mu.Lock()
-	result := c.rng.Intn(n)
-	c.mu.Unlock()
-
-	return result
-}
-
-// getState returns the current fault state for a path.
-func (c *Chaos) getState(path string) PathState {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.pathStates[path]
-}
-
-// setState updates the fault state for a path.
-func (c *Chaos) setState(path string, state PathState) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if state == PathNormal {
-		delete(c.pathStates, path)
-	} else {
-		c.pathStates[path] = state
-	}
-}
-
-// errToState converts an error to a path state for tracking.
-func errToState(err syscall.Errno) PathState {
-	switch err {
-	case syscall.EIO:
-		return PathIOError // Sticky - bad sector
-	case syscall.EROFS:
-		return PathReadOnly // Sticky for writes
-	case syscall.EACCES, syscall.EPERM:
-		return PathNoPermission // Semi-sticky
-	default:
-		return PathNormal // Transient
-	}
-}
-
-// isWriteOp returns true if the operation modifies the filesystem.
-func isWriteOp(op string) bool {
-	switch op {
-	case "write", "create", "remove", "rename":
-		return true
-	}
-
-	return false
-}
-
-// pathError creates an *os.PathError with the given operation, path, and errno.
-// This matches what the real OS returns, so errors.Is() works correctly.
-func pathError(op, path string, errno syscall.Errno) error {
-	pe := &fs.PathError{Op: op, Path: path, Err: errno}
-	markInjectedPathError(pe)
-
-	return pe
-}
-
-// pickRandom selects a random error from the slice.
-func (c *Chaos) pickRandom(errs []syscall.Errno) syscall.Errno {
-	return errs[c.randIntn(len(errs))]
-}
-
-// pickError selects an appropriate error based on operation, path state, and real existence.
-// This ensures errors are logically consistent with the actual filesystem state.
-func (c *Chaos) pickError(op string, path string) (syscall.Errno, error) {
-	state := c.getState(path)
-
-	// 1. Sticky states - always return same error
-	switch state {
-	case PathIOError:
-		return syscall.EIO, nil
-	case PathReadOnly:
-		if isWriteOp(op) {
-			return syscall.EROFS, nil
-		}
-		// Reads still work on read-only filesystem
-	}
-
-	// 2. Check real filesystem state to pick valid errors
-	// If the existence check itself fails, surface the real error rather than
-	// fabricating an injected error based on a guess.
-	var realExists bool
-
-	switch op {
-	case "open", "remove", "rename", "stat":
-		exists, err := c.fs.Exists(path)
-		if err != nil {
-			return 0, err
-		}
-
-		realExists = exists
-	}
-
-	var valid []syscall.Errno
-
-	switch op {
-	case "open":
-		if realExists {
-			// File exists - can't return ENOENT
-			valid = []syscall.Errno{syscall.EACCES, syscall.EIO, syscall.EMFILE, syscall.ENFILE}
-		} else {
-			// File doesn't exist - ENOENT is valid
-			valid = []syscall.Errno{syscall.ENOENT, syscall.EACCES, syscall.EIO, syscall.EMFILE}
-		}
-
-	case "read":
-		// Reading from open file - can't get ENOENT (already opened)
-		valid = []syscall.Errno{syscall.EIO, syscall.EINTR}
-
-	case "write", "create":
-		// Writes can fail for many reasons regardless of existence
-		valid = []syscall.Errno{syscall.EACCES, syscall.EIO, syscall.ENOSPC, syscall.EDQUOT, syscall.EROFS}
-
-	case "remove":
-		if realExists {
-			valid = []syscall.Errno{syscall.EACCES, syscall.EIO, syscall.EBUSY, syscall.EPERM}
-		} else {
-			// Can only return ENOENT if file really doesn't exist
-			valid = []syscall.Errno{syscall.ENOENT}
-		}
-
-	case "rename":
-		if realExists {
-			valid = []syscall.Errno{syscall.EACCES, syscall.EIO, syscall.ENOSPC, syscall.EXDEV, syscall.EROFS}
-		} else {
-			valid = []syscall.Errno{syscall.ENOENT, syscall.EIO}
-		}
-
-	case "stat":
-		if realExists {
-			// File exists - can't return ENOENT
-			valid = []syscall.Errno{syscall.EACCES, syscall.EIO}
-		} else {
-			valid = []syscall.Errno{syscall.ENOENT, syscall.EACCES, syscall.EIO}
-		}
-
-	default:
-		valid = []syscall.Errno{syscall.EIO}
-	}
-
-	// 3. Pick error and update state
-	err := c.pickRandom(valid)
-	c.setState(path, errToState(err))
-
-	return err, nil
-}
-
-// --- File Operations ---
 
 func (c *Chaos) Open(path string) (File, error) {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		f, err := c.fs.Open(path)
-		if err != nil {
-			return nil, err
-		}
-
-		return &chaosFile{f: f, chaos: c, path: path}, nil
-	}
-
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.openFails.Add(1)
-
-			return nil, pathError("open", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	// Sticky EIO - always fail
-	if state == PathIOError {
-		c.openFails.Add(1)
-
-		return nil, pathError("open", path, syscall.EIO)
-	}
-
-	if c.should(mode, c.config.OpenFailRate) {
-		errno, err := c.pickError("open", path)
-		if err != nil {
-			return nil, err
-		}
-
-		c.openFails.Add(1)
-
-		return nil, pathError("open", path, errno)
-	}
-
-	f, err := c.fs.Open(path)
-	if err != nil {
-		return nil, err
-	}
-
-	return &chaosFile{f: f, chaos: c, path: path}, nil
+	return c.openWithChaos(path, "open", func() (File, error) {
+		return c.fs.Open(path)
+	})
 }
 
 func (c *Chaos) Create(path string) (File, error) {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		f, err := c.fs.Create(path)
-		if err != nil {
-			return nil, err
-		}
-
-		return &chaosFile{f: f, chaos: c, path: path}, nil
-	}
-
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.openFails.Add(1)
-
-			return nil, pathError("create", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	// Sticky errors
-	if state == PathIOError {
-		c.openFails.Add(1)
-
-		return nil, pathError("create", path, syscall.EIO)
-	}
-
-	if state == PathReadOnly {
-		c.openFails.Add(1)
-
-		return nil, pathError("create", path, syscall.EROFS)
-	}
-
-	if c.should(mode, c.config.OpenFailRate) {
-		errno, err := c.pickError("create", path)
-		if err != nil {
-			return nil, err
-		}
-
-		c.openFails.Add(1)
-
-		return nil, pathError("create", path, errno)
-	}
-
-	f, err := c.fs.Create(path)
-	if err != nil {
-		return nil, err
-	}
-
-	return &chaosFile{f: f, chaos: c, path: path}, nil
+	return c.openWithChaos(path, "create", func() (File, error) {
+		return c.fs.Create(path)
+	})
 }
 
 func (c *Chaos) OpenFile(path string, flag int, perm os.FileMode) (File, error) {
+	op := "open"
+	if flag&(os.O_WRONLY|os.O_RDWR|os.O_APPEND|os.O_CREATE|os.O_TRUNC) != 0 {
+		op = "create"
+	}
+
+	return c.openWithChaos(path, op, func() (File, error) {
+		return c.fs.OpenFile(path, flag, perm)
+	})
+}
+
+// openWithChaos wraps file-open operations with fault injection.
+// The op parameter controls which errno set is used (via pickError).
+// Returns the wrapped chaosFile on success, or an injected error.
+func (c *Chaos) openWithChaos(path, op string, openFn func() (File, error)) (File, error) {
 	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		f, err := c.fs.OpenFile(path, flag, perm)
+	if mode == ChaosModeNoOp {
+		f, err := openFn()
 		if err != nil {
 			return nil, err
 		}
@@ -504,52 +336,14 @@ func (c *Chaos) OpenFile(path string, flag int, perm os.FileMode) (File, error) 
 		return &chaosFile{f: f, chaos: c, path: path}, nil
 	}
 
-	state := c.getState(path)
-	isWrite := flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.openFails.Add(1)
-
-			return nil, pathError("open", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	// Sticky errors
-	if state == PathIOError {
-		c.openFails.Add(1)
-
-		return nil, pathError("open", path, syscall.EIO)
-	}
-
-	if state == PathReadOnly && isWrite {
-		c.openFails.Add(1)
-
-		return nil, pathError("open", path, syscall.EROFS)
-	}
-
 	if c.should(mode, c.config.OpenFailRate) {
-		op := "open"
-		if isWrite {
-			op = "create"
-		}
-
-		errno, err := c.pickError(op, path)
-		if err != nil {
-			return nil, err
-		}
-
+		errno := c.pickError(op)
 		c.openFails.Add(1)
 
 		return nil, pathError("open", path, errno)
 	}
 
-	f, err := c.fs.OpenFile(path, flag, perm)
+	f, err := openFn()
 	if err != nil {
 		return nil, err
 	}
@@ -557,45 +351,18 @@ func (c *Chaos) OpenFile(path string, flag int, perm os.FileMode) (File, error) 
 	return &chaosFile{f: f, chaos: c, path: path}, nil
 }
 
-// --- Convenience Methods ---
-
 func (c *Chaos) ReadFile(path string) ([]byte, error) {
 	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
+	if mode == ChaosModeNoOp {
 		return c.fs.ReadFile(path)
 	}
 
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.readFails.Add(1)
-
-			return nil, pathError("read", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	// Sticky EIO
-	if state == PathIOError {
-		c.readFails.Add(1)
-
-		return nil, pathError("read", path, syscall.EIO)
-	}
-
 	if c.should(mode, c.config.ReadFailRate) {
-		errno, err := c.pickError("read", path)
-		if err != nil {
-			return nil, err
-		}
+		op, errno := c.pickReadFileError()
 
 		c.readFails.Add(1)
 
-		return nil, pathError("read", path, errno)
+		return nil, pathError(op, path, errno)
 	}
 
 	data, err := c.fs.ReadFile(path)
@@ -603,129 +370,26 @@ func (c *Chaos) ReadFile(path string) ([]byte, error) {
 		return nil, err
 	}
 
-	// Partial read - return truncated data
+	// Partial read - return truncated data + error (like os.ReadFile returning
+	// bytes read so far after a later Read fails).
 	if c.should(mode, c.config.PartialReadRate) && len(data) > 1 {
 		c.partialReads.Add(1)
 		cutoff := c.randIntn(len(data)-1) + 1
 
-		return data[:cutoff], nil
+		return data[:cutoff], pathError("read", path, syscall.EIO)
 	}
 
 	return data, nil
 }
 
-func (c *Chaos) WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		return c.fs.WriteFileAtomic(path, data, perm)
-	}
-
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.writeFails.Add(1)
-
-			return pathError("write", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	// Sticky errors
-	if state == PathIOError {
-		c.writeFails.Add(1)
-
-		return pathError("write", path, syscall.EIO)
-	}
-
-	if state == PathReadOnly {
-		c.writeFails.Add(1)
-
-		return pathError("write", path, syscall.EROFS)
-	}
-
-	if c.should(mode, c.config.WriteFailRate) {
-		errno, err := c.pickError("write", path)
-		if err != nil {
-			return err
-		}
-
-		c.writeFails.Add(1)
-
-		return pathError("write", path, errno)
-	}
-
-	// Partial write: bypass atomic, write truncated data directly
-	if c.should(mode, c.config.PartialWriteRate) && len(data) > 1 {
-		c.partialWrites.Add(1)
-		cutoff := c.randIntn(len(data)-1) + 1
-		// Raw write, not atomic. Use the wrapped FS, not os.WriteFile, so
-		// Chaos can decorate other FS implementations without leaking to os.
-		f, err := c.fs.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
-		if err != nil {
-			return err
-		}
-
-		_, err = f.Write(data[:cutoff])
-		closeErr := f.Close()
-
-		if err != nil {
-			return err
-		}
-
-		if closeErr != nil {
-			return closeErr
-		}
-
-		errno, err := c.pickError("write", path)
-		if err != nil {
-			return err
-		}
-
-		return pathError("write", path, errno)
-	}
-
-	return c.fs.WriteFileAtomic(path, data, perm)
-}
-
-// --- Directory Operations ---
-
 func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
+	if mode == ChaosModeNoOp {
 		return c.fs.ReadDir(path)
 	}
 
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.readDirFails.Add(1)
-
-			return nil, pathError("readdir", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	if state == PathIOError {
-		c.readDirFails.Add(1)
-
-		return nil, pathError("readdir", path, syscall.EIO)
-	}
-
 	if c.should(mode, c.config.ReadDirFailRate) {
-		errno, err := c.pickError("stat", path)
-		if err != nil {
-			return nil, err
-		}
+		errno := c.pickError("readdir")
 
 		c.readDirFails.Add(1)
 
@@ -737,233 +401,58 @@ func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 		return nil, err
 	}
 
-	// Partial listing
+	// Partial listing - return subset + error (like os.ReadDir returning entries
+	// read so far after a later directory read fails).
 	if c.should(mode, c.config.ReadDirPartialRate) && len(entries) > 1 {
 		c.partialReadDirs.Add(1)
 		cutoff := c.randIntn(len(entries)-1) + 1
 
-		return entries[:cutoff], nil
+		return entries[:cutoff], pathError("readdir", path, syscall.EIO)
 	}
 
 	return entries, nil
 }
 
 func (c *Chaos) MkdirAll(path string, perm os.FileMode) error {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		return c.fs.MkdirAll(path, perm)
-	}
-
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			return pathError("mkdir", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	if state == PathIOError {
-		return pathError("mkdir", path, syscall.EIO)
-	}
-
-	if state == PathReadOnly {
-		return pathError("mkdir", path, syscall.EROFS)
+	err := c.introduceChaos(path, faultMkdirAll)
+	if err != nil {
+		return err
 	}
 
 	return c.fs.MkdirAll(path, perm)
 }
 
-// --- Metadata ---
-
 func (c *Chaos) Stat(path string) (os.FileInfo, error) {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		return c.fs.Stat(path)
-	}
-
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.statFails.Add(1)
-
-			return nil, pathError("stat", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	if state == PathIOError {
-		c.statFails.Add(1)
-
-		return nil, pathError("stat", path, syscall.EIO)
-	}
-
-	if c.should(mode, c.config.StatFailRate) {
-		errno, err := c.pickError("stat", path)
-		if err != nil {
-			return nil, err
-		}
-
-		c.statFails.Add(1)
-
-		return nil, pathError("stat", path, errno)
+	err := c.introduceChaos(path, faultStat)
+	if err != nil {
+		return nil, err
 	}
 
 	return c.fs.Stat(path)
 }
 
 func (c *Chaos) Exists(path string) (bool, error) {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		return c.fs.Exists(path)
-	}
-
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.statFails.Add(1)
-
-			return false, pathError("stat", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	if state == PathIOError {
-		c.statFails.Add(1)
-
-		return false, pathError("stat", path, syscall.EIO)
-	}
-
-	if c.should(mode, c.config.StatFailRate) {
-		errno, err := c.pickError("stat", path)
-		if err != nil {
-			return false, err
-		}
-
-		c.statFails.Add(1)
-
-		return false, pathError("stat", path, errno)
+	err := c.introduceChaos(path, faultStat)
+	if err != nil {
+		return false, err
 	}
 
 	return c.fs.Exists(path)
 }
 
-// --- Mutations ---
-
 func (c *Chaos) Remove(path string) error {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		return c.fs.Remove(path)
-	}
-
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.removeFails.Add(1)
-
-			return pathError("remove", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	if state == PathIOError {
-		c.removeFails.Add(1)
-
-		return pathError("remove", path, syscall.EIO)
-	}
-
-	if state == PathReadOnly {
-		c.removeFails.Add(1)
-
-		return pathError("remove", path, syscall.EROFS)
-	}
-
-	if c.should(mode, c.config.RemoveFailRate) {
-		errno, err := c.pickError("remove", path)
-		if err != nil {
-			return err
-		}
-
-		c.removeFails.Add(1)
-
-		return pathError("remove", path, errno)
+	err := c.introduceChaos(path, faultRemove)
+	if err != nil {
+		return err
 	}
 
 	return c.fs.Remove(path)
 }
 
 func (c *Chaos) RemoveAll(path string) error {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		return c.fs.RemoveAll(path)
-	}
-
-	// Match os.RemoveAll semantics and our FS contract: no error if the path
-	// doesn't exist.
-	exists, err := c.fs.Exists(path)
+	err := c.introduceChaos(path, faultRemoveAll)
 	if err != nil {
 		return err
-	}
-
-	if !exists {
-		return nil
-	}
-
-	state := c.getState(path)
-
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.removeFails.Add(1)
-
-			return pathError("remove", path, syscall.EACCES)
-		}
-
-		c.setState(path, PathNormal)
-		state = PathNormal
-	}
-
-	if state == PathIOError {
-		c.removeFails.Add(1)
-
-		return pathError("remove", path, syscall.EIO)
-	}
-
-	if state == PathReadOnly {
-		c.removeFails.Add(1)
-
-		return pathError("remove", path, syscall.EROFS)
-	}
-
-	if c.should(mode, c.config.RemoveFailRate) {
-		errno, err := c.pickError("remove", path)
-		if err != nil {
-			return err
-		}
-
-		c.removeFails.Add(1)
-
-		return pathError("remove", path, errno)
 	}
 
 	return c.fs.RemoveAll(path)
@@ -971,136 +460,308 @@ func (c *Chaos) RemoveAll(path string) error {
 
 func (c *Chaos) Rename(oldpath, newpath string) error {
 	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
+	if mode == ChaosModeNoOp {
 		return c.fs.Rename(oldpath, newpath)
 	}
 
-	// Check both paths for sticky errors
-	oldState := c.getState(oldpath)
-	newState := c.getState(newpath)
-
-	// Semi-sticky permissions.
-	if oldState == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.renameFails.Add(1)
-
-			return pathError("rename", oldpath, syscall.EACCES)
-		}
-
-		c.setState(oldpath, PathNormal)
-		oldState = PathNormal
-	}
-
-	if newState == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.renameFails.Add(1)
-
-			return pathError("rename", newpath, syscall.EACCES)
-		}
-
-		c.setState(newpath, PathNormal)
-		newState = PathNormal
-	}
-
-	if oldState == PathIOError || newState == PathIOError {
-		c.renameFails.Add(1)
-
-		return pathError("rename", oldpath, syscall.EIO)
-	}
-
-	if oldState == PathReadOnly || newState == PathReadOnly {
-		c.renameFails.Add(1)
-
-		return pathError("rename", oldpath, syscall.EROFS)
-	}
-
 	if c.should(mode, c.config.RenameFailRate) {
-		errno, err := c.pickError("rename", oldpath)
-		if err != nil {
-			return err
-		}
+		errno := c.pickError("rename")
 
 		c.renameFails.Add(1)
 
-		return pathError("rename", oldpath, errno)
+		// os.Rename reports failures as *os.LinkError.
+		return linkError("rename", oldpath, newpath, errno)
 	}
 
 	return c.fs.Rename(oldpath, newpath)
 }
 
-// --- Locking ---
+// faultKind identifies a type of fault that can be injected.
+// The string value is used as the operation name in error messages.
+type faultKind string
 
-func (c *Chaos) Lock(path string) (Locker, error) {
+const (
+	faultStat      faultKind = "stat"
+	faultRemove    faultKind = "remove"
+	faultRemoveAll faultKind = "removeall"
+	faultMkdirAll  faultKind = "mkdirall"
+)
+
+// fileFaultKind identifies a type of fault for file handle operations.
+// The string value is used as the operation name in error messages.
+type fileFaultKind string
+
+const (
+	fileFaultSeek fileFaultKind = "seek"
+	fileFaultStat fileFaultKind = "stat"
+	fileFaultSync fileFaultKind = "sync"
+)
+
+// introduceChaos checks if a fault should be injected for the given operation.
+// Returns a non-nil error if a fault was injected, nil otherwise.
+//
+// Chaos never injects ENOENT or EINTR:
+//   - ENOENT ("no such file or directory") should come from the wrapped FS so
+//     Chaos doesn't manufacture "missing" results the real filesystem wouldn't
+//     have produced.
+//   - EINTR ("interrupted system call") is generally retried internally by the
+//     Go stdlib, so surfacing it is usually less os-like than surfacing EIO.
+func (c *Chaos) introduceChaos(path string, kind faultKind) error {
 	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModePassthrough {
-		return c.fs.Lock(path)
+	if mode != ChaosModeActive {
+		return nil
 	}
 
-	state := c.getState(path)
+	var (
+		rate    float64
+		counter *atomic.Int64
+		errnos  []syscall.Errno
+	)
 
-	// Semi-sticky permissions.
-	if state == PathNoPermission {
-		// 80%: still denied, 20%: "permission recovered"
-		if c.randFloat() < 0.8 {
-			c.lockFails.Add(1)
+	switch kind {
+	case faultStat:
+		// EACCES: permission denied (file/directory permissions or ACLs)
+		// EIO: I/O error (device/filesystem failure)
+		rate = c.config.StatFailRate
+		counter = &c.statFails
+		errnos = []syscall.Errno{syscall.EACCES, syscall.EIO}
 
-			return nil, pathError("lock", path, syscall.EACCES)
-		}
+	case faultRemove:
+		// EACCES: permission denied (file/directory permissions or ACLs)
+		// EPERM: operation not permitted (policy/flags disallow the operation)
+		// EBUSY: resource/device busy (in use)
+		// EIO: I/O error (device/filesystem failure)
+		// EROFS: read-only filesystem (writes/mutations are rejected)
+		rate = c.config.RemoveFailRate
+		counter = &c.removeFails
+		errnos = []syscall.Errno{syscall.EACCES, syscall.EPERM, syscall.EBUSY, syscall.EIO, syscall.EROFS}
 
-		c.setState(path, PathNormal)
-		state = PathNormal
+	case faultRemoveAll:
+		// EACCES: permission denied (file/directory permissions or ACLs)
+		// EPERM: operation not permitted (policy/flags disallow the operation)
+		// EBUSY: resource/device busy (in use)
+		// EIO: I/O error (device/filesystem failure)
+		// EROFS: read-only filesystem (writes/mutations are rejected)
+		rate = c.config.RemoveFailRate
+		counter = &c.removeFails
+		errnos = []syscall.Errno{syscall.EACCES, syscall.EPERM, syscall.EBUSY, syscall.EIO, syscall.EROFS}
+
+	case faultMkdirAll:
+		// EACCES: permission denied (file/directory permissions or ACLs)
+		// EIO: I/O error (device/filesystem failure)
+		// ENOSPC: no space left on device
+		// EDQUOT: disk quota exceeded
+		// EROFS: read-only filesystem (writes/mutations are rejected)
+		// ENOTDIR: a path component is not a directory
+		rate = c.config.MkdirAllFailRate
+		counter = &c.mkdirAllFails
+		errnos = []syscall.Errno{syscall.EACCES, syscall.EIO, syscall.ENOSPC, syscall.EDQUOT, syscall.EROFS, syscall.ENOTDIR}
+
+	default:
+		panic("unknown fault kind: " + string(kind))
 	}
 
-	if state == PathIOError {
-		c.lockFails.Add(1)
+	if c.should(mode, rate) {
+		counter.Add(1)
 
-		return nil, pathError("lock", path, syscall.EIO)
+		errno := errnos[c.randIntn(len(errnos))]
+
+		return pathError(string(kind), path, errno)
 	}
 
-	if state == PathReadOnly {
-		c.lockFails.Add(1)
-
-		return nil, pathError("lock", path, syscall.EROFS)
-	}
-
-	if c.should(mode, c.config.LockFailRate) {
-		c.lockFails.Add(1)
-		// Lock timeout is returned as ErrDeadlineExceeded in real code
-		return nil, inject(os.ErrDeadlineExceeded)
-	}
-
-	return c.fs.Lock(path)
+	return nil
 }
 
-// --- chaosFile wraps a File and injects faults on Read/Write ---
+// should returns true with the given probability when chaos is injecting.
+func (c *Chaos) should(mode ChaosMode, rate float64) bool {
+	if mode != ChaosModeActive {
+		return false
+	}
 
+	return c.randFloat() < rate
+}
+
+// randFloat returns a random float64 in [0.0, 1.0) (thread-safe).
+func (c *Chaos) randFloat() float64 {
+	c.rngMu.Lock()
+	result := c.rng.Float64()
+	c.rngMu.Unlock()
+
+	return result
+}
+
+// randIntn returns a random int in [0, n) (thread-safe).
+func (c *Chaos) randIntn(n int) int {
+	c.rngMu.Lock()
+	result := c.rng.Intn(n)
+	c.rngMu.Unlock()
+
+	return result
+}
+
+// pathError creates an injected [*fs.PathError] with the given operation, path, and errno.
+// The error is wrapped in [ChaosError] so [IsChaosErr] can identify it, while
+// [errors.As] and helpers like [os.IsPermission] still work via unwrapping.
+func pathError(op, path string, errno syscall.Errno) error {
+	pe := &fs.PathError{Op: op, Path: path, Err: errno}
+
+	return &ChaosError{Err: pe}
+}
+
+// linkError creates an injected [*os.LinkError] with the given operation, paths, and errno.
+// The error is wrapped in [ChaosError] so [IsChaosErr] can identify it, while
+// [errors.As] and helpers like [os.IsPermission] still work via unwrapping.
+func linkError(op, oldpath, newpath string, errno syscall.Errno) error {
+	le := &os.LinkError{Op: op, Old: oldpath, New: newpath, Err: errno}
+
+	return &ChaosError{Err: le}
+}
+
+// pickRandom selects a random error from the slice.
+func (c *Chaos) pickRandom(errs []syscall.Errno) syscall.Errno {
+	return errs[c.randIntn(len(errs))]
+}
+
+// pickReadFileError returns an injected error consistent with os.ReadFile:
+// the failure can be either an open-time error or a later read-time error.
+func (c *Chaos) pickReadFileError() (op string, errno syscall.Errno) {
+	// Only include errors that keep os.Is* classification working and avoid
+	// injecting ENOENT (missing-path errors should come from the wrapped FS).
+	if c.randFloat() < 0.5 {
+		return "open", c.pickRandom([]syscall.Errno{
+			syscall.EACCES,
+			syscall.EMFILE,
+			syscall.ENFILE,
+			syscall.ENOTDIR,
+		})
+	}
+
+	return "read", syscall.EIO
+}
+
+// pickError selects an injected errno for the given operation.
+//
+// Note: Some operations are handled by [Chaos.introduceChaos] or
+// [chaosFile.introduceChaos] instead, which have inline errno documentation.
+//
+// Operation → injected errnos:
+//   - open: EACCES, EIO, EMFILE, ENFILE, ENOTDIR
+//   - create: EACCES, EIO, ENOSPC, EDQUOT, EROFS, EMFILE, ENFILE, ENOTDIR
+//   - readdir: EACCES, EIO, ENOTDIR, EMFILE, ENFILE
+//   - rename: EACCES, EIO, ENOSPC, EXDEV, EROFS, EPERM
+//   - fdread: EIO only (avoid EACCES/ENOENT post-open; match os.File.Read shape)
+//   - fdwrite: EIO, ENOSPC, EDQUOT, EROFS (avoid EACCES/ENOENT post-open)
+//   - fdclose: EIO only (avoid EACCES/ENOENT post-open)
+func (c *Chaos) pickError(op string) syscall.Errno {
+	switch op {
+	case "open":
+		// EACCES: permission denied (file/directory permissions or ACLs)
+		// EIO: I/O error (device/filesystem failure)
+		// EMFILE: too many open files for this process (per-process FD limit)
+		// ENFILE: too many open files in the system (system-wide FD limit)
+		// ENOTDIR: expected a directory, but a path component is not a directory
+		return c.pickRandom([]syscall.Errno{
+			syscall.EACCES,
+			syscall.EIO,
+			syscall.EMFILE,
+			syscall.ENFILE,
+			syscall.ENOTDIR,
+		})
+
+	case "create":
+		// EACCES: permission denied (file/directory permissions or ACLs)
+		// EIO: I/O error (device/filesystem failure)
+		// ENOSPC: no space left on device
+		// EDQUOT: disk quota exceeded
+		// EROFS: read-only filesystem (writes/mutations are rejected)
+		// EMFILE: too many open files for this process (per-process FD limit)
+		// ENFILE: too many open files in the system (system-wide FD limit)
+		// ENOTDIR: expected a directory, but a path component is not a directory
+		return c.pickRandom([]syscall.Errno{
+			syscall.EACCES,
+			syscall.EIO,
+			syscall.ENOSPC,
+			syscall.EDQUOT,
+			syscall.EROFS,
+			syscall.EMFILE,
+			syscall.ENFILE,
+			syscall.ENOTDIR,
+		})
+
+	case "readdir":
+		// EACCES: permission denied (file/directory permissions or ACLs)
+		// EIO: I/O error (device/filesystem failure)
+		// ENOTDIR: expected a directory, but a path component is not a directory
+		// EMFILE: too many open files for this process (per-process FD limit)
+		// ENFILE: too many open files in the system (system-wide FD limit)
+		return c.pickRandom([]syscall.Errno{
+			syscall.EACCES,
+			syscall.EIO,
+			syscall.ENOTDIR,
+			syscall.EMFILE,
+			syscall.ENFILE,
+		})
+
+	case "rename":
+		// EACCES: permission denied (file/directory permissions or ACLs)
+		// EIO: I/O error (device/filesystem failure)
+		// ENOSPC: no space left on device
+		// EXDEV: cross-device link (rename across filesystems/mount points)
+		// EROFS: read-only filesystem (writes/mutations are rejected)
+		// EPERM: operation not permitted (policy/flags disallow the operation)
+		return c.pickRandom([]syscall.Errno{
+			syscall.EACCES,
+			syscall.EIO,
+			syscall.ENOSPC,
+			syscall.EXDEV,
+			syscall.EROFS,
+			syscall.EPERM,
+		})
+
+	case "fdread":
+		// EIO only: avoid EACCES/ENOENT post-open; match os.File.Read shape
+		return syscall.EIO
+
+	case "fdwrite":
+		// EIO: I/O error (device/filesystem failure)
+		// ENOSPC: no space left on device
+		// EDQUOT: disk quota exceeded
+		// EROFS: read-only filesystem (writes/mutations are rejected)
+		// Avoid EACCES/ENOENT post-open.
+		return c.pickRandom([]syscall.Errno{
+			syscall.EIO,
+			syscall.ENOSPC,
+			syscall.EDQUOT,
+			syscall.EROFS,
+		})
+
+	case "fdclose":
+		// EIO only: avoid EACCES/ENOENT post-open
+		return syscall.EIO
+
+	default:
+		return syscall.EIO
+	}
+}
+
+// chaosFile wraps a [File] and injects faults on Read/Write.
 type chaosFile struct {
 	f     File
 	chaos *Chaos
 	path  string
 }
 
+// Interface compliance.
+var _ File = (*chaosFile)(nil)
+
 func (cf *chaosFile) Read(p []byte) (int, error) {
 	mode := ChaosMode(cf.chaos.mode.Load())
-	if mode == ChaosModePassthrough {
+	if mode == ChaosModeNoOp {
 		return cf.f.Read(p)
 	}
 
-	state := cf.chaos.getState(cf.path)
-
-	if state == PathIOError {
-		cf.chaos.readFails.Add(1)
-
-		return 0, pathError("read", cf.path, syscall.EIO)
-	}
-
 	if cf.chaos.should(mode, cf.chaos.config.ReadFailRate) {
-		errno, err := cf.chaos.pickError("read", cf.path)
-		if err != nil {
-			return 0, err
-		}
+		errno := cf.chaos.pickError("fdread")
 
 		cf.chaos.readFails.Add(1)
 
@@ -1123,29 +784,12 @@ func (cf *chaosFile) Read(p []byte) (int, error) {
 
 func (cf *chaosFile) Write(p []byte) (int, error) {
 	mode := ChaosMode(cf.chaos.mode.Load())
-	if mode == ChaosModePassthrough {
+	if mode == ChaosModeNoOp {
 		return cf.f.Write(p)
 	}
 
-	state := cf.chaos.getState(cf.path)
-
-	if state == PathIOError {
-		cf.chaos.writeFails.Add(1)
-
-		return 0, pathError("write", cf.path, syscall.EIO)
-	}
-
-	if state == PathReadOnly {
-		cf.chaos.writeFails.Add(1)
-
-		return 0, pathError("write", cf.path, syscall.EROFS)
-	}
-
 	if cf.chaos.should(mode, cf.chaos.config.WriteFailRate) {
-		errno, err := cf.chaos.pickError("write", cf.path)
-		if err != nil {
-			return 0, err
-		}
+		errno := cf.chaos.pickError("fdwrite")
 
 		cf.chaos.writeFails.Add(1)
 
@@ -1156,17 +800,21 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 	if cf.chaos.should(mode, cf.chaos.config.PartialWriteRate) && len(p) > 1 {
 		cf.chaos.partialWrites.Add(1)
 
-		n := len(p) / 2
+		cutoff := cf.chaos.randIntn(len(p)-1) + 1 // [1, len(p)-1]
 
-		wrote, err := cf.f.Write(p[:n])
+		wrote, err := cf.f.Write(p[:cutoff])
 		if err != nil {
 			return wrote, err
 		}
 
-		errno, err := cf.chaos.pickError("write", cf.path)
-		if err != nil {
-			return wrote, err
+		// Some portion of partial writes should look like a "short write without an errno"
+		// (io.ErrShortWrite). In the stdlib, this is the fallback when a write returns
+		// n != len(b) without a syscall error.
+		if cf.chaos.randFloat() < cf.chaos.config.ShortWriteRate {
+			return wrote, &ChaosError{Err: io.ErrShortWrite}
 		}
+
+		errno := cf.chaos.pickError("fdwrite")
 
 		return wrote, pathError("write", cf.path, errno)
 	}
@@ -1175,21 +823,111 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 }
 
 func (cf *chaosFile) Close() error {
-	return cf.f.Close()
+	mode := ChaosMode(cf.chaos.mode.Load())
+	if mode == ChaosModeNoOp {
+		return cf.f.Close()
+	}
+
+	injectClose := cf.chaos.should(mode, cf.chaos.config.CloseFailRate)
+
+	// Always close the underlying file to avoid descriptor leaks, even when
+	// returning an injected error.
+	err := cf.f.Close()
+	if err != nil {
+		return err
+	}
+
+	if injectClose {
+		cf.chaos.closeFails.Add(1)
+		errno := cf.chaos.pickError("fdclose")
+
+		return pathError("close", cf.path, errno)
+	}
+
+	return nil
 }
+
+// introduceChaos checks if a fault should be injected for file handle operations.
+// Returns a non-nil error if a fault was injected, nil otherwise.
+func (cf *chaosFile) introduceChaos(kind fileFaultKind) error {
+	mode := ChaosMode(cf.chaos.mode.Load())
+	if mode != ChaosModeActive {
+		return nil
+	}
+
+	var (
+		rate    float64
+		counter *atomic.Int64
+		errnos  []syscall.Errno
+	)
+
+	switch kind {
+	case fileFaultSeek:
+		// EIO: I/O error (avoid EACCES/ENOENT post-open)
+		rate = cf.chaos.config.SeekFailRate
+		counter = &cf.chaos.seekFails
+		errnos = []syscall.Errno{syscall.EIO}
+
+	case fileFaultStat:
+		// EIO: I/O error (avoid EACCES/ENOENT post-open)
+		rate = cf.chaos.config.FileStatFailRate
+		counter = &cf.chaos.fileStatFails
+		errnos = []syscall.Errno{syscall.EIO}
+
+	case fileFaultSync:
+		// EIO: I/O error (device/filesystem failure)
+		// ENOSPC: no space left on device
+		// EDQUOT: disk quota exceeded
+		// EROFS: read-only filesystem (writes/mutations are rejected)
+		// fsync can surface delayed write failures
+		rate = cf.chaos.config.SyncFailRate
+		counter = &cf.chaos.syncFails
+		errnos = []syscall.Errno{syscall.EIO, syscall.ENOSPC, syscall.EDQUOT, syscall.EROFS}
+
+	default:
+		panic("unknown file fault kind: " + string(kind))
+	}
+
+	if cf.chaos.should(mode, rate) {
+		counter.Add(1)
+
+		errno := errnos[cf.chaos.randIntn(len(errnos))]
+
+		return pathError(string(kind), cf.path, errno)
+	}
+
+	return nil
+}
+
 func (cf *chaosFile) Seek(offset int64, whence int) (int64, error) {
+	err := cf.introduceChaos(fileFaultSeek)
+	if err != nil {
+		return 0, err
+	}
+
 	return cf.f.Seek(offset, whence)
 }
+
 func (cf *chaosFile) Fd() uintptr {
 	return cf.f.Fd()
 }
+
 func (cf *chaosFile) Stat() (os.FileInfo, error) {
+	err := cf.introduceChaos(fileFaultStat)
+	if err != nil {
+		return nil, err
+	}
+
 	return cf.f.Stat()
 }
+
 func (cf *chaosFile) Sync() error {
+	err := cf.introduceChaos(fileFaultSync)
+	if err != nil {
+		return err
+	}
+
 	return cf.f.Sync()
 }
 
-// Compile-time interface checks.
 var _ FS = (*Chaos)(nil)
-var _ File = (*chaosFile)(nil)

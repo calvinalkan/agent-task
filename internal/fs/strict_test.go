@@ -23,9 +23,11 @@ func Test_StrictFS_Does_Not_Panic_When_The_Error_Is_A_ChaosError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Open(%q): want error, got nil", path)
 	}
+
 	if !IsChaosErr(err) {
 		t.Errorf("IsChaosErr(err) for Open(%q): want true, got false", path)
 	}
+
 	if tb.failed {
 		t.Errorf("tb.failed after chaos Open(%q): want false, got true", path)
 	}
@@ -36,6 +38,7 @@ func Test_StrictFS_ReadFile_Returns_Data_And_ChaosError_When_Chaos_Partially_Rea
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
+
 	full := []byte("hello world")
 	if err := os.WriteFile(path, full, 0o644); err != nil {
 		t.Fatalf("setup WriteFile(%q): %v", path, err)
@@ -50,12 +53,15 @@ func Test_StrictFS_ReadFile_Returns_Data_And_ChaosError_When_Chaos_Partially_Rea
 	if err == nil {
 		t.Fatalf("ReadFile(%q): want error, got nil", path)
 	}
+
 	if !IsChaosErr(err) {
 		t.Fatalf("IsChaosErr(err) for ReadFile(%q): want true, got false (err=%v)", path, err)
 	}
+
 	if got := len(data); got <= 0 || got >= len(full) {
 		t.Fatalf("ReadFile(%q): len(data)=%d, want 0 < len(data) < %d", path, got, len(full))
 	}
+
 	if tb.failed {
 		t.Fatalf("tb.failed after chaos ReadFile(%q): want false, got true", path)
 	}
@@ -68,15 +74,18 @@ func Test_StrictFS_ReadDir_Returns_Entries_And_ChaosError_When_Chaos_Partially_R
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644); err != nil {
 		t.Fatalf("setup WriteFile(a.txt): %v", err)
 	}
+
 	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b"), 0o644); err != nil {
 		t.Fatalf("setup WriteFile(b.txt): %v", err)
 	}
 
 	realFS := NewReal()
+
 	fullEntries, err := realFS.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("setup ReadDir(%q): %v", dir, err)
 	}
+
 	if len(fullEntries) < 2 {
 		t.Fatalf("setup: want at least 2 dir entries, got %d", len(fullEntries))
 	}
@@ -90,12 +99,15 @@ func Test_StrictFS_ReadDir_Returns_Entries_And_ChaosError_When_Chaos_Partially_R
 	if err == nil {
 		t.Fatalf("ReadDir(%q): want error, got nil", dir)
 	}
+
 	if !IsChaosErr(err) {
 		t.Fatalf("IsChaosErr(err) for ReadDir(%q): want true, got false (err=%v)", dir, err)
 	}
+
 	if got := len(entries); got <= 0 || got >= len(fullEntries) {
 		t.Fatalf("ReadDir(%q): len(entries)=%d, want 0 < len(entries) < %d", dir, got, len(fullEntries))
 	}
+
 	if tb.failed {
 		t.Fatalf("tb.failed after chaos ReadDir(%q): want false, got true", dir)
 	}
@@ -116,6 +128,7 @@ func Test_StrictFS_Does_Not_Panic_When_The_Error_Is_EOF(t *testing.T) {
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("Open(): want io.EOF, got %v", err)
 	}
+
 	if tb.failed {
 		t.Fatalf("tb.failed after Open() returned io.EOF: want false, got true")
 	}
@@ -141,13 +154,16 @@ func Test_StrictFS_Trace_Is_Empty_When_TraceCapacity_Is_Zero(t *testing.T) {
 
 	// Exercise a few ops that would normally produce trace output.
 	path := filepath.Join(t.TempDir(), "file.txt")
+
 	f, err := strict.Create(path)
 	if err != nil {
 		t.Fatalf("Create(%q): %v", path, err)
 	}
+
 	if _, err := f.Write([]byte("hello")); err != nil {
 		t.Fatalf("Write(%q): %v", path, err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatalf("Close(%q): %v", path, err)
 	}
@@ -160,7 +176,9 @@ func Test_StrictFS_Trace_Is_Empty_When_TraceCapacity_Is_Zero(t *testing.T) {
 	if tb.cleanup == nil {
 		t.Fatal("expected StrictFS to register Cleanup")
 	}
+
 	tb.cleanup()
+
 	if tb.logMsg != "" {
 		t.Fatalf("cleanup log with TraceCapacity=0: want empty, got %q", tb.logMsg)
 	}
@@ -178,6 +196,7 @@ func Test_StrictFS_Trace_Is_Bounded_To_TraceCapacity(t *testing.T) {
 
 		for i := range 205 {
 			path := filepath.Join(dir, fmt.Sprintf("exists-%03d", i))
+
 			_, err := strict.Exists(path)
 			if err != nil {
 				t.Fatalf("Exists(%q): %v", path, err)
@@ -185,6 +204,7 @@ func Test_StrictFS_Trace_Is_Bounded_To_TraceCapacity(t *testing.T) {
 		}
 
 		trace := strict.Trace()
+
 		lines := splitTraceLines(trace)
 		if want, got := 200, len(lines); want != got {
 			t.Fatalf("Trace() line count: want %d, got %d\ntrace:\n%s", want, got, trace)
@@ -192,9 +212,11 @@ func Test_StrictFS_Trace_Is_Bounded_To_TraceCapacity(t *testing.T) {
 
 		oldest := filepath.Join(dir, "exists-000")
 		newest := filepath.Join(dir, "exists-204")
+
 		if strings.Contains(trace, fmt.Sprintf("path=%q", oldest)) {
 			t.Fatalf("Trace() should not include oldest entry %q\ntrace:\n%s", oldest, trace)
 		}
+
 		if !strings.Contains(trace, fmt.Sprintf("path=%q", newest)) {
 			t.Fatalf("Trace() should include newest entry %q\ntrace:\n%s", newest, trace)
 		}
@@ -224,6 +246,7 @@ func Test_StrictFS_Trace_Is_Bounded_To_TraceCapacity(t *testing.T) {
 		}
 
 		trace := strict.Trace()
+
 		lines := splitTraceLines(trace)
 		if want, got := 3, len(lines); want != got {
 			t.Fatalf("Trace() line count: want %d, got %d\ntrace:\n%s", want, got, trace)
@@ -234,6 +257,7 @@ func Test_StrictFS_Trace_Is_Bounded_To_TraceCapacity(t *testing.T) {
 				t.Fatalf("Trace() should not include %q\ntrace:\n%s", shouldNotContain, trace)
 			}
 		}
+
 		for _, shouldContain := range paths[2:] {
 			if !strings.Contains(trace, fmt.Sprintf("path=%q", shouldContain)) {
 				t.Fatalf("Trace() should include %q\ntrace:\n%s", shouldContain, trace)
@@ -274,9 +298,11 @@ func Test_StrictFS_Trace_Records_Ops_In_Order(t *testing.T) {
 				if err != nil {
 					return err
 				}
+
 				if exists {
 					return errors.New("expected exists=false")
 				}
+
 				return nil
 			},
 		},
@@ -285,7 +311,9 @@ func Test_StrictFS_Trace_Records_Ops_In_Order(t *testing.T) {
 			op: "create",
 			run: func() error {
 				var err error
+
 				f, err = strict.Create(a)
+
 				return err
 			},
 		},
@@ -296,14 +324,19 @@ func Test_StrictFS_Trace_Records_Ops_In_Order(t *testing.T) {
 				if err != nil {
 					return err
 				}
+
 				if n != 5 {
 					return fmt.Errorf("write n=%d, want 5", n)
 				}
+
 				return nil
 			},
 		},
 		{op: "file.sync", run: func() error { return f.Sync() }},
-		{op: "file.stat", run: func() error { _, err := f.Stat(); return err }},
+		{op: "file.stat", run: func() error {
+			_, err := f.Stat()
+			return err
+		}},
 		{
 			op: "file.seek",
 			run: func() error {
@@ -311,9 +344,11 @@ func Test_StrictFS_Trace_Records_Ops_In_Order(t *testing.T) {
 				if err != nil {
 					return err
 				}
+
 				if pos != 0 {
 					return fmt.Errorf("seek pos=%d, want 0", pos)
 				}
+
 				return nil
 			},
 		},
@@ -321,13 +356,16 @@ func Test_StrictFS_Trace_Records_Ops_In_Order(t *testing.T) {
 			op: "file.read",
 			run: func() error {
 				buf := make([]byte, 5)
+
 				n, err := f.Read(buf)
 				if err != nil {
 					return err
 				}
+
 				if n != 5 {
 					return fmt.Errorf("read n=%d, want 5", n)
 				}
+
 				return nil
 			},
 		},
@@ -339,19 +377,29 @@ func Test_StrictFS_Trace_Records_Ops_In_Order(t *testing.T) {
 				if err != nil {
 					return err
 				}
+
 				if string(data) != "hello" {
 					return fmt.Errorf("data=%q, want %q", string(data), "hello")
 				}
+
 				return nil
 			},
 		},
-		{op: "readdir", run: func() error { _, err := strict.ReadDir(dir); return err }},
-		{op: "stat", run: func() error { _, err := strict.Stat(a); return err }},
+		{op: "readdir", run: func() error {
+			_, err := strict.ReadDir(dir)
+			return err
+		}},
+		{op: "stat", run: func() error {
+			_, err := strict.Stat(a)
+			return err
+		}},
 		{
 			op: "open",
 			run: func() error {
 				var err error
+
 				f2, err = strict.Open(a)
+
 				return err
 			},
 		},
@@ -360,11 +408,16 @@ func Test_StrictFS_Trace_Records_Ops_In_Order(t *testing.T) {
 			op: "openfile",
 			run: func() error {
 				var err error
+
 				f3, err = strict.OpenFile(b, flag, perm)
+
 				return err
 			},
 		},
-		{op: "file.write", run: func() error { _, err := f3.Write([]byte("x")); return err }},
+		{op: "file.write", run: func() error {
+			_, err := f3.Write([]byte("x"))
+			return err
+		}},
 		{op: "file.close", run: func() error { return f3.Close() }},
 		{op: "rename", run: func() error { return strict.Rename(b, c) }},
 		{op: "remove", run: func() error { return strict.Remove(c) }},
@@ -377,7 +430,8 @@ func Test_StrictFS_Trace_Records_Ops_In_Order(t *testing.T) {
 	}
 
 	for _, s := range steps {
-		if err := s.run(); err != nil {
+		err := s.run()
+		if err != nil {
 			t.Fatalf("%s: %v", s.op, err)
 		}
 	}
@@ -420,9 +474,11 @@ func Test_StrictFS_Panics_For_Each_Method_When_The_Underlying_FS_Errors(t *testi
 			if !strings.Contains(panicMsg, errBoom.Error()) {
 				t.Fatalf("panic message: want %q, got %q", errBoom.Error(), panicMsg)
 			}
+
 			if !strings.Contains(panicMsg, "#1 "+tt.traceOp) {
 				t.Fatalf("panic message: want trace op %q, got %q", "#1 "+tt.traceOp, panicMsg)
 			}
+
 			if !tb.failed {
 				t.Fatal("tb.failed after real error: want true, got false")
 			}
@@ -443,6 +499,7 @@ func Test_StrictFile_Does_Not_Panic_When_Read_Returns_EOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(%q): %v", path, err)
 	}
+
 	f.Close()
 
 	f, err = strict.Open(path)
@@ -452,10 +509,12 @@ func Test_StrictFile_Does_Not_Panic_When_Read_Returns_EOF(t *testing.T) {
 	defer f.Close()
 
 	buf := make([]byte, 10)
+
 	_, err = f.Read(buf)
 	if !errors.Is(err, io.EOF) {
 		t.Errorf("Read(%q): want io.EOF, got %v", path, err)
 	}
+
 	if tb.failed {
 		t.Errorf("tb.failed after Read(%q) returned io.EOF: want false, got true", path)
 	}
@@ -551,9 +610,11 @@ func Test_StrictFile_Panics_For_Each_Method_When_The_Underlying_File_Errors(t *t
 			if !strings.Contains(panicMsg, errBoom.Error()) {
 				t.Fatalf("panic message: want %q, got %q", errBoom.Error(), panicMsg)
 			}
+
 			if !strings.Contains(panicMsg, "#2 "+tt.traceOp) {
 				t.Fatalf("panic message: want trace op %q, got %q", "#2 "+tt.traceOp, panicMsg)
 			}
+
 			if !tb.failed {
 				t.Fatal("tb.failed after real file error: want true, got false")
 			}
@@ -571,27 +632,39 @@ func Test_StrictFile_Does_Not_Panic_For_Chaos_Errors(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "Read",
-			config:  ChaosConfig{ReadFailRate: 1.0},
-			call:    func(f File) error { _, err := f.Read(make([]byte, 1)); return err },
+			name:   "Read",
+			config: ChaosConfig{ReadFailRate: 1.0},
+			call: func(f File) error {
+				_, err := f.Read(make([]byte, 1))
+				return err
+			},
 			wantErr: true,
 		},
 		{
-			name:    "Write",
-			config:  ChaosConfig{WriteFailRate: 1.0},
-			call:    func(f File) error { _, err := f.Write([]byte("x")); return err },
+			name:   "Write",
+			config: ChaosConfig{WriteFailRate: 1.0},
+			call: func(f File) error {
+				_, err := f.Write([]byte("x"))
+				return err
+			},
 			wantErr: true,
 		},
 		{
-			name:    "Seek",
-			config:  ChaosConfig{SeekFailRate: 1.0},
-			call:    func(f File) error { _, err := f.Seek(0, io.SeekStart); return err },
+			name:   "Seek",
+			config: ChaosConfig{SeekFailRate: 1.0},
+			call: func(f File) error {
+				_, err := f.Seek(0, io.SeekStart)
+				return err
+			},
 			wantErr: true,
 		},
 		{
-			name:    "Stat",
-			config:  ChaosConfig{FileStatFailRate: 1.0},
-			call:    func(f File) error { _, err := f.Stat(); return err },
+			name:   "Stat",
+			config: ChaosConfig{FileStatFailRate: 1.0},
+			call: func(f File) error {
+				_, err := f.Stat()
+				return err
+			},
 			wantErr: true,
 		},
 		{
@@ -631,9 +704,11 @@ func Test_StrictFile_Does_Not_Panic_For_Chaos_Errors(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("%s(): err=%v, wantErr=%t", tt.name, err, tt.wantErr)
 			}
+
 			if err != nil && !IsChaosErr(err) {
 				t.Fatalf("IsChaosErr(err) after %s(): want true, got false (err=%v)", tt.name, err)
 			}
+
 			if tb.failed {
 				t.Fatalf("tb.failed after chaos %s(): want false, got true", tt.name)
 			}
@@ -654,19 +729,24 @@ func Test_StrictFile_Does_Not_Panic_On_Chaos_Partial_Write(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(%q): %v", path, err)
 	}
+
 	defer func() { _ = f.Close() }()
 
 	payload := []byte("hello")
+
 	n, err := f.Write(payload)
 	if err == nil {
 		t.Fatalf("Write(%q): want error, got nil", path)
 	}
+
 	if !IsChaosErr(err) {
 		t.Fatalf("IsChaosErr(err) for partial Write(%q): want true, got false (err=%v)", path, err)
 	}
+
 	if n <= 0 || n >= len(payload) {
 		t.Fatalf("Write(%q): n=%d, want 0 < n < %d", path, n, len(payload))
 	}
+
 	if tb.failed {
 		t.Fatalf("tb.failed after chaos partial Write(%q): want false, got true", path)
 	}
@@ -693,6 +773,7 @@ func Test_StrictFS_Cleanup_Logs_Trace_Only_When_The_Test_Fails(t *testing.T) {
 
 	// No log when the test isn't failing.
 	tb.cleanup()
+
 	if tb.logMsg != "" {
 		t.Fatalf("tb.logMsg after cleanup without failure: want empty string, got %q", tb.logMsg)
 	}
@@ -703,6 +784,7 @@ func Test_StrictFS_Cleanup_Logs_Trace_Only_When_The_Test_Fails(t *testing.T) {
 	if tb.logMsg == "" {
 		t.Fatal("tb.logMsg after cleanup: want trace output, got empty string")
 	}
+
 	if !strings.Contains(tb.logMsg, "#1 create") {
 		t.Errorf("tb.logMsg: want substring %q, got %q", "#1 create", tb.logMsg)
 	}
@@ -732,6 +814,7 @@ func (f *fakeTB) Logf(format string, args ...any) {
 
 func (f *fakeTB) Fatalf(format string, args ...any) {
 	f.failed = true
+
 	panic(fmt.Sprintf(format, args...))
 }
 
@@ -769,6 +852,7 @@ func (s stubFS) Open(path string) (File, error) {
 	if s.open == nil {
 		panic("stubFS.Open: not implemented")
 	}
+
 	return s.open(path)
 }
 
@@ -776,6 +860,7 @@ func (s stubFS) Create(path string) (File, error) {
 	if s.create == nil {
 		panic("stubFS.Create: not implemented")
 	}
+
 	return s.create(path)
 }
 
@@ -783,6 +868,7 @@ func (s stubFS) OpenFile(path string, flag int, perm os.FileMode) (File, error) 
 	if s.openFile == nil {
 		panic("stubFS.OpenFile: not implemented")
 	}
+
 	return s.openFile(path, flag, perm)
 }
 
@@ -790,6 +876,7 @@ func (s stubFS) ReadFile(path string) ([]byte, error) {
 	if s.readFile == nil {
 		panic("stubFS.ReadFile: not implemented")
 	}
+
 	return s.readFile(path)
 }
 
@@ -797,6 +884,7 @@ func (s stubFS) ReadDir(path string) ([]os.DirEntry, error) {
 	if s.readDir == nil {
 		panic("stubFS.ReadDir: not implemented")
 	}
+
 	return s.readDir(path)
 }
 
@@ -804,6 +892,7 @@ func (s stubFS) MkdirAll(path string, perm os.FileMode) error {
 	if s.mkdirAll == nil {
 		panic("stubFS.MkdirAll: not implemented")
 	}
+
 	return s.mkdirAll(path, perm)
 }
 
@@ -811,6 +900,7 @@ func (s stubFS) Stat(path string) (os.FileInfo, error) {
 	if s.stat == nil {
 		panic("stubFS.Stat: not implemented")
 	}
+
 	return s.stat(path)
 }
 
@@ -818,6 +908,7 @@ func (s stubFS) Exists(path string) (bool, error) {
 	if s.exists == nil {
 		panic("stubFS.Exists: not implemented")
 	}
+
 	return s.exists(path)
 }
 
@@ -825,6 +916,7 @@ func (s stubFS) Remove(path string) error {
 	if s.remove == nil {
 		panic("stubFS.Remove: not implemented")
 	}
+
 	return s.remove(path)
 }
 
@@ -832,6 +924,7 @@ func (s stubFS) RemoveAll(path string) error {
 	if s.removeAll == nil {
 		panic("stubFS.RemoveAll: not implemented")
 	}
+
 	return s.removeAll(path)
 }
 
@@ -839,6 +932,7 @@ func (s stubFS) Rename(oldpath, newpath string) error {
 	if s.rename == nil {
 		panic("stubFS.Rename: not implemented")
 	}
+
 	return s.rename(oldpath, newpath)
 }
 
@@ -873,6 +967,7 @@ func mustPanic(t *testing.T, fn func()) (msg string) {
 		if r == nil {
 			t.Fatalf("expected panic, got none")
 		}
+
 		msg = fmt.Sprint(r)
 	}()
 
@@ -885,6 +980,7 @@ func splitTraceLines(trace string) []string {
 	if trace == "" {
 		return nil
 	}
+
 	return strings.Split(trace, "\n")
 }
 

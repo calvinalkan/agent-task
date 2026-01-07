@@ -78,15 +78,11 @@ type File interface {
 // Paths use OS semantics (like the os package and path/filepath), not the slash-separated
 // paths used by the standard library io/fs package.
 //
-// Some implementations expose additional capabilities beyond [FS] (for example
-// [Real.WriteFileAtomic]).
-//
 // This interface intentionally does not include a WriteFile helper. A naive
 // "write file" convenience typically spans multiple syscalls (open/truncate,
 // write, close) and is not atomic or durable: errors or crashes can leave a
 // partially written or empty file, and it doesn't let callers control
-// durability via [File.Sync]. Prefer explicit [FS.OpenFile] + [File.Sync], or
-// an atomic replace helper like [Real.WriteFileAtomic].
+// durability via [File.Sync]. Prefer explicit [FS.OpenFile] + [File.Sync].
 //
 // Implementations must be safe for concurrent use by multiple goroutines.
 type FS interface {

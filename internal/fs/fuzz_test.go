@@ -2,15 +2,10 @@ package fs
 
 import (
 	"bytes"
-	"fmt"
 	"math"
-	"math/rand"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // =============================================================================
@@ -20,7 +15,6 @@ import (
 //   - Chaos disabled behaves exactly like Real
 //   - Partial reads always return valid prefix of original
 //   - Fault rates are approximately correct
-//   - Locking provides mutual exclusion
 //
 // Unlike example tests which check specific scenarios, these explore the
 // input space to find edge cases.
@@ -53,18 +47,35 @@ func FuzzChaos_DisabledMatchesReal(f *testing.F) {
 		dir := t.TempDir()
 
 		realFS := NewReal()
-		chaosFS := NewChaos(NewReal(), seed, DefaultChaosConfig())
-		chaosFS.SetMode(ChaosModePassthrough) // Passthrough - should match Real exactly
+		chaosFS := NewChaos(NewReal(), seed, ChaosConfig{
+			ReadFailRate:       100,
+			PartialReadRate:    100,
+			WriteFailRate:      100,
+			PartialWriteRate:   100,
+			ShortWriteRate:     100,
+			FileStatFailRate:   100,
+			SeekFailRate:       100,
+			SyncFailRate:       100,
+			CloseFailRate:      100,
+			OpenFailRate:       100,
+			RemoveFailRate:     100,
+			RenameFailRate:     100,
+			StatFailRate:       100,
+			MkdirAllFailRate:   100,
+			ReadDirFailRate:    100,
+			ReadDirPartialRate: 100,
+		})
+		chaosFS.SetMode(ChaosModeNoOp) // Passthrough - should match Real exactly
 
 		path := filepath.Join(dir, "test.txt")
 		content := []byte("hello world")
 
-		// WriteFileAtomic
-		realErr := realFS.WriteFileAtomic(path, content, 0644)
+		// Write
+		_, realErr := writeFileOnce(realFS, path, content, 0644)
 
-		chaosErr := chaosFS.WriteFileAtomic(path, content, 0644)
+		_, chaosErr := writeFileOnce(chaosFS, path, content, 0644)
 		if got, want := (chaosErr == nil), (realErr == nil); got != want {
-			t.Fatalf("WriteFileAtomic: real=%v chaos=%v", realErr, chaosErr)
+			t.Fatalf("write: real=%v chaos=%v", realErr, chaosErr)
 		}
 
 		// ReadFile
@@ -167,16 +178,16 @@ func FuzzChaos_PartialReadIsPrefix(f *testing.F) {
 		path := filepath.Join(dir, "test.txt")
 
 		realFS := NewReal()
-		realFS.WriteFileAtomic(path, content, 0644)
+
+		mustWriteFile(t, path, content, 0644)
 
 		chaosFS := NewChaos(realFS, seed, ChaosConfig{
 			PartialReadRate: 1.0, // Always partial
 		})
-		chaosFS.SetMode(ChaosModeInject)
 
 		data, err := chaosFS.ReadFile(path)
-		if err != nil {
-			return // Read failed entirely, that's OK
+		if err == nil {
+			t.Fatalf("ReadFile unexpectedly succeeded")
 		}
 
 		// PROPERTY: data must be prefix of content
@@ -226,9 +237,15 @@ func FuzzChaos_PartialWriteIsPrefix(f *testing.F) {
 		chaosFS := NewChaos(realFS, seed, ChaosConfig{
 			PartialWriteRate: 1.0, // Always partial
 		})
-		chaosFS.SetMode(ChaosModeInject)
 
-		err := chaosFS.WriteFileAtomic(path, content, 0644)
+		f, err := chaosFS.Create(path)
+		if err != nil {
+			return
+		}
+
+		_, err = f.Write(content)
+		_ = f.Close()
+
 		if err == nil {
 			return // Didn't trigger partial write (shouldn't happen at 100%)
 		}
@@ -275,15 +292,16 @@ func FuzzChaos_DifferentSeedsProduceDifferentResults(f *testing.F) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "test.txt")
 		realFS := NewReal()
-		realFS.WriteFileAtomic(path, []byte("hello world test content"), 0644)
+
+		mustWriteFile(t, path, []byte("hello world test content"), 0644)
 
 		config := ChaosConfig{PartialReadRate: 1.0} // Always partial
 
 		chaos1 := NewChaos(realFS, seed1, config)
-		chaos1.SetMode(ChaosModeInject)
+		chaos1.SetMode(ChaosModeActive)
 
 		chaos2 := NewChaos(realFS, seed2, config)
-		chaos2.SetMode(ChaosModeInject)
+		chaos2.SetMode(ChaosModeActive)
 
 		// Read with both - should get different truncation points
 		data1, _ := chaos1.ReadFile(path)
@@ -302,266 +320,4 @@ func FuzzChaos_DifferentSeedsProduceDifferentResults(f *testing.F) {
 			t.Errorf("seed2 data should be prefix")
 		}
 	})
-}
-
-// -----------------------------------------------------------------------------
-// FuzzLock_MutualExclusion
-//
-// Property: Two goroutines cannot hold the same lock simultaneously.
-//
-// This spawns multiple goroutines that compete for the same lock.
-// Each goroutine, while holding the lock, checks that no one else is in
-// the critical section. If mutual exclusion is violated, the test fails.
-// -----------------------------------------------------------------------------
-
-func FuzzLock_MutualExclusion(f *testing.F) {
-	// Boundary values (test clamping logic)
-	f.Add(int64(0), 2, 1)     // Minimum valid (after clamping)
-	f.Add(int64(1), 10, 20)   // Maximum valid (after clamping)
-	f.Add(int64(2), 1, 0)     // Below minimum (tests clamping)
-	f.Add(int64(3), 100, 100) // Above maximum (tests clamping)
-
-	// High contention scenarios
-	f.Add(int64(100), 10, 10) // Max goroutines, medium iterations
-	f.Add(int64(101), 5, 20)  // Medium goroutines, max iterations
-
-	// Seed boundaries
-	f.Add(int64(-1), 5, 10)
-	f.Add(int64(math.MaxInt64), 5, 10)
-
-	f.Fuzz(func(t *testing.T, seed int64, goroutines int, iterations int) {
-		// Bound inputs to reasonable ranges
-		if goroutines < 2 {
-			goroutines = 2
-		}
-
-		if goroutines > 10 {
-			goroutines = 10
-		}
-
-		if iterations < 1 {
-			iterations = 1
-		}
-
-		if iterations > 20 {
-			iterations = 20
-		}
-
-		fs := NewReal()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "data.txt")
-
-		// Shared counter - if mutual exclusion works, final value is predictable
-		var (
-			counter   int
-			counterMu sync.Mutex
-		)
-
-		// Track if anyone is in critical section
-		var inCritical atomic.Int32
-
-		var wg sync.WaitGroup
-
-		errors := make(chan error, goroutines*iterations)
-
-		for g := range goroutines {
-			wg.Add(1)
-
-			go func(id int) {
-				defer wg.Done()
-
-				for range iterations {
-					lock, err := fs.Lock(path)
-					if err != nil {
-						errors <- fmt.Errorf("goroutine %d: Lock failed: %w", id, err)
-
-						return
-					}
-
-					// PROPERTY: No one else should be in critical section
-					if got, want := inCritical.Add(1), int32(1); got != want {
-						errors <- fmt.Errorf("goroutine %d: inCritical=%d, want=%d (mutual exclusion violated)", id, got, want)
-
-						lock.Close()
-
-						return
-					}
-
-					// Critical section - increment counter
-					counterMu.Lock()
-
-					counter++
-
-					counterMu.Unlock()
-
-					// Small sleep to increase chance of race detection
-					time.Sleep(time.Microsecond * 10)
-
-					inCritical.Add(-1)
-					lock.Close()
-				}
-			}(g)
-		}
-
-		wg.Wait()
-		close(errors)
-
-		// Check for errors
-		for err := range errors {
-			t.Fatal(err)
-		}
-
-		// PROPERTY: Counter should equal total iterations
-		if got, want := counter, goroutines*iterations; got != want {
-			t.Fatalf("counter=%d, want=%d (lost updates = broken mutex)", got, want)
-		}
-	})
-}
-
-// -----------------------------------------------------------------------------
-// FuzzLock_NoDeadlock
-//
-// Property: Acquire + release cycles always complete (no deadlock).
-//
-// This does many lock/unlock cycles and verifies they all complete
-// within a reasonable time.
-// -----------------------------------------------------------------------------
-
-func FuzzLock_NoDeadlock(f *testing.F) {
-	// Boundary cycles (tests clamping)
-	f.Add(int64(0), 1)   // Minimum
-	f.Add(int64(1), 100) // Maximum
-	f.Add(int64(2), 0)   // Below min (clamped to 1)
-	f.Add(int64(3), 200) // Above max (clamped to 100)
-
-	// Seed boundaries
-	f.Add(int64(-1), 50)
-	f.Add(int64(math.MaxInt64), 50)
-
-	f.Fuzz(func(t *testing.T, seed int64, cycles int) {
-		if cycles < 1 {
-			cycles = 1
-		}
-
-		if cycles > 100 {
-			cycles = 100
-		}
-
-		fs := NewReal()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "data.txt")
-
-		done := make(chan struct{})
-
-		go func() {
-			for range cycles {
-				lock, err := fs.Lock(path)
-				if err != nil {
-					return // Lock timeout is OK
-				}
-
-				lock.Close()
-			}
-
-			close(done)
-		}()
-
-		// PROPERTY: Should complete within reasonable time
-		select {
-		case <-done:
-			// Good - completed
-		case <-time.After(5 * time.Second):
-			t.Fatal("deadlock detected: lock cycles did not complete")
-		}
-	})
-}
-
-// -----------------------------------------------------------------------------
-// FuzzLock_IndependentPaths
-//
-// Property: Locks on different paths don't interfere.
-//
-// Two goroutines locking different paths should never block each other.
-// -----------------------------------------------------------------------------
-
-func FuzzLock_IndependentPaths(f *testing.F) {
-	// Boundary paths (tests clamping)
-	f.Add(int64(0), 2)  // Minimum
-	f.Add(int64(1), 10) // Maximum
-	f.Add(int64(2), 1)  // Below min (clamped to 2)
-	f.Add(int64(3), 20) // Above max (clamped to 10)
-
-	// Seed boundaries
-	f.Add(int64(-1), 5)
-	f.Add(int64(math.MaxInt64), 5)
-
-	f.Fuzz(func(t *testing.T, seed int64, numPaths int) {
-		if numPaths < 2 {
-			numPaths = 2
-		}
-
-		if numPaths > 10 {
-			numPaths = 10
-		}
-
-		fs := NewReal()
-		dir := t.TempDir()
-
-		// Create paths
-		paths := make([]string, numPaths)
-		for i := range numPaths {
-			paths[i] = filepath.Join(dir, fmt.Sprintf("file%d.txt", i))
-		}
-
-		// Acquire ALL locks simultaneously - should not block
-		locks := make([]Locker, numPaths)
-		done := make(chan struct{})
-
-		go func() {
-			for i, path := range paths {
-				lock, err := fs.Lock(path)
-				if err != nil {
-					return
-				}
-
-				locks[i] = lock
-			}
-
-			close(done)
-		}()
-
-		// PROPERTY: Should acquire all locks quickly (no blocking)
-		select {
-		case <-done:
-			// Good - all acquired
-		case <-time.After(2 * time.Second):
-			t.Fatal("independent paths should not block each other")
-		}
-
-		// Cleanup
-		for _, lock := range locks {
-			if lock != nil {
-				lock.Close()
-			}
-		}
-	})
-}
-
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-
-func randomFilename(rng *rand.Rand) string {
-	return "file-" + string(rune('a'+rng.Intn(5))) + ".txt"
-}
-
-func randomString(rng *rand.Rand, length int) string {
-	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = chars[rng.Intn(len(chars))]
-	}
-
-	return string(b)
 }

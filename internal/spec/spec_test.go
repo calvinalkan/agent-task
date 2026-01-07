@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -188,10 +189,11 @@ func joinCycle(path []string) string {
 		return ""
 	}
 
-	result := path[0]
+	var result strings.Builder
+	result.WriteString(path[0])
 	for i := 1; i < len(path); i++ {
-		result += "→" + path[i]
+		result.WriteString("→" + path[i])
 	}
 
-	return result
+	return result.String()
 }

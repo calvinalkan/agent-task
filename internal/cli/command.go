@@ -34,6 +34,7 @@ type Command struct {
 // Name returns the command name (first word of Usage).
 func (c *Command) Name() string {
 	name, _, _ := strings.Cut(c.Usage, " ")
+
 	return name
 }
 
@@ -74,16 +75,20 @@ func (c *Command) Run(ctx context.Context, o *IO, args []string) int {
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			c.PrintHelp(o)
+
 			return 0
 		}
+
 		o.ErrPrintln("error:", err)
 		o.ErrPrintln()
 		c.PrintHelp(o)
+
 		return 1
 	}
 
 	if err := c.Exec(ctx, o, c.Flags.Args()); err != nil {
 		o.ErrPrintln("error:", err)
+
 		return 1
 	}
 

@@ -162,6 +162,7 @@ func (s *StrictTestFS) wrap(op, path string, err error, attrs ...kv) error {
 		if trace != "" {
 			trace = "\n" + trace
 		}
+
 		s.tb.Fatalf("strictfs: underlying filesystem error: %v%s", err, trace)
 	}
 
@@ -328,6 +329,7 @@ func (sf *strictFile) wrap(op string, err error, attrs ...kv) error {
 		if trace != "" {
 			trace = "\n" + trace
 		}
+
 		sf.tb.Fatalf("strictfs: unexpected real fs error: %v%s", err, trace)
 	}
 

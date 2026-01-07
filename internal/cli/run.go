@@ -83,6 +83,7 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 
 	// Dispatch to command
 	cmdName := commandAndArgs[0]
+
 	cmd, ok := commandMap[cmdName]
 	if !ok {
 		fprintln(errOut, "error: unknown command:", cmdName)
@@ -92,11 +93,13 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 	}
 
 	cmdIO := NewIO(out, errOut)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Run command in goroutine so we can handle signals
 	done := make(chan int, 1)
+
 	go func() {
 		done <- cmd.Run(ctx, cmdIO, commandAndArgs[1:])
 	}()
@@ -107,6 +110,7 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 		if exitCode != 0 {
 			return exitCode
 		}
+
 		return cmdIO.Finish()
 	case <-sigCh:
 		fprintln(errOut, "shutting down with 5s timeout...")
@@ -117,12 +121,15 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 	select {
 	case <-done:
 		fprintln(errOut, "graceful shutdown ok (130)")
+
 		return 130
 	case <-time.After(5 * time.Second):
 		fprintln(errOut, "graceful shutdown timed out, forced exit (130)")
+
 		return 130
 	case <-sigCh:
 		fprintln(errOut, "graceful shutdown interrupted, forced exit (130)")
+
 		return 130
 	}
 }
