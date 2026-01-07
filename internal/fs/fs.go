@@ -24,11 +24,15 @@ import (
 	"os"
 )
 
-// File represents an open file descriptor.
+// File represents an OS-backed open file descriptor.
 //
 // This interface is satisfied by [os.File] and can be used with all
 // standard library functions that accept [io.Reader], [io.Writer],
 // [io.Seeker], or [io.Closer].
+//
+// The intent is os-like behavior: implementations must behave like [os.File],
+// including that [File.Fd] returns a valid OS file descriptor usable with
+// syscalls (for example [syscall.Flock]) until the file is closed.
 //
 // Implementations must be safe for concurrent use by multiple goroutines.
 //
