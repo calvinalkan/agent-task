@@ -2,10 +2,12 @@ package fs
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -100,6 +102,12 @@ type ChaosConfig struct {
 	// directory listing. Returns a random prefix of the entries along with an
 	// EIO error, simulating a directory read that fails partway through.
 	ReadDirPartialRate float64
+
+	// TraceCapacity is the max number of operations to keep in the trace log.
+	// Set to 0 (default) to disable tracing. Tracing records all operations
+	// including those where Chaos modified behavior without returning an error
+	// (e.g., short reads with nil error).
+	TraceCapacity int
 }
 
 // NewChaos creates a new [Chaos] filesystem wrapping the given [FS].
@@ -114,6 +122,7 @@ func NewChaos(fs FS, seed int64, config ChaosConfig) *Chaos {
 		fs:     fs,
 		rng:    rand.New(rand.NewSource(seed)),
 		config: config,
+		trace:  newChaosTrace(config.TraceCapacity),
 	}
 }
 
@@ -237,6 +246,7 @@ type Chaos struct {
 	rng    *rand.Rand
 	config ChaosConfig
 	mode   atomic.Uint32
+	trace  *chaosTrace
 
 	rngMu sync.Mutex
 
@@ -267,6 +277,18 @@ type Chaos struct {
 //     This is the default.
 //   - [ChaosModeNoOp]: pass all operations to the underlying filesystem.
 func (c *Chaos) SetMode(m ChaosMode) { c.mode.Store(uint32(m)) }
+
+// Trace returns a formatted string of recent FS operations.
+// Returns an empty string if tracing is disabled (TraceCapacity == 0).
+func (c *Chaos) Trace() string {
+	return c.trace.String()
+}
+
+// TraceEvents returns a snapshot of the trace buffer.
+// Returns nil if tracing is disabled (TraceCapacity == 0).
+func (c *Chaos) TraceEvents() []TraceEvent {
+	return c.trace.snapshot()
+}
 
 // Stats returns the current fault injection counts.
 func (c *Chaos) Stats() ChaosStats {
@@ -330,8 +352,12 @@ func (c *Chaos) openWithChaos(path, op string, openFn func() (File, error)) (Fil
 	if mode == ChaosModeNoOp {
 		f, err := openFn()
 		if err != nil {
+			c.trace.add(op, path, "fail", err, false)
+
 			return nil, err
 		}
+
+		c.trace.add(op, path, "ok", nil, false)
 
 		return &chaosFile{f: f, chaos: c, path: path}, nil
 	}
@@ -339,14 +365,21 @@ func (c *Chaos) openWithChaos(path, op string, openFn func() (File, error)) (Fil
 	if c.should(mode, c.config.OpenFailRate) {
 		errno := c.pickError(op)
 		c.openFails.Add(1)
+		err := pathError("open", path, errno)
 
-		return nil, pathError("open", path, errno)
+		c.trace.add(op, path, "fail", err, true, TraceAttr{"errno", errno.Error()})
+
+		return nil, err
 	}
 
 	f, err := openFn()
 	if err != nil {
+		c.trace.add(op, path, "fail", err, false)
+
 		return nil, err
 	}
+
+	c.trace.add(op, path, "ok", nil, false)
 
 	return &chaosFile{f: f, chaos: c, path: path}, nil
 }
@@ -354,19 +387,28 @@ func (c *Chaos) openWithChaos(path, op string, openFn func() (File, error)) (Fil
 func (c *Chaos) ReadFile(path string) ([]byte, error) {
 	mode := ChaosMode(c.mode.Load())
 	if mode == ChaosModeNoOp {
-		return c.fs.ReadFile(path)
+		data, err := c.fs.ReadFile(path)
+
+		c.trace.add("readfile", path, boolKind(err == nil), err, false,
+			TraceAttr{"n", fmt.Sprintf("%d", len(data))})
+
+		return data, err
 	}
 
 	if c.should(mode, c.config.ReadFailRate) {
 		op, errno := c.pickReadFileError()
-
 		c.readFails.Add(1)
+		err := pathError(op, path, errno)
 
-		return nil, pathError(op, path, errno)
+		c.trace.add("readfile", path, "fail", err, true, TraceAttr{"errno", errno.Error()})
+
+		return nil, err
 	}
 
 	data, err := c.fs.ReadFile(path)
 	if err != nil {
+		c.trace.add("readfile", path, "fail", err, false)
+
 		return nil, err
 	}
 
@@ -375,9 +417,17 @@ func (c *Chaos) ReadFile(path string) ([]byte, error) {
 	if c.should(mode, c.config.PartialReadRate) && len(data) > 1 {
 		c.partialReads.Add(1)
 		cutoff := c.randIntn(len(data)-1) + 1
+		err := pathError("read", path, syscall.EIO)
 
-		return data[:cutoff], pathError("read", path, syscall.EIO)
+		c.trace.add("readfile", path, "partial_read", err, true,
+			TraceAttr{"cutoff", fmt.Sprintf("%d", cutoff)},
+			TraceAttr{"total", fmt.Sprintf("%d", len(data))})
+
+		return data[:cutoff], err
 	}
+
+	c.trace.add("readfile", path, "ok", nil, false,
+		TraceAttr{"n", fmt.Sprintf("%d", len(data))})
 
 	return data, nil
 }
@@ -385,19 +435,28 @@ func (c *Chaos) ReadFile(path string) ([]byte, error) {
 func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 	mode := ChaosMode(c.mode.Load())
 	if mode == ChaosModeNoOp {
-		return c.fs.ReadDir(path)
+		entries, err := c.fs.ReadDir(path)
+
+		c.trace.add("readdir", path, boolKind(err == nil), err, false,
+			TraceAttr{"n", fmt.Sprintf("%d", len(entries))})
+
+		return entries, err
 	}
 
 	if c.should(mode, c.config.ReadDirFailRate) {
 		errno := c.pickError("readdir")
-
 		c.readDirFails.Add(1)
+		err := pathError("readdir", path, errno)
 
-		return nil, pathError("readdir", path, errno)
+		c.trace.add("readdir", path, "fail", err, true, TraceAttr{"errno", errno.Error()})
+
+		return nil, err
 	}
 
 	entries, err := c.fs.ReadDir(path)
 	if err != nil {
+		c.trace.add("readdir", path, "fail", err, false)
+
 		return nil, err
 	}
 
@@ -406,9 +465,17 @@ func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 	if c.should(mode, c.config.ReadDirPartialRate) && len(entries) > 1 {
 		c.partialReadDirs.Add(1)
 		cutoff := c.randIntn(len(entries)-1) + 1
+		err := pathError("readdir", path, syscall.EIO)
 
-		return entries[:cutoff], pathError("readdir", path, syscall.EIO)
+		c.trace.add("readdir", path, "partial_readdir", err, true,
+			TraceAttr{"cutoff", fmt.Sprintf("%d", cutoff)},
+			TraceAttr{"total", fmt.Sprintf("%d", len(entries))})
+
+		return entries[:cutoff], err
 	}
+
+	c.trace.add("readdir", path, "ok", nil, false,
+		TraceAttr{"n", fmt.Sprintf("%d", len(entries))})
 
 	return entries, nil
 }
@@ -419,7 +486,12 @@ func (c *Chaos) MkdirAll(path string, perm os.FileMode) error {
 		return err
 	}
 
-	return c.fs.MkdirAll(path, perm)
+	err = c.fs.MkdirAll(path, perm)
+
+	c.trace.add("mkdirall", path, boolKind(err == nil), err, false,
+		TraceAttr{"perm", fmt.Sprintf("%#o", perm)})
+
+	return err
 }
 
 func (c *Chaos) Stat(path string) (os.FileInfo, error) {
@@ -428,7 +500,11 @@ func (c *Chaos) Stat(path string) (os.FileInfo, error) {
 		return nil, err
 	}
 
-	return c.fs.Stat(path)
+	info, err := c.fs.Stat(path)
+
+	c.trace.add("stat", path, boolKind(err == nil), err, false)
+
+	return info, err
 }
 
 func (c *Chaos) Exists(path string) (bool, error) {
@@ -437,7 +513,12 @@ func (c *Chaos) Exists(path string) (bool, error) {
 		return false, err
 	}
 
-	return c.fs.Exists(path)
+	exists, err := c.fs.Exists(path)
+
+	c.trace.add("exists", path, boolKind(err == nil), err, false,
+		TraceAttr{"exists", fmt.Sprintf("%t", exists)})
+
+	return exists, err
 }
 
 func (c *Chaos) Remove(path string) error {
@@ -446,7 +527,11 @@ func (c *Chaos) Remove(path string) error {
 		return err
 	}
 
-	return c.fs.Remove(path)
+	err = c.fs.Remove(path)
+
+	c.trace.add("remove", path, boolKind(err == nil), err, false)
+
+	return err
 }
 
 func (c *Chaos) RemoveAll(path string) error {
@@ -455,25 +540,41 @@ func (c *Chaos) RemoveAll(path string) error {
 		return err
 	}
 
-	return c.fs.RemoveAll(path)
+	err = c.fs.RemoveAll(path)
+
+	c.trace.add("removeall", path, boolKind(err == nil), err, false)
+
+	return err
 }
 
 func (c *Chaos) Rename(oldpath, newpath string) error {
 	mode := ChaosMode(c.mode.Load())
 	if mode == ChaosModeNoOp {
-		return c.fs.Rename(oldpath, newpath)
+		err := c.fs.Rename(oldpath, newpath)
+
+		c.trace.add("rename", oldpath, boolKind(err == nil), err, false,
+			TraceAttr{"newpath", newpath})
+
+		return err
 	}
 
 	if c.should(mode, c.config.RenameFailRate) {
 		errno := c.pickError("rename")
-
 		c.renameFails.Add(1)
+		err := linkError("rename", oldpath, newpath, errno)
 
-		// os.Rename reports failures as *os.LinkError.
-		return linkError("rename", oldpath, newpath, errno)
+		c.trace.add("rename", oldpath, "fail", err, true,
+			TraceAttr{"newpath", newpath}, TraceAttr{"errno", errno.Error()})
+
+		return err
 	}
 
-	return c.fs.Rename(oldpath, newpath)
+	err := c.fs.Rename(oldpath, newpath)
+
+	c.trace.add("rename", oldpath, boolKind(err == nil), err, false,
+		TraceAttr{"newpath", newpath})
+
+	return err
 }
 
 // faultKind identifies a type of fault that can be injected.
@@ -565,8 +666,11 @@ func (c *Chaos) introduceChaos(path string, kind faultKind) error {
 		counter.Add(1)
 
 		errno := errnos[c.randIntn(len(errnos))]
+		err := pathError(string(kind), path, errno)
 
-		return pathError(string(kind), path, errno)
+		c.trace.add(string(kind), path, "fail", err, true, TraceAttr{"errno", errno.Error()})
+
+		return err
 	}
 
 	return nil
@@ -757,15 +861,23 @@ var _ File = (*chaosFile)(nil)
 func (cf *chaosFile) Read(p []byte) (int, error) {
 	mode := ChaosMode(cf.chaos.mode.Load())
 	if mode == ChaosModeNoOp {
-		return cf.f.Read(p)
+		n, err := cf.f.Read(p)
+
+		cf.chaos.trace.add("file.read", cf.path, boolKind(err == nil), err, false,
+			TraceAttr{"n", fmt.Sprintf("%d", n)})
+
+		return n, err
 	}
 
 	if cf.chaos.should(mode, cf.chaos.config.ReadFailRate) {
 		errno := cf.chaos.pickError("fdread")
-
 		cf.chaos.readFails.Add(1)
+		err := pathError("read", cf.path, errno)
 
-		return 0, pathError("read", cf.path, errno)
+		cf.chaos.trace.add("file.read", cf.path, "fail", err, true,
+			TraceAttr{"errno", errno.Error()})
+
+		return 0, err
 	}
 
 	// Partial read: return a short read WITHOUT skipping bytes.
@@ -773,37 +885,59 @@ func (cf *chaosFile) Read(p []byte) (int, error) {
 	// otherwise the file offset advances too far and callers silently lose data.
 	if cf.chaos.should(mode, cf.chaos.config.PartialReadRate) && len(p) > 1 {
 		cf.chaos.partialReads.Add(1)
-
 		cutoff := cf.chaos.randIntn(len(p)-1) + 1 // [1, len(p)-1]
 
-		return cf.f.Read(p[:cutoff])
+		n, err := cf.f.Read(p[:cutoff])
+
+		// Short read with nil error is valid io.Reader behavior
+		cf.chaos.trace.add("file.read", cf.path, "short_read", err, true,
+			TraceAttr{"n", fmt.Sprintf("%d", n)},
+			TraceAttr{"requested", fmt.Sprintf("%d", len(p))},
+			TraceAttr{"cutoff", fmt.Sprintf("%d", cutoff)})
+
+		return n, err
 	}
 
-	return cf.f.Read(p)
+	n, err := cf.f.Read(p)
+
+	cf.chaos.trace.add("file.read", cf.path, boolKind(err == nil), err, false,
+		TraceAttr{"n", fmt.Sprintf("%d", n)})
+
+	return n, err
 }
 
 func (cf *chaosFile) Write(p []byte) (int, error) {
 	mode := ChaosMode(cf.chaos.mode.Load())
 	if mode == ChaosModeNoOp {
-		return cf.f.Write(p)
+		n, err := cf.f.Write(p)
+
+		cf.chaos.trace.add("file.write", cf.path, boolKind(err == nil), err, false,
+			TraceAttr{"n", fmt.Sprintf("%d", n)})
+
+		return n, err
 	}
 
 	if cf.chaos.should(mode, cf.chaos.config.WriteFailRate) {
 		errno := cf.chaos.pickError("fdwrite")
-
 		cf.chaos.writeFails.Add(1)
+		err := pathError("write", cf.path, errno)
 
-		return 0, pathError("write", cf.path, errno)
+		cf.chaos.trace.add("file.write", cf.path, "fail", err, true,
+			TraceAttr{"errno", errno.Error()})
+
+		return 0, err
 	}
 
 	// Partial write
 	if cf.chaos.should(mode, cf.chaos.config.PartialWriteRate) && len(p) > 1 {
 		cf.chaos.partialWrites.Add(1)
-
 		cutoff := cf.chaos.randIntn(len(p)-1) + 1 // [1, len(p)-1]
 
 		wrote, err := cf.f.Write(p[:cutoff])
 		if err != nil {
+			cf.chaos.trace.add("file.write", cf.path, "fail", err, false,
+				TraceAttr{"n", fmt.Sprintf("%d", wrote)})
+
 			return wrote, err
 		}
 
@@ -811,21 +945,42 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 		// (io.ErrShortWrite). In the stdlib, this is the fallback when a write returns
 		// n != len(b) without a syscall error.
 		if cf.chaos.randFloat() < cf.chaos.config.ShortWriteRate {
-			return wrote, &ChaosError{Err: io.ErrShortWrite}
+			err := &ChaosError{Err: io.ErrShortWrite}
+
+			cf.chaos.trace.add("file.write", cf.path, "short_write", err, true,
+				TraceAttr{"n", fmt.Sprintf("%d", wrote)},
+				TraceAttr{"requested", fmt.Sprintf("%d", len(p))})
+
+			return wrote, err
 		}
 
 		errno := cf.chaos.pickError("fdwrite")
+		err = pathError("write", cf.path, errno)
 
-		return wrote, pathError("write", cf.path, errno)
+		cf.chaos.trace.add("file.write", cf.path, "partial_write", err, true,
+			TraceAttr{"n", fmt.Sprintf("%d", wrote)},
+			TraceAttr{"requested", fmt.Sprintf("%d", len(p))},
+			TraceAttr{"errno", errno.Error()})
+
+		return wrote, err
 	}
 
-	return cf.f.Write(p)
+	n, err := cf.f.Write(p)
+
+	cf.chaos.trace.add("file.write", cf.path, boolKind(err == nil), err, false,
+		TraceAttr{"n", fmt.Sprintf("%d", n)})
+
+	return n, err
 }
 
 func (cf *chaosFile) Close() error {
 	mode := ChaosMode(cf.chaos.mode.Load())
 	if mode == ChaosModeNoOp {
-		return cf.f.Close()
+		err := cf.f.Close()
+
+		cf.chaos.trace.add("file.close", cf.path, boolKind(err == nil), err, false)
+
+		return err
 	}
 
 	injectClose := cf.chaos.should(mode, cf.chaos.config.CloseFailRate)
@@ -834,15 +989,23 @@ func (cf *chaosFile) Close() error {
 	// returning an injected error.
 	err := cf.f.Close()
 	if err != nil {
+		cf.chaos.trace.add("file.close", cf.path, "fail", err, false)
+
 		return err
 	}
 
 	if injectClose {
 		cf.chaos.closeFails.Add(1)
 		errno := cf.chaos.pickError("fdclose")
+		err := pathError("close", cf.path, errno)
 
-		return pathError("close", cf.path, errno)
+		cf.chaos.trace.add("file.close", cf.path, "fail", err, true,
+			TraceAttr{"errno", errno.Error()})
+
+		return err
 	}
+
+	cf.chaos.trace.add("file.close", cf.path, "ok", nil, false)
 
 	return nil
 }
@@ -892,8 +1055,12 @@ func (cf *chaosFile) introduceChaos(kind fileFaultKind) error {
 		counter.Add(1)
 
 		errno := errnos[cf.chaos.randIntn(len(errnos))]
+		err := pathError(string(kind), cf.path, errno)
 
-		return pathError(string(kind), cf.path, errno)
+		cf.chaos.trace.add("file."+string(kind), cf.path, "fail", err, true,
+			TraceAttr{"errno", errno.Error()})
+
+		return err
 	}
 
 	return nil
@@ -905,7 +1072,14 @@ func (cf *chaosFile) Seek(offset int64, whence int) (int64, error) {
 		return 0, err
 	}
 
-	return cf.f.Seek(offset, whence)
+	pos, err := cf.f.Seek(offset, whence)
+
+	cf.chaos.trace.add("file.seek", cf.path, boolKind(err == nil), err, false,
+		TraceAttr{"offset", fmt.Sprintf("%d", offset)},
+		TraceAttr{"whence", fmt.Sprintf("%d", whence)},
+		TraceAttr{"pos", fmt.Sprintf("%d", pos)})
+
+	return pos, err
 }
 
 func (cf *chaosFile) Fd() uintptr {
@@ -918,7 +1092,11 @@ func (cf *chaosFile) Stat() (os.FileInfo, error) {
 		return nil, err
 	}
 
-	return cf.f.Stat()
+	info, err := cf.f.Stat()
+
+	cf.chaos.trace.add("file.stat", cf.path, boolKind(err == nil), err, false)
+
+	return info, err
 }
 
 func (cf *chaosFile) Sync() error {
@@ -927,7 +1105,171 @@ func (cf *chaosFile) Sync() error {
 		return err
 	}
 
-	return cf.f.Sync()
+	err = cf.f.Sync()
+
+	cf.chaos.trace.add("file.sync", cf.path, boolKind(err == nil), err, false)
+
+	return err
 }
 
 var _ FS = (*Chaos)(nil)
+
+// TraceEvent records a single Chaos operation with injection details.
+//
+// Unlike external tracing (which can only observe errors), TraceEvent captures
+// operations that Chaos altered but returned successfully, such as short reads
+// that returned fewer bytes with err==nil.
+type TraceEvent struct {
+	// Seq is the monotonically increasing sequence number.
+	Seq uint64
+	// Op is the operation name (e.g., "open", "read", "file.write").
+	Op string
+	// Path is the filesystem path involved.
+	Path string
+	// Err is the error returned by the operation (nil for success).
+	Err error
+	// Injected is true if Chaos modified the operation's behavior.
+	// This includes both error injection and non-error alterations
+	// like short reads.
+	Injected bool
+	// Kind describes what Chaos did: "ok" (passthrough), "fail" (error
+	// injection), "short_read", "short_write", "partial_readdir", etc.
+	Kind string
+	// Attrs contains additional key-value details (e.g., "cutoff=42", "errno=EIO").
+	Attrs []TraceAttr
+}
+
+// TraceAttr is a key-value pair for trace event context.
+type TraceAttr struct {
+	Key   string
+	Value string
+}
+
+func (e TraceEvent) String() string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "#%d", e.Seq)
+
+	if e.Injected {
+		fmt.Fprintf(&b, " [CHAOS:%s]", e.Kind)
+	}
+
+	fmt.Fprintf(&b, " %s", e.Op)
+
+	if e.Path != "" {
+		fmt.Fprintf(&b, " path=%q", e.Path)
+	}
+
+	for _, a := range e.Attrs {
+		fmt.Fprintf(&b, " %s=%s", a.Key, a.Value)
+	}
+
+	if !e.Injected {
+		b.WriteString(" ")
+		b.WriteString(e.Kind)
+	}
+
+	if e.Err != nil {
+		fmt.Fprintf(&b, " err=%v", e.Err)
+	}
+
+	return b.String()
+}
+
+// chaosTrace is a bounded circular buffer of [TraceEvent].
+type chaosTrace struct {
+	mu       sync.Mutex
+	capacity int
+	events   []TraceEvent
+	next     int
+	full     bool
+	seq      uint64
+}
+
+func newChaosTrace(capacity int) *chaosTrace {
+	if capacity <= 0 {
+		return nil
+	}
+
+	return &chaosTrace{
+		capacity: capacity,
+		events:   make([]TraceEvent, 0, capacity),
+	}
+}
+
+func (t *chaosTrace) add(op, path, kind string, err error, injected bool, attrs ...TraceAttr) {
+	if t == nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.seq++
+
+	event := TraceEvent{
+		Seq:      t.seq,
+		Op:       op,
+		Path:     path,
+		Err:      err,
+		Injected: injected,
+		Kind:     kind,
+		Attrs:    attrs,
+	}
+
+	if len(t.events) < t.capacity {
+		t.events = append(t.events, event)
+
+		return
+	}
+
+	t.events[t.next] = event
+	t.next = (t.next + 1) % t.capacity
+	t.full = true
+}
+
+func (t *chaosTrace) snapshot() []TraceEvent {
+	if t == nil {
+		return nil
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if !t.full {
+		return append([]TraceEvent(nil), t.events...)
+	}
+
+	out := make([]TraceEvent, 0, len(t.events))
+	out = append(out, t.events[t.next:]...)
+	out = append(out, t.events[:t.next]...)
+
+	return out
+}
+
+func (t *chaosTrace) String() string {
+	events := t.snapshot()
+	if len(events) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+
+	for i, e := range events {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+
+		b.WriteString(e.String())
+	}
+
+	return b.String()
+}
+
+func boolKind(ok bool) string {
+	if ok {
+		return "ok"
+	}
+
+	return "fail"
+}

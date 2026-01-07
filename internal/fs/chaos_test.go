@@ -3,10 +3,12 @@ package fs
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	iofs "io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -1210,4 +1212,452 @@ func writeFileOnce(fs FS, path string, data []byte, perm os.FileMode) (int, erro
 	}
 
 	return n, closeErr
+}
+
+// =============================================================================
+// Chaos Trace Tests
+//
+// These tests verify Chaos tracing captures operations with injection details.
+// =============================================================================
+
+func TestChaos_Trace_Is_Empty_Before_Any_Ops(t *testing.T) {
+	t.Parallel()
+
+	chaos := NewChaos(NewReal(), 0, ChaosConfig{TraceCapacity: 100})
+
+	if got := chaos.Trace(); got != "" {
+		t.Fatalf("Trace(): want empty string, got %q", got)
+	}
+}
+
+func TestChaos_Trace_Is_Empty_When_TraceCapacity_Is_Zero(t *testing.T) {
+	t.Parallel()
+
+	chaos := NewChaos(NewReal(), 0, ChaosConfig{TraceCapacity: 0})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+
+	f, err := chaos.Create(path)
+	if err != nil {
+		t.Fatalf("Create(%q): %v", path, err)
+	}
+
+	if _, err := f.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write(%q): %v", path, err)
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close(%q): %v", path, err)
+	}
+
+	if got := chaos.Trace(); got != "" {
+		t.Fatalf("Trace() with TraceCapacity=0: want empty string, got %q", got)
+	}
+
+	if got := chaos.TraceEvents(); got != nil {
+		t.Fatalf("TraceEvents() with TraceCapacity=0: want nil, got %v", got)
+	}
+}
+
+func TestChaos_Trace_Is_Bounded_To_TraceCapacity(t *testing.T) {
+	t.Parallel()
+
+	t.Run("DefaultCapacityIsZero", func(t *testing.T) {
+		t.Parallel()
+
+		chaos := NewChaos(NewReal(), 0, ChaosConfig{})
+		dir := t.TempDir()
+
+		for i := range 10 {
+			path := filepath.Join(dir, fmt.Sprintf("exists-%03d", i))
+			_, _ = chaos.Exists(path)
+		}
+
+		if got := chaos.Trace(); got != "" {
+			t.Fatalf("Trace() with default capacity: want empty, got %q", got)
+		}
+	})
+
+	t.Run("CustomCapacity", func(t *testing.T) {
+		t.Parallel()
+
+		chaos := NewChaos(NewReal(), 0, ChaosConfig{TraceCapacity: 3})
+		chaos.SetMode(ChaosModeNoOp)
+		dir := t.TempDir()
+
+		paths := []string{
+			filepath.Join(dir, "missing-1"),
+			filepath.Join(dir, "missing-2"),
+			filepath.Join(dir, "missing-3"),
+			filepath.Join(dir, "missing-4"),
+			filepath.Join(dir, "missing-5"),
+		}
+
+		for _, p := range paths {
+			_, _ = chaos.Exists(p)
+		}
+
+		events := chaos.TraceEvents()
+		if got, want := len(events), 3; got != want {
+			t.Fatalf("TraceEvents() count: want %d, got %d", want, got)
+		}
+
+		trace := chaos.Trace()
+
+		// Should not contain oldest entries
+		for _, shouldNotContain := range paths[:2] {
+			if strings.Contains(trace, fmt.Sprintf("path=%q", shouldNotContain)) {
+				t.Fatalf("Trace() should not include %q\ntrace:\n%s", shouldNotContain, trace)
+			}
+		}
+
+		// Should contain newest entries
+		for _, shouldContain := range paths[2:] {
+			if !strings.Contains(trace, fmt.Sprintf("path=%q", shouldContain)) {
+				t.Fatalf("Trace() should include %q\ntrace:\n%s", shouldContain, trace)
+			}
+		}
+	})
+}
+
+func TestChaos_Trace_Records_Ops_In_Order(t *testing.T) {
+	t.Parallel()
+
+	chaos := NewChaos(NewReal(), 0, ChaosConfig{TraceCapacity: 100})
+	chaos.SetMode(ChaosModeNoOp) // Don't inject faults for this test
+	dir := t.TempDir()
+
+	missing := filepath.Join(dir, "missing.txt")
+	subdir := filepath.Join(dir, "sub")
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	c := filepath.Join(dir, "c.txt")
+
+	var f, f2, f3 File
+
+	steps := []struct {
+		op  string
+		run func() error
+	}{
+		{op: "exists", run: func() error { _, err := chaos.Exists(missing); return err }},
+		{op: "mkdirall", run: func() error { return chaos.MkdirAll(subdir, 0o755) }},
+		{op: "create", run: func() error { var err error; f, err = chaos.Create(a); return err }},
+		{op: "file.write", run: func() error { _, err := f.Write([]byte("hello")); return err }},
+		{op: "file.sync", run: func() error { return f.Sync() }},
+		{op: "file.stat", run: func() error { _, err := f.Stat(); return err }},
+		{op: "file.seek", run: func() error { _, err := f.Seek(0, io.SeekStart); return err }},
+		{op: "file.read", run: func() error { _, err := f.Read(make([]byte, 5)); return err }},
+		{op: "file.close", run: func() error { return f.Close() }},
+		{op: "readfile", run: func() error { _, err := chaos.ReadFile(a); return err }},
+		{op: "readdir", run: func() error { _, err := chaos.ReadDir(dir); return err }},
+		{op: "stat", run: func() error { _, err := chaos.Stat(a); return err }},
+		{op: "open", run: func() error { var err error; f2, err = chaos.Open(a); return err }},
+		{op: "file.close", run: func() error { return f2.Close() }},
+		{op: "create", run: func() error { var err error; f3, err = chaos.Create(b); return err }},
+		{op: "file.write", run: func() error { _, err := f3.Write([]byte("x")); return err }},
+		{op: "file.close", run: func() error { return f3.Close() }},
+		{op: "rename", run: func() error { return chaos.Rename(b, c) }},
+		{op: "remove", run: func() error { return chaos.Remove(c) }},
+		{op: "removeall", run: func() error { return chaos.RemoveAll(subdir) }},
+	}
+
+	wantOps := make([]string, 0, len(steps))
+	for _, s := range steps {
+		wantOps = append(wantOps, s.op)
+	}
+
+	for _, s := range steps {
+		if err := s.run(); err != nil {
+			t.Fatalf("%s: %v", s.op, err)
+		}
+	}
+
+	events := chaos.TraceEvents()
+	if got, want := len(events), len(wantOps); got != want {
+		t.Fatalf("TraceEvents() count: want %d, got %d\ntrace:\n%s", want, got, chaos.Trace())
+	}
+
+	for i, e := range events {
+		if got, want := e.Op, wantOps[i]; got != want {
+			t.Fatalf("events[%d].Op: want %q, got %q\ntrace:\n%s", i, want, got, chaos.Trace())
+		}
+	}
+}
+
+func TestChaos_Trace_Shows_Injected_Faults(t *testing.T) {
+	t.Parallel()
+
+	chaos := NewChaos(NewReal(), 0, ChaosConfig{
+		TraceCapacity: 100,
+		OpenFailRate:  1.0, // Always inject open failure
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	_, err := chaos.Open(path)
+	if err == nil {
+		t.Fatalf("Open(%q): want error, got nil", path)
+	}
+
+	events := chaos.TraceEvents()
+	if len(events) != 1 {
+		t.Fatalf("TraceEvents() count: want 1, got %d", len(events))
+	}
+
+	e := events[0]
+	if got, want := e.Op, "open"; got != want {
+		t.Fatalf("event.Op: want %q, got %q", want, got)
+	}
+
+	if got, want := e.Injected, true; got != want {
+		t.Fatalf("event.Injected: want %t, got %t", want, got)
+	}
+
+	if got, want := e.Kind, "fail"; got != want {
+		t.Fatalf("event.Kind: want %q, got %q", want, got)
+	}
+
+	if e.Err == nil {
+		t.Fatalf("event.Err: want non-nil, got nil")
+	}
+
+	// Check trace string format
+	trace := chaos.Trace()
+	if !strings.Contains(trace, "[CHAOS:fail]") {
+		t.Fatalf("Trace() should contain '[CHAOS:fail]'\ntrace: %s", trace)
+	}
+
+	if !strings.Contains(trace, "errno=") {
+		t.Fatalf("Trace() should contain 'errno='\ntrace: %s", trace)
+	}
+}
+
+func TestChaos_Trace_Shows_Short_Read_With_Nil_Error(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	mustWriteFile(t, path, []byte("hello world"), 0o644)
+
+	chaos := NewChaos(NewReal(), 0, ChaosConfig{
+		TraceCapacity:   100,
+		PartialReadRate: 1.0, // Always short read
+	})
+
+	f, err := chaos.Open(path)
+	if err != nil {
+		t.Fatalf("Open(%q): %v", path, err)
+	}
+	defer f.Close()
+
+	buf := make([]byte, 100)
+	n, err := f.Read(buf)
+
+	// Short read with nil error is valid io.Reader behavior
+	if err != nil {
+		t.Fatalf("Read: want nil error for short read, got %v", err)
+	}
+
+	if n >= 100 {
+		t.Fatalf("Read n=%d, want < 100 (short read)", n)
+	}
+
+	events := chaos.TraceEvents()
+
+	// Find the read event (skip open event)
+	var readEvent *TraceEvent
+	for i := range events {
+		if events[i].Op == "file.read" {
+			readEvent = &events[i]
+			break
+		}
+	}
+
+	if readEvent == nil {
+		t.Fatalf("no file.read event in trace:\n%s", chaos.Trace())
+	}
+
+	if got, want := readEvent.Injected, true; got != want {
+		t.Fatalf("readEvent.Injected: want %t, got %t", want, got)
+	}
+
+	if got, want := readEvent.Kind, "short_read"; got != want {
+		t.Fatalf("readEvent.Kind: want %q, got %q", want, got)
+	}
+
+	// Short reads return nil error
+	if readEvent.Err != nil {
+		t.Fatalf("readEvent.Err: want nil, got %v", readEvent.Err)
+	}
+
+	// Trace should show the short read
+	trace := chaos.Trace()
+	if !strings.Contains(trace, "[CHAOS:short_read]") {
+		t.Fatalf("Trace() should contain '[CHAOS:short_read]'\ntrace: %s", trace)
+	}
+
+	if !strings.Contains(trace, "cutoff=") {
+		t.Fatalf("Trace() should contain 'cutoff='\ntrace: %s", trace)
+	}
+}
+
+func TestChaos_Trace_Shows_Partial_Write(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	chaos := NewChaos(NewReal(), 0, ChaosConfig{
+		TraceCapacity:    100,
+		PartialWriteRate: 1.0, // Always partial write
+		ShortWriteRate:   0.0, // No short writes, always errno
+	})
+
+	f, err := chaos.Create(path)
+	if err != nil {
+		t.Fatalf("Create(%q): %v", path, err)
+	}
+	defer f.Close()
+
+	_, err = f.Write([]byte("hello world"))
+	if err == nil {
+		t.Fatalf("Write: want error for partial write, got nil")
+	}
+
+	events := chaos.TraceEvents()
+
+	var writeEvent *TraceEvent
+	for i := range events {
+		if events[i].Op == "file.write" {
+			writeEvent = &events[i]
+			break
+		}
+	}
+
+	if writeEvent == nil {
+		t.Fatalf("no file.write event in trace:\n%s", chaos.Trace())
+	}
+
+	if got, want := writeEvent.Injected, true; got != want {
+		t.Fatalf("writeEvent.Injected: want %t, got %t", want, got)
+	}
+
+	if got, want := writeEvent.Kind, "partial_write"; got != want {
+		t.Fatalf("writeEvent.Kind: want %q, got %q", want, got)
+	}
+
+	trace := chaos.Trace()
+	if !strings.Contains(trace, "[CHAOS:partial_write]") {
+		t.Fatalf("Trace() should contain '[CHAOS:partial_write]'\ntrace: %s", trace)
+	}
+}
+
+func TestChaos_Trace_Shows_Passthrough_Ok(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	chaos := NewChaos(NewReal(), 0, ChaosConfig{TraceCapacity: 100})
+	chaos.SetMode(ChaosModeNoOp)
+
+	f, err := chaos.Create(path)
+	if err != nil {
+		t.Fatalf("Create(%q): %v", path, err)
+	}
+
+	if _, err := f.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	events := chaos.TraceEvents()
+
+	for _, e := range events {
+		if e.Injected {
+			t.Fatalf("event.Injected should be false for passthrough: %+v", e)
+		}
+
+		if e.Kind != "ok" && e.Err != nil {
+			t.Fatalf("event.Kind should be 'ok' for successful passthrough: %+v", e)
+		}
+	}
+
+	trace := chaos.Trace()
+	if !strings.Contains(trace, " ok") {
+		t.Fatalf("Trace() should contain ' ok' for passthrough\ntrace: %s", trace)
+	}
+}
+
+func TestTraceEvent_String_Format(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		event TraceEvent
+		want  string
+	}{
+		{
+			name: "ok no attrs",
+			event: TraceEvent{
+				Seq:  1,
+				Op:   "open",
+				Path: "/tmp/file.txt",
+				Kind: "ok",
+			},
+			want: `#1 open path="/tmp/file.txt" ok`,
+		},
+		{
+			name: "injected fail with error",
+			event: TraceEvent{
+				Seq:      2,
+				Op:       "readfile",
+				Path:     "/tmp/file.txt",
+				Err:      errors.New("permission denied"),
+				Kind:     "fail",
+				Injected: true,
+				Attrs:    []TraceAttr{{"errno", "EACCES"}},
+			},
+			want: `#2 [CHAOS:fail] readfile path="/tmp/file.txt" errno=EACCES err=permission denied`,
+		},
+		{
+			name: "injected short read (nil error)",
+			event: TraceEvent{
+				Seq:      3,
+				Op:       "file.read",
+				Path:     "/tmp/data.bin",
+				Kind:     "short_read",
+				Injected: true,
+				Attrs:    []TraceAttr{{"n", "50"}, {"cutoff", "50"}, {"requested", "100"}},
+			},
+			want: `#3 [CHAOS:short_read] file.read path="/tmp/data.bin" n=50 cutoff=50 requested=100`,
+		},
+		{
+			name: "real error (not injected)",
+			event: TraceEvent{
+				Seq:      4,
+				Op:       "open",
+				Path:     "/tmp/missing.txt",
+				Err:      errors.New("no such file"),
+				Kind:     "fail",
+				Injected: false,
+			},
+			want: `#4 open path="/tmp/missing.txt" fail err=no such file`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := tt.event.String()
+			if got != tt.want {
+				t.Fatalf("TraceEvent.String():\ngot:  %q\nwant: %q", got, tt.want)
+			}
+		})
+	}
 }
