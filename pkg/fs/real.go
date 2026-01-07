@@ -36,6 +36,11 @@ func (r *Real) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+// WriteFile is a passthrough wrapper for [os.WriteFile].
+func (r *Real) WriteFile(path string, data []byte, perm os.FileMode) error {
+	return os.WriteFile(path, data, perm)
+}
+
 // --- Directory Operations ---
 
 // A passthrough wrapper for [os.ReadDir].

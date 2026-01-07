@@ -435,6 +435,44 @@ func (c *Chaos) ReadFile(path string) ([]byte, error) {
 	return data, nil
 }
 
+// WriteFile writes data to a file via OpenFile + Write + Close.
+// Fault injection flows through naturally: OpenFailRate affects the create,
+// WriteFailRate and PartialWriteRate affect the write, CloseFailRate affects
+// the close.
+func (c *Chaos) WriteFile(path string, data []byte, perm os.FileMode) error {
+	f, err := c.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		c.trace.add("writefile", path, "fail", err, IsChaosErr(err),
+			TraceAttr{"phase", "open"})
+
+		return err
+	}
+
+	n, err := f.Write(data)
+	if err != nil {
+		_ = f.Close() // best-effort close on write error
+
+		c.trace.add("writefile", path, "fail", err, IsChaosErr(err),
+			TraceAttr{"phase", "write"},
+			TraceAttr{"n", strconv.Itoa(n)},
+			TraceAttr{"len", strconv.Itoa(len(data))})
+
+		return err
+	}
+
+	if err := f.Close(); err != nil {
+		c.trace.add("writefile", path, "fail", err, IsChaosErr(err),
+			TraceAttr{"phase", "close"})
+
+		return err
+	}
+
+	c.trace.add("writefile", path, "ok", nil, false,
+		TraceAttr{"n", strconv.Itoa(n)})
+
+	return nil
+}
+
 func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 	mode := ChaosMode(c.mode.Load())
 	if mode == ChaosModeNoOp {

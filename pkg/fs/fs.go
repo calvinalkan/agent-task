@@ -78,12 +78,6 @@ type File interface {
 // Paths use OS semantics (like the os package and path/filepath), not the slash-separated
 // paths used by the standard library io/fs package.
 //
-// This interface intentionally does not include a WriteFile helper. A naive
-// "write file" convenience typically spans multiple syscalls (open/truncate,
-// write, close) and is not atomic or durable: errors or crashes can leave a
-// partially written or empty file, and it doesn't let callers control
-// durability via [File.Sync]. Prefer explicit [FS.OpenFile] + [File.Sync].
-//
 // Implementations must be safe for concurrent use by multiple goroutines.
 type FS interface {
 	// Open opens a file for reading. See [os.Open].
@@ -104,6 +98,15 @@ type FS interface {
 	// ReadFile reads an entire file into memory. See [os.ReadFile].
 	// For large files, prefer [FS.Open] with streaming reads.
 	ReadFile(path string) ([]byte, error)
+
+	// WriteFile writes data to a file, creating it if necessary. See [os.WriteFile].
+	// The file is created with the specified permissions (before umask) if it
+	// doesn't exist, or truncated if it does.
+	//
+	// Note: WriteFile is not atomic or durable. Errors or crashes can leave a
+	// partially written or empty file. For durability, use [FS.OpenFile] with
+	// explicit [File.Sync] before [File.Close].
+	WriteFile(path string, data []byte, perm os.FileMode) error
 
 	// ReadDir reads a directory and returns its entries. See [os.ReadDir].
 	// Entries are sorted by name.

@@ -1240,6 +1240,176 @@ func Test_Chaos_ReadFile_Prefers_Full_Failure_Over_Partial_When_Both_Rates_Are_O
 	}
 }
 
+// =============================================================================
+// Chaos WriteFile Tests
+// =============================================================================
+
+func Test_Chaos_WriteFile_Succeeds_When_No_Faults_Configured(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+	chaosFS := NewChaos(realFS, 12345, ChaosConfig{})
+
+	err := chaosFS.WriteFile(path, []byte("hello"), 0o644)
+	if err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := realFS.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	if string(got) != "hello" {
+		t.Fatalf("content=%q, want %q", got, "hello")
+	}
+}
+
+func Test_Chaos_WriteFile_Fails_When_Open_Fail_Rate_Is_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+	chaosFS := NewChaos(realFS, 12345, ChaosConfig{OpenFailRate: 1.0})
+
+	err := chaosFS.WriteFile(path, []byte("hello"), 0o644)
+	if err == nil {
+		t.Fatalf("WriteFile unexpectedly succeeded")
+	}
+
+	if !IsChaosErr(err) {
+		t.Fatalf("IsChaosErr(err)=%t, want true (err=%v)", IsChaosErr(err), err)
+	}
+
+	// File should not exist
+	exists, _ := realFS.Exists(path)
+	if exists {
+		t.Fatalf("file should not exist after open failure")
+	}
+
+	if got, want := chaosFS.Stats().OpenFails, int64(1); got != want {
+		t.Fatalf("OpenFails=%d, want %d", got, want)
+	}
+}
+
+func Test_Chaos_WriteFile_Fails_When_Write_Fail_Rate_Is_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+	chaosFS := NewChaos(realFS, 12345, ChaosConfig{WriteFailRate: 1.0})
+
+	err := chaosFS.WriteFile(path, []byte("hello"), 0o644)
+	if err == nil {
+		t.Fatalf("WriteFile unexpectedly succeeded")
+	}
+
+	if !IsChaosErr(err) {
+		t.Fatalf("IsChaosErr(err)=%t, want true (err=%v)", IsChaosErr(err), err)
+	}
+
+	if got, want := chaosFS.Stats().WriteFails, int64(1); got != want {
+		t.Fatalf("WriteFails=%d, want %d", got, want)
+	}
+}
+
+func Test_Chaos_WriteFile_Writes_Partial_Data_When_Partial_Write_Rate_Is_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	content := []byte("hello world this is a longer test string")
+
+	realFS := NewReal()
+	chaosFS := NewChaos(realFS, 12345, ChaosConfig{PartialWriteRate: 1.0})
+
+	err := chaosFS.WriteFile(path, content, 0o644)
+	if err == nil {
+		t.Fatalf("WriteFile unexpectedly succeeded")
+	}
+
+	// File should exist with partial content
+	got, readErr := realFS.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+
+	if len(got) == 0 {
+		t.Fatalf("expected partial data, got empty file")
+	}
+
+	if len(got) >= len(content) {
+		t.Fatalf("len(got)=%d, want < %d", len(got), len(content))
+	}
+
+	if !bytes.HasPrefix(content, got) {
+		t.Fatalf("partial write must be prefix\noriginal: %q\ngot: %q", content, got)
+	}
+
+	if got, want := chaosFS.Stats().PartialWrites, int64(1); got != want {
+		t.Fatalf("PartialWrites=%d, want %d", got, want)
+	}
+}
+
+func Test_Chaos_WriteFile_Fails_When_Close_Fail_Rate_Is_One(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+	chaosFS := NewChaos(realFS, 12345, ChaosConfig{CloseFailRate: 1.0})
+
+	err := chaosFS.WriteFile(path, []byte("hello"), 0o644)
+	if err == nil {
+		t.Fatalf("WriteFile unexpectedly succeeded")
+	}
+
+	if !IsChaosErr(err) {
+		t.Fatalf("IsChaosErr(err)=%t, want true (err=%v)", IsChaosErr(err), err)
+	}
+
+	// File should still have content (close error happens after write)
+	got, readErr := realFS.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+
+	if string(got) != "hello" {
+		t.Fatalf("content=%q, want %q", got, "hello")
+	}
+
+	if got, want := chaosFS.Stats().CloseFails, int64(1); got != want {
+		t.Fatalf("CloseFails=%d, want %d", got, want)
+	}
+}
+
+func Test_Chaos_WriteFile_Passes_Through_When_Mode_Is_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	realFS := NewReal()
+	chaosFS := NewChaos(realFS, 12345, ChaosConfig{
+		OpenFailRate:     1.0,
+		WriteFailRate:    1.0,
+		PartialWriteRate: 1.0,
+		CloseFailRate:    1.0,
+	})
+	chaosFS.SetMode(ChaosModeNoOp)
+
+	err := chaosFS.WriteFile(path, []byte("hello"), 0o644)
+	if err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := realFS.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	if string(got) != "hello" {
+		t.Fatalf("content=%q, want %q", got, "hello")
+	}
+}
+
 func Test_Chaos_ReadDir_Returns_Subset_And_Error_When_ReadDir_Partial_Rate_Is_One(t *testing.T) {
 	dir := t.TempDir()
 	realFS := NewReal()
@@ -1938,57 +2108,72 @@ func Test_ChaosTrace_Records_Ops_In_Order_When_Multiple_Ops_Performed(t *testing
 	}{
 		{op: "exists", run: func() error {
 			_, err := chaos.Exists(missing)
+
 			return err
 		}},
 		{op: "mkdirall", run: func() error { return chaos.MkdirAll(subdir, 0o755) }},
 		{op: "create", run: func() error {
 			var err error
+
 			f, err = chaos.Create(a)
+
 			return err
 		}},
 		{op: "file.write", run: func() error {
 			_, err := f.Write([]byte("hello"))
+
 			return err
 		}},
 		{op: "file.sync", run: func() error { return f.Sync() }},
 		{op: "file.stat", run: func() error {
 			_, err := f.Stat()
+
 			return err
 		}},
 		{op: "file.seek", run: func() error {
 			_, err := f.Seek(0, io.SeekStart)
+
 			return err
 		}},
 		{op: "file.read", run: func() error {
 			_, err := f.Read(make([]byte, 5))
+
 			return err
 		}},
 		{op: "file.close", run: func() error { return f.Close() }},
 		{op: "readfile", run: func() error {
 			_, err := chaos.ReadFile(a)
+
 			return err
 		}},
 		{op: "readdir", run: func() error {
 			_, err := chaos.ReadDir(dir)
+
 			return err
 		}},
 		{op: "stat", run: func() error {
 			_, err := chaos.Stat(a)
+
 			return err
 		}},
 		{op: "open", run: func() error {
 			var err error
+
 			f2, err = chaos.Open(a)
+
 			return err
 		}},
 		{op: "file.close", run: func() error { return f2.Close() }},
 		{op: "create", run: func() error {
 			var err error
+
 			f3, err = chaos.Create(b)
+
 			return err
 		}},
 		{op: "file.write", run: func() error {
 			_, err := f3.Write([]byte("x"))
+
 			return err
 		}},
 		{op: "file.close", run: func() error { return f3.Close() }},
@@ -2312,6 +2497,7 @@ func Test_TraceEvent_Formats_Correctly_When_Fields_Are_Set(t *testing.T) {
 
 func Test_Chaos_Same_Seed_Produces_Identical_Partial_Read_Length(t *testing.T) {
 	const seed = 98765
+
 	config := ChaosConfig{PartialReadRate: 1.0}
 	content := []byte("hello world this is test content for determinism")
 
@@ -2321,10 +2507,12 @@ func Test_Chaos_Same_Seed_Produces_Identical_Partial_Read_Length(t *testing.T) {
 		mustWriteFile(t, path, content, 0o644)
 
 		chaos := NewChaos(NewReal(), seed, config)
+
 		data, err := chaos.ReadFile(path)
 		if err == nil {
 			t.Fatalf("expected partial read error")
 		}
+
 		return len(data)
 	}
 
@@ -2339,6 +2527,7 @@ func Test_Chaos_Same_Seed_Produces_Identical_Partial_Read_Length(t *testing.T) {
 
 func Test_Chaos_Same_Seed_Produces_Identical_Error_Types(t *testing.T) {
 	const seed = 22222
+
 	config := ChaosConfig{WriteFailRate: 1.0}
 
 	run := func() syscall.Errno {
@@ -2346,6 +2535,7 @@ func Test_Chaos_Same_Seed_Produces_Identical_Error_Types(t *testing.T) {
 		path := filepath.Join(dir, "test.txt")
 
 		chaos := NewChaos(NewReal(), seed, config)
+
 		f, err := chaos.Create(path)
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -2359,10 +2549,12 @@ func Test_Chaos_Same_Seed_Produces_Identical_Error_Types(t *testing.T) {
 			t.Fatalf("expected PathError, got %T", err)
 		}
 
-		errno, ok := pathErr.Err.(syscall.Errno)
+		var errno syscall.Errno
+		ok := errors.As(pathErr.Err, &errno)
 		if !ok {
 			t.Fatalf("expected syscall.Errno, got %T", pathErr.Err)
 		}
+
 		return errno
 	}
 
@@ -2387,6 +2579,7 @@ func Test_Chaos_Different_Seeds_Produce_Different_Results(t *testing.T) {
 
 	// Run with many different seeds and collect unique lengths
 	seen := make(map[int]bool)
+
 	for seed := range int64(100) {
 		chaos := NewChaos(realFS, seed, config)
 		data, _ := chaos.ReadFile(path)
@@ -2400,7 +2593,8 @@ func Test_Chaos_Different_Seeds_Produce_Different_Results(t *testing.T) {
 }
 
 func Test_Chaos_Same_Seeds_Produce_Identical_Results_With_Random_Ops(t *testing.T) {
-	const opSeed = 11111    // controls which operations are performed
+	const opSeed = 11111 // controls which operations are performed
+
 	const chaosSeed = 22222 // controls fault injection
 
 	config := ChaosConfig{
@@ -2441,11 +2635,14 @@ func Test_Chaos_Same_Seeds_Produce_Identical_Results_With_Random_Ops(t *testing.
 			case 0: // create and write
 				path := filepath.Join(dir, fmt.Sprintf("new%d.txt", i))
 				writeData := []byte("data")
+
 				f, err := chaos.Create(path)
 				if err != nil {
 					results = append(results, result{"create", true, 0, ""})
+
 					continue
 				}
+
 				n, writeErr := f.Write(writeData)
 				_ = f.Close()
 
@@ -2465,10 +2662,12 @@ func Test_Chaos_Same_Seeds_Produce_Identical_Results_With_Random_Ops(t *testing.
 			case 2: // stat existing file
 				path := filepath.Join(dir, fmt.Sprintf("existing%d.txt", opRng.Intn(5)))
 				info, err := chaos.Stat(path)
+
 				size := 0
 				if info != nil {
 					size = int(info.Size())
 				}
+
 				results = append(results, result{"stat", err != nil, size, ""})
 
 			case 3: // remove (may or may not exist)
@@ -2478,6 +2677,7 @@ func Test_Chaos_Same_Seeds_Produce_Identical_Results_With_Random_Ops(t *testing.
 				results = append(results, result{"remove", IsChaosErr(err), 0, ""})
 			}
 		}
+
 		return results
 	}
 
