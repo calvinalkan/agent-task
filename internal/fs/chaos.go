@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -365,6 +366,7 @@ func (c *Chaos) openWithChaos(path, op string, openFn func() (File, error)) (Fil
 	if c.should(mode, c.config.OpenFailRate) {
 		errno := c.pickError(op)
 		c.openFails.Add(1)
+
 		err := pathError("open", path, errno)
 
 		c.trace.add(op, path, "fail", err, true, TraceAttr{"errno", errno.Error()})
@@ -390,7 +392,7 @@ func (c *Chaos) ReadFile(path string) ([]byte, error) {
 		data, err := c.fs.ReadFile(path)
 
 		c.trace.add("readfile", path, boolKind(err == nil), err, false,
-			TraceAttr{"n", fmt.Sprintf("%d", len(data))})
+			TraceAttr{"n", strconv.Itoa(len(data))})
 
 		return data, err
 	}
@@ -398,6 +400,7 @@ func (c *Chaos) ReadFile(path string) ([]byte, error) {
 	if c.should(mode, c.config.ReadFailRate) {
 		op, errno := c.pickReadFileError()
 		c.readFails.Add(1)
+
 		err := pathError(op, path, errno)
 
 		c.trace.add("readfile", path, "fail", err, true, TraceAttr{"errno", errno.Error()})
@@ -420,14 +423,14 @@ func (c *Chaos) ReadFile(path string) ([]byte, error) {
 		err := pathError("read", path, syscall.EIO)
 
 		c.trace.add("readfile", path, "partial_read", err, true,
-			TraceAttr{"cutoff", fmt.Sprintf("%d", cutoff)},
-			TraceAttr{"total", fmt.Sprintf("%d", len(data))})
+			TraceAttr{"cutoff", strconv.Itoa(cutoff)},
+			TraceAttr{"total", strconv.Itoa(len(data))})
 
 		return data[:cutoff], err
 	}
 
 	c.trace.add("readfile", path, "ok", nil, false,
-		TraceAttr{"n", fmt.Sprintf("%d", len(data))})
+		TraceAttr{"n", strconv.Itoa(len(data))})
 
 	return data, nil
 }
@@ -438,7 +441,7 @@ func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 		entries, err := c.fs.ReadDir(path)
 
 		c.trace.add("readdir", path, boolKind(err == nil), err, false,
-			TraceAttr{"n", fmt.Sprintf("%d", len(entries))})
+			TraceAttr{"n", strconv.Itoa(len(entries))})
 
 		return entries, err
 	}
@@ -446,6 +449,7 @@ func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 	if c.should(mode, c.config.ReadDirFailRate) {
 		errno := c.pickError("readdir")
 		c.readDirFails.Add(1)
+
 		err := pathError("readdir", path, errno)
 
 		c.trace.add("readdir", path, "fail", err, true, TraceAttr{"errno", errno.Error()})
@@ -468,14 +472,14 @@ func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 		err := pathError("readdir", path, syscall.EIO)
 
 		c.trace.add("readdir", path, "partial_readdir", err, true,
-			TraceAttr{"cutoff", fmt.Sprintf("%d", cutoff)},
-			TraceAttr{"total", fmt.Sprintf("%d", len(entries))})
+			TraceAttr{"cutoff", strconv.Itoa(cutoff)},
+			TraceAttr{"total", strconv.Itoa(len(entries))})
 
 		return entries[:cutoff], err
 	}
 
 	c.trace.add("readdir", path, "ok", nil, false,
-		TraceAttr{"n", fmt.Sprintf("%d", len(entries))})
+		TraceAttr{"n", strconv.Itoa(len(entries))})
 
 	return entries, nil
 }
@@ -516,7 +520,7 @@ func (c *Chaos) Exists(path string) (bool, error) {
 	exists, err := c.fs.Exists(path)
 
 	c.trace.add("exists", path, boolKind(err == nil), err, false,
-		TraceAttr{"exists", fmt.Sprintf("%t", exists)})
+		TraceAttr{"exists", strconv.FormatBool(exists)})
 
 	return exists, err
 }
@@ -561,6 +565,7 @@ func (c *Chaos) Rename(oldpath, newpath string) error {
 	if c.should(mode, c.config.RenameFailRate) {
 		errno := c.pickError("rename")
 		c.renameFails.Add(1)
+
 		err := linkError("rename", oldpath, newpath, errno)
 
 		c.trace.add("rename", oldpath, "fail", err, true,
@@ -864,7 +869,7 @@ func (cf *chaosFile) Read(p []byte) (int, error) {
 		n, err := cf.f.Read(p)
 
 		cf.chaos.trace.add("file.read", cf.path, boolKind(err == nil), err, false,
-			TraceAttr{"n", fmt.Sprintf("%d", n)})
+			TraceAttr{"n", strconv.Itoa(n)})
 
 		return n, err
 	}
@@ -891,9 +896,9 @@ func (cf *chaosFile) Read(p []byte) (int, error) {
 
 		// Short read with nil error is valid io.Reader behavior
 		cf.chaos.trace.add("file.read", cf.path, "short_read", err, true,
-			TraceAttr{"n", fmt.Sprintf("%d", n)},
-			TraceAttr{"requested", fmt.Sprintf("%d", len(p))},
-			TraceAttr{"cutoff", fmt.Sprintf("%d", cutoff)})
+			TraceAttr{"n", strconv.Itoa(n)},
+			TraceAttr{"requested", strconv.Itoa(len(p))},
+			TraceAttr{"cutoff", strconv.Itoa(cutoff)})
 
 		return n, err
 	}
@@ -901,7 +906,7 @@ func (cf *chaosFile) Read(p []byte) (int, error) {
 	n, err := cf.f.Read(p)
 
 	cf.chaos.trace.add("file.read", cf.path, boolKind(err == nil), err, false,
-		TraceAttr{"n", fmt.Sprintf("%d", n)})
+		TraceAttr{"n", strconv.Itoa(n)})
 
 	return n, err
 }
@@ -912,7 +917,7 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 		n, err := cf.f.Write(p)
 
 		cf.chaos.trace.add("file.write", cf.path, boolKind(err == nil), err, false,
-			TraceAttr{"n", fmt.Sprintf("%d", n)})
+			TraceAttr{"n", strconv.Itoa(n)})
 
 		return n, err
 	}
@@ -936,7 +941,7 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 		wrote, err := cf.f.Write(p[:cutoff])
 		if err != nil {
 			cf.chaos.trace.add("file.write", cf.path, "fail", err, false,
-				TraceAttr{"n", fmt.Sprintf("%d", wrote)})
+				TraceAttr{"n", strconv.Itoa(wrote)})
 
 			return wrote, err
 		}
@@ -948,8 +953,8 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 			err := &ChaosError{Err: io.ErrShortWrite}
 
 			cf.chaos.trace.add("file.write", cf.path, "short_write", err, true,
-				TraceAttr{"n", fmt.Sprintf("%d", wrote)},
-				TraceAttr{"requested", fmt.Sprintf("%d", len(p))})
+				TraceAttr{"n", strconv.Itoa(wrote)},
+				TraceAttr{"requested", strconv.Itoa(len(p))})
 
 			return wrote, err
 		}
@@ -958,8 +963,8 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 		err = pathError("write", cf.path, errno)
 
 		cf.chaos.trace.add("file.write", cf.path, "partial_write", err, true,
-			TraceAttr{"n", fmt.Sprintf("%d", wrote)},
-			TraceAttr{"requested", fmt.Sprintf("%d", len(p))},
+			TraceAttr{"n", strconv.Itoa(wrote)},
+			TraceAttr{"requested", strconv.Itoa(len(p))},
 			TraceAttr{"errno", errno.Error()})
 
 		return wrote, err
@@ -968,7 +973,7 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 	n, err := cf.f.Write(p)
 
 	cf.chaos.trace.add("file.write", cf.path, boolKind(err == nil), err, false,
-		TraceAttr{"n", fmt.Sprintf("%d", n)})
+		TraceAttr{"n", strconv.Itoa(n)})
 
 	return n, err
 }
@@ -1075,9 +1080,9 @@ func (cf *chaosFile) Seek(offset int64, whence int) (int64, error) {
 	pos, err := cf.f.Seek(offset, whence)
 
 	cf.chaos.trace.add("file.seek", cf.path, boolKind(err == nil), err, false,
-		TraceAttr{"offset", fmt.Sprintf("%d", offset)},
-		TraceAttr{"whence", fmt.Sprintf("%d", whence)},
-		TraceAttr{"pos", fmt.Sprintf("%d", pos)})
+		TraceAttr{"offset", strconv.FormatInt(offset, 10)},
+		TraceAttr{"whence", strconv.Itoa(whence)},
+		TraceAttr{"pos", strconv.FormatInt(pos, 10)})
 
 	return pos, err
 }
