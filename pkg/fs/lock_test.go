@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -48,7 +49,7 @@ func Test_Locker_TryLock_Returns_ErrWouldBlock_When_Path_Is_Locked(t *testing.T)
 	}
 }
 
-func Test_Locker_LockWithTimeout_Returns_ErrWouldBlock_When_Path_Is_Locked(t *testing.T) {
+func Test_Locker_LockWithTimeout_Returns_DeadlineExceeded_When_Path_Is_Locked(t *testing.T) {
 	t.Parallel()
 
 	locker := NewLocker(NewReal())
@@ -60,13 +61,16 @@ func Test_Locker_LockWithTimeout_Returns_ErrWouldBlock_When_Path_Is_Locked(t *te
 	}
 	defer lock1.Close()
 
-	_, err = locker.LockWithTimeout(path, 50*time.Millisecond)
-	if !errors.Is(err, ErrWouldBlock) {
-		t.Fatalf("LockWithTimeout(%q): err=%v, want %v", path, err, ErrWouldBlock)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err = locker.LockWithTimeout(ctx, path)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("LockWithTimeout(%q): err=%v, want %v", path, err, context.DeadlineExceeded)
 	}
 
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("LockWithTimeout(%q): err=%q, want substring %q", path, err.Error(), "timed out")
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("LockWithTimeout(%q): err=%q, want path in error message", path, err.Error())
 	}
 }
 
@@ -99,10 +103,13 @@ func Test_Locker_LockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(t
 
 	var lock2 *Lock
 
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
 	go func() {
 		var err error
 
-		lock2, err = locker.LockWithTimeout(path, 500*time.Millisecond)
+		lock2, err = locker.LockWithTimeout(ctx, path)
 		if err != nil {
 			errCh <- err
 
@@ -153,19 +160,28 @@ func Test_Locker_LockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(t
 	}
 }
 
-func Test_Locker_LockWithTimeout_Returns_Error_When_Timeout_Is_Non_Positive(t *testing.T) {
+func Test_Locker_LockWithTimeout_Returns_Canceled_When_Context_Is_Canceled(t *testing.T) {
 	t.Parallel()
 
 	locker := NewLocker(NewReal())
 	path := filepath.Join(t.TempDir(), "lock")
 
-	for _, timeout := range []time.Duration{0, -1 * time.Millisecond} {
-		t.Run(timeout.String(), func(t *testing.T) {
-			_, err := locker.LockWithTimeout(path, timeout)
-			if !errors.Is(err, ErrInvalidTimeout) {
-				t.Fatalf("LockWithTimeout(%q, %s): err=%v, want %v", path, timeout, err, ErrInvalidTimeout)
-			}
-		})
+	lock1, err := locker.Lock(path)
+	if err != nil {
+		t.Fatalf("Lock(%q): %v", path, err)
+	}
+	defer lock1.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err = locker.LockWithTimeout(ctx, path)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("LockWithTimeout(%q): err=%v, want %v", path, err, context.Canceled)
+	}
+
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("LockWithTimeout(%q): err=%q, want path in error message", path, err.Error())
 	}
 }
 
@@ -386,7 +402,7 @@ func Test_Locker_RLock_Blocks_Until_Lock_Is_Released(t *testing.T) {
 	}
 }
 
-func Test_Locker_LockWithTimeout_Returns_ErrWouldBlock_When_Path_Is_Read_Locked(t *testing.T) {
+func Test_Locker_LockWithTimeout_Returns_DeadlineExceeded_When_Path_Is_Read_Locked(t *testing.T) {
 	t.Parallel()
 
 	locker := NewLocker(NewReal())
@@ -398,17 +414,20 @@ func Test_Locker_LockWithTimeout_Returns_ErrWouldBlock_When_Path_Is_Read_Locked(
 	}
 	defer r.Close()
 
-	_, err = locker.LockWithTimeout(path, 50*time.Millisecond)
-	if !errors.Is(err, ErrWouldBlock) {
-		t.Fatalf("LockWithTimeout(%q) while read-locked: err=%v, want %v", path, err, ErrWouldBlock)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err = locker.LockWithTimeout(ctx, path)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("LockWithTimeout(%q) while read-locked: err=%v, want %v", path, err, context.DeadlineExceeded)
 	}
 
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("LockWithTimeout(%q) while read-locked: err=%q, want substring %q", path, err.Error(), "timed out")
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("LockWithTimeout(%q) while read-locked: err=%q, want path in error message", path, err.Error())
 	}
 }
 
-func Test_Locker_RLockWithTimeout_Returns_ErrWouldBlock_When_Path_Is_Exclusively_Locked(t *testing.T) {
+func Test_Locker_RLockWithTimeout_Returns_DeadlineExceeded_When_Path_Is_Exclusively_Locked(t *testing.T) {
 	t.Parallel()
 
 	locker := NewLocker(NewReal())
@@ -420,13 +439,16 @@ func Test_Locker_RLockWithTimeout_Returns_ErrWouldBlock_When_Path_Is_Exclusively
 	}
 	defer w.Close()
 
-	_, err = locker.RLockWithTimeout(path, 50*time.Millisecond)
-	if !errors.Is(err, ErrWouldBlock) {
-		t.Fatalf("RLockWithTimeout(%q) while locked: err=%v, want %v", path, err, ErrWouldBlock)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err = locker.RLockWithTimeout(ctx, path)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RLockWithTimeout(%q) while locked: err=%v, want %v", path, err, context.DeadlineExceeded)
 	}
 
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("RLockWithTimeout(%q) while locked: err=%q, want substring %q", path, err.Error(), "timed out")
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("RLockWithTimeout(%q) while locked: err=%q, want path in error message", path, err.Error())
 	}
 }
 
@@ -459,10 +481,13 @@ func Test_Locker_RLockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(
 
 	var lock2 *Lock
 
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
 	go func() {
 		var err error
 
-		lock2, err = locker.RLockWithTimeout(path, 500*time.Millisecond)
+		lock2, err = locker.RLockWithTimeout(ctx, path)
 		if err != nil {
 			errCh <- err
 
@@ -649,19 +674,28 @@ func Test_Locker_Can_Reacquire_After_Close(t *testing.T) {
 	}
 }
 
-func Test_Locker_RLockWithTimeout_Returns_Error_When_Timeout_Is_Non_Positive(t *testing.T) {
+func Test_Locker_RLockWithTimeout_Returns_Canceled_When_Context_Is_Canceled(t *testing.T) {
 	t.Parallel()
 
 	locker := NewLocker(NewReal())
 	path := filepath.Join(t.TempDir(), "lock")
 
-	for _, timeout := range []time.Duration{0, -1 * time.Millisecond} {
-		t.Run(timeout.String(), func(t *testing.T) {
-			_, err := locker.RLockWithTimeout(path, timeout)
-			if !errors.Is(err, ErrInvalidTimeout) {
-				t.Fatalf("RLockWithTimeout(%q, %s): err=%v, want %v", path, timeout, err, ErrInvalidTimeout)
-			}
-		})
+	lock1, err := locker.Lock(path)
+	if err != nil {
+		t.Fatalf("Lock(%q): %v", path, err)
+	}
+	defer lock1.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err = locker.RLockWithTimeout(ctx, path)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RLockWithTimeout(%q): err=%v, want %v", path, err, context.Canceled)
+	}
+
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("RLockWithTimeout(%q): err=%q, want path in error message", path, err.Error())
 	}
 }
 
@@ -805,10 +839,8 @@ func Test_Locker_TryRLock_Returns_ErrWouldBlock_When_LockFile_Was_Replaced_Durin
 	}
 }
 
-func Test_Locker_LockWithTimeout_Returns_ErrWouldBlock_When_LockFile_Kept_Being_Replaced(t *testing.T) {
-	// Verifies the inode-mismatch retry loop returns ErrWouldBlock on timeout,
-	// and includes context so callers can distinguish this from a plain
-	// contention timeout.
+func Test_Locker_LockWithTimeout_Returns_DeadlineExceeded_When_LockFile_Kept_Being_Replaced(t *testing.T) {
+	// Verifies the inode-mismatch retry loop returns DeadlineExceeded on timeout.
 	openInfo := &syscall.Stat_t{Dev: 1, Ino: 1}
 	pathInfo := &syscall.Stat_t{Dev: 1, Ino: 2} // always mismatches
 
@@ -827,17 +859,16 @@ func Test_Locker_LockWithTimeout_Returns_ErrWouldBlock_When_LockFile_Kept_Being_
 	})
 	locker.flock = func(int, int) error { return nil }
 
-	_, err := locker.LockWithTimeout("lock", 20*time.Millisecond)
-	if !errors.Is(err, ErrWouldBlock) {
-		t.Fatalf("LockWithTimeout(): err=%v, want %v", err, ErrWouldBlock)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
 
-	if !strings.Contains(err.Error(), "lock file was replaced") {
-		t.Fatalf("LockWithTimeout(): err=%q, want substring %q", err.Error(), "lock file was replaced")
+	_, err := locker.LockWithTimeout(ctx, "lock")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("LockWithTimeout(): err=%v, want %v", err, context.DeadlineExceeded)
 	}
 }
 
-func Test_Locker_RLockWithTimeout_Returns_ErrWouldBlock_When_LockFile_Kept_Being_Replaced(t *testing.T) {
+func Test_Locker_RLockWithTimeout_Returns_DeadlineExceeded_When_LockFile_Kept_Being_Replaced(t *testing.T) {
 	// Same as LockWithTimeout test, but for shared locks.
 	openInfo := &syscall.Stat_t{Dev: 1, Ino: 1}
 	pathInfo := &syscall.Stat_t{Dev: 1, Ino: 2} // always mismatches
@@ -857,13 +888,12 @@ func Test_Locker_RLockWithTimeout_Returns_ErrWouldBlock_When_LockFile_Kept_Being
 	})
 	locker.flock = func(int, int) error { return nil }
 
-	_, err := locker.RLockWithTimeout("lock", 20*time.Millisecond)
-	if !errors.Is(err, ErrWouldBlock) {
-		t.Fatalf("RLockWithTimeout(): err=%v, want %v", err, ErrWouldBlock)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
 
-	if !strings.Contains(err.Error(), "lock file was replaced") {
-		t.Fatalf("RLockWithTimeout(): err=%q, want substring %q", err.Error(), "lock file was replaced")
+	_, err := locker.RLockWithTimeout(ctx, "lock")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RLockWithTimeout(): err=%v, want %v", err, context.DeadlineExceeded)
 	}
 }
 

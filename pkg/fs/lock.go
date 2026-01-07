@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,12 +15,8 @@ var (
 	// ErrWouldBlock is returned when a lock cannot be acquired without waiting.
 	//
 	// It is returned by [Locker.TryLock]/[Locker.TryRLock] when the lock is held
-	// by another process, and by the *WithTimeout methods when the acquisition
-	// timeout expires.
+	// by another process.
 	ErrWouldBlock = errors.New("lock would block")
-
-	// ErrInvalidTimeout is returned when a timeout is <= 0.
-	ErrInvalidTimeout = errors.New("invalid lock timeout")
 
 	// errInodeMismatch is an internal sentinel indicating the lock file was
 	// replaced between open and flock. Callers should retry.
@@ -149,44 +146,29 @@ func (l *Locker) RLock(path string) (*Lock, error) {
 }
 
 // LockWithTimeout attempts to acquire an exclusive lock, retrying with
-// exponential backoff until the timeout expires.
+// exponential backoff until the context is cancelled or its deadline expires.
 //
 // Unlike [Locker.Lock], this method uses non-blocking flock calls internally
 // and polls with sleeps (1ms to 25ms backoff). This is slightly less efficient
-// than true blocking but allows for timeouts.
+// than true blocking but allows for timeouts and cancellation.
 //
-// The timeout is best-effort: because this method polls and sleeps, it may
-// overshoot slightly under scheduler delay.
+// The timeout/cancellation is best-effort: because this method polls and
+// sleeps, it may overshoot slightly under scheduler delay.
 //
-// This method does not take a context; if you need cancellation integrate it by
-// choosing an appropriate timeout and retrying while your context is active.
-//
-// Returns an error satisfying [errors.Is] with [ErrWouldBlock] if the timeout
-// expires before the lock is acquired.
-// Returns [ErrInvalidTimeout] if timeout <= 0.
-func (l *Locker) LockWithTimeout(path string, timeout time.Duration) (*Lock, error) {
-	if timeout <= 0 {
-		return nil, fmt.Errorf("%w: timeout must be > 0", ErrInvalidTimeout)
-	}
-
-	return l.lockPolling(path, exclusiveLock, timeout)
+// Returns an error wrapping the context's error ([context.Canceled] or
+// [context.DeadlineExceeded]) if the context is done before the lock is
+// acquired.
+func (l *Locker) LockWithTimeout(ctx context.Context, path string) (*Lock, error) {
+	return l.lockPolling(ctx, path, exclusiveLock)
 }
 
 // RLockWithTimeout attempts to acquire a shared lock, retrying with exponential
-// backoff until the timeout expires.
+// backoff until the context is cancelled or its deadline expires.
 //
 // See [Locker.RLock] for shared lock semantics and [Locker.LockWithTimeout] for
 // timeout behavior.
-//
-// Returns an error satisfying [errors.Is] with [ErrWouldBlock] if the timeout
-// expires before the lock is acquired.
-// Returns [ErrInvalidTimeout] if timeout <= 0.
-func (l *Locker) RLockWithTimeout(path string, timeout time.Duration) (*Lock, error) {
-	if timeout <= 0 {
-		return nil, fmt.Errorf("%w: timeout must be > 0", ErrInvalidTimeout)
-	}
-
-	return l.lockPolling(path, sharedLock, timeout)
+func (l *Locker) RLockWithTimeout(ctx context.Context, path string) (*Lock, error) {
+	return l.lockPolling(ctx, path, sharedLock)
 }
 
 // TryLock attempts to acquire an exclusive lock without blocking.
@@ -194,7 +176,7 @@ func (l *Locker) RLockWithTimeout(path string, timeout time.Duration) (*Lock, er
 // Returns immediately with [ErrWouldBlock] if the lock cannot be acquired
 // immediately. Use this for opportunistic locking where you have a fallback.
 func (l *Locker) TryLock(path string) (*Lock, error) {
-	return l.lockPolling(path, exclusiveLock, 0)
+	return l.tryLock(path, exclusiveLock)
 }
 
 // TryRLock attempts to acquire a shared lock without blocking.
@@ -203,7 +185,7 @@ func (l *Locker) TryLock(path string) (*Lock, error) {
 // immediately (for example, if an exclusive lock is held). Multiple shared
 // locks can be held simultaneously.
 func (l *Locker) TryRLock(path string) (*Lock, error) {
-	return l.lockPolling(path, sharedLock, 0)
+	return l.tryLock(path, sharedLock)
 }
 
 type lockType int
@@ -244,20 +226,40 @@ func (l *Locker) lockBlocking(path string, lt lockType) (*Lock, error) {
 	}
 }
 
-// lockPolling attempts to acquire a lock using non-blocking flock with retries.
-//
-//   - timeout == 0: try once (TryLock behavior)
-//   - timeout > 0: retry with backoff until timeout (LockWithTimeout behavior)
-func (l *Locker) lockPolling(path string, lt lockType, timeout time.Duration) (*Lock, error) {
-	var deadline time.Time
-	if timeout > 0 {
-		deadline = time.Now().Add(timeout)
+// tryLock attempts to acquire a lock without blocking.
+func (l *Locker) tryLock(path string, lt lockType) (*Lock, error) {
+	openFlag := openFlagForLockType(lt)
+
+	file, err := l.openLockFile(path, openFlag)
+	if err != nil {
+		return nil, fmt.Errorf("opening lockfile: %w", err)
 	}
 
+	err = l.acquire(file, path, lt, lockModeNonBlocking)
+	if err == nil {
+		return &Lock{file: file, flock: l.flock}, nil
+	}
+
+	_ = file.Close()
+
+	if errors.Is(err, errInodeMismatch) {
+		return nil, fmt.Errorf("%w: lock file was replaced while acquiring lock", ErrWouldBlock)
+	}
+
+	return nil, err
+}
+
+// lockPolling attempts to acquire a lock using non-blocking flock with retries,
+// polling until the context is cancelled or its deadline expires.
+func (l *Locker) lockPolling(ctx context.Context, path string, lt lockType) (*Lock, error) {
 	backoff := time.Millisecond
 	openFlag := openFlagForLockType(lt)
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("acquiring lock on %s: %w", path, err)
+		}
+
 		file, err := l.openLockFile(path, openFlag)
 		if err != nil {
 			return nil, fmt.Errorf("opening lockfile: %w", err)
@@ -275,26 +277,11 @@ func (l *Locker) lockPolling(path string, lt lockType, timeout time.Duration) (*
 			return nil, err
 		}
 
-		if timeout == 0 {
-			if errors.Is(err, errInodeMismatch) {
-				return nil, fmt.Errorf("%w: lock file was replaced while acquiring lock", ErrWouldBlock)
-			}
-
-			return nil, ErrWouldBlock
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("acquiring lock on %s: %w", path, ctx.Err())
+		case <-time.After(backoff):
 		}
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			if errors.Is(err, errInodeMismatch) {
-				return nil, fmt.Errorf("%w: timed out after %s (lock file was replaced while acquiring lock)", ErrWouldBlock, timeout)
-			}
-
-			return nil, fmt.Errorf("%w: timed out after %s", ErrWouldBlock, timeout)
-		}
-
-		sleep := min(backoff, remaining)
-
-		time.Sleep(sleep)
 
 		if backoff < 25*time.Millisecond {
 			backoff *= 2
@@ -326,20 +313,24 @@ func (l *Locker) acquire(file File, path string, lt lockType, mode lockMode) err
 		if isWouldBlock(err) {
 			return ErrWouldBlock
 		}
+
 		return fmt.Errorf("flock: %w", err)
 	}
 
 	match, err := l.inodeMatchesPath(path, file)
 	if err != nil {
 		_ = flockRetryEINTR(l.flock, fd, syscall.LOCK_UN)
+
 		if errors.Is(err, os.ErrNotExist) {
 			return errInodeMismatch
 		}
+
 		return fmt.Errorf("verifying inode match: %w", err)
 	}
 
 	if !match {
 		_ = flockRetryEINTR(l.flock, fd, syscall.LOCK_UN)
+
 		return errInodeMismatch
 	}
 
@@ -420,6 +411,7 @@ func openFlagForLockType(lt lockType) int {
 	if lt == sharedLock {
 		return os.O_RDONLY
 	}
+
 	return os.O_RDWR
 }
 

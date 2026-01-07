@@ -191,6 +191,7 @@ func joinCycle(path []string) string {
 
 	var result strings.Builder
 	result.WriteString(path[0])
+
 	for i := 1; i < len(path); i++ {
 		result.WriteString("→" + path[i])
 	}

@@ -76,10 +76,12 @@ func Fuzz_Chaos_Produces_Identical_Results_When_Seeds_Are_Same(f *testing.F) {
 				if err := realFS.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 					t.Fatalf("MkdirAll: %v", err)
 				}
+
 				f, err := realFS.Create(path)
 				if err != nil {
 					t.Fatalf("Create: %v", err)
 				}
+
 				_, _ = f.Write([]byte(existingContent))
 				_ = f.Close()
 			}
@@ -91,11 +93,14 @@ func Fuzz_Chaos_Produces_Identical_Results_When_Seeds_Are_Same(f *testing.F) {
 				case 0: // create and write
 					path := filepath.Join(dir, fmt.Sprintf("new%d.txt", i))
 					writeData := []byte("data")
+
 					f, err := chaos.Create(path)
 					if err != nil {
 						results = append(results, result{"create", true, 0, ""})
+
 						continue
 					}
+
 					n, writeErr := f.Write(writeData)
 					_ = f.Close()
 
@@ -114,10 +119,12 @@ func Fuzz_Chaos_Produces_Identical_Results_When_Seeds_Are_Same(f *testing.F) {
 				case 2: // stat existing file
 					path := filepath.Join(dir, fmt.Sprintf("existing%d.txt", opRng.Intn(5)))
 					info, err := chaos.Stat(path)
+
 					size := 0
 					if info != nil {
 						size = int(info.Size())
 					}
+
 					results = append(results, result{"stat", err != nil, size, ""})
 
 				case 3: // remove (may or may not exist)
@@ -126,6 +133,7 @@ func Fuzz_Chaos_Produces_Identical_Results_When_Seeds_Are_Same(f *testing.F) {
 					results = append(results, result{"remove", IsChaosErr(err), 0, ""})
 				}
 			}
+
 			return results
 		}
 
