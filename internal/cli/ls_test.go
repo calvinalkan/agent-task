@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"tk/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/cli"
 
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
 // createTestTicket creates a test ticket with proper format.

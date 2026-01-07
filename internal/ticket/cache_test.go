@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
 func writeCacheFileCT(t *testing.T, dir string, entries map[string]ticket.CacheEntry) string {

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"tk/internal/cli"
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
 // FuzzStateMachine tests that the CLI behaves like the model.

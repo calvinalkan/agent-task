@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
 // errTestCallback is used for testing error handling in callbacks.

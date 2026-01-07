@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
 func TestGenerateUniqueIDNoCollision(t *testing.T) {

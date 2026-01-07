@@ -1,4 +1,4 @@
-module tk
+module github.com/calvinalkan/agent-task
 
 go 1.25
 

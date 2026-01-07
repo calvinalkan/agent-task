@@ -158,7 +158,7 @@ type ChaosStats struct {
 	CloseFails      int64
 }
 
-// ChaosError marks an error as intentionally injected by [Chaos].
+// chaosError marks an error as intentionally injected by [Chaos].
 //
 // It wraps the underlying error so errors.Is/As continue to work.
 //
@@ -168,25 +168,25 @@ type ChaosStats struct {
 // real OS errors in tests.
 //
 // All methods panic if the receiver or Err is nil.
-type ChaosError struct {
+type chaosError struct {
 	Err error
 }
 
 // Error returns a formatted error message.
 // Panics if e or e.Err is nil.
-func (e *ChaosError) Error() string {
+func (e *chaosError) Error() string {
 	return "chaos: " + e.Err.Error()
 }
 
 // Unwrap returns the underlying error. Panics if e is nil.
-func (e *ChaosError) Unwrap() error {
+func (e *chaosError) Unwrap() error {
 	return e.Err
 }
 
 // IsChaosErr reports whether err (or any wrapped error) was injected by [Chaos].
 // Returns false if err is nil.
 func IsChaosErr(err error) bool {
-	var injected *ChaosError
+	var injected *chaosError
 
 	return errors.As(err, &injected)
 }
@@ -709,21 +709,21 @@ func (c *Chaos) randIntn(n int) int {
 }
 
 // pathError creates an injected [*fs.PathError] with the given operation, path, and errno.
-// The error is wrapped in [ChaosError] so [IsChaosErr] can identify it, while
+// The error is wrapped in [chaosError] so [IsChaosErr] can identify it, while
 // [errors.As] and helpers like [os.IsPermission] still work via unwrapping.
 func pathError(op, path string, errno syscall.Errno) error {
 	pe := &fs.PathError{Op: op, Path: path, Err: errno}
 
-	return &ChaosError{Err: pe}
+	return &chaosError{Err: pe}
 }
 
 // linkError creates an injected [*os.LinkError] with the given operation, paths, and errno.
-// The error is wrapped in [ChaosError] so [IsChaosErr] can identify it, while
+// The error is wrapped in [chaosError] so [IsChaosErr] can identify it, while
 // [errors.As] and helpers like [os.IsPermission] still work via unwrapping.
 func linkError(op, oldpath, newpath string, errno syscall.Errno) error {
 	le := &os.LinkError{Op: op, Old: oldpath, New: newpath, Err: errno}
 
-	return &ChaosError{Err: le}
+	return &chaosError{Err: le}
 }
 
 // pickRandom selects a random error from the slice.
@@ -950,7 +950,7 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 		// (io.ErrShortWrite). In the stdlib, this is the fallback when a write returns
 		// n != len(b) without a syscall error.
 		if cf.chaos.randFloat() < cf.chaos.config.ShortWriteRate {
-			err := &ChaosError{Err: io.ErrShortWrite}
+			err := &chaosError{Err: io.ErrShortWrite}
 
 			cf.chaos.trace.add("file.write", cf.path, "short_write", err, true,
 				TraceAttr{"n", strconv.Itoa(wrote)},

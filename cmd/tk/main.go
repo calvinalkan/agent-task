@@ -7,7 +7,7 @@ import (
 	"strings"
 	"syscall"
 
-	"tk/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
 func main() {

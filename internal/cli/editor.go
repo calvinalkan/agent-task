@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 
 	flag "github.com/spf13/pflag"
 )

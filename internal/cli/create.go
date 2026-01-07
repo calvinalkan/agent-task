@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 
 	flag "github.com/spf13/pflag"
 )

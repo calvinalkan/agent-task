@@ -1643,9 +1643,9 @@ func Test_ChaosError_Preserves_Errors_Is_When_Wrapping_Path_Error(t *testing.T) 
 	}
 }
 
-func Test_ChaosError_Preserves_Errors_Is_When_Wrapping_Standard_Error(t *testing.T) {
+func Test_chaosError_Preserves_Errors_Is_When_Wrapping_Standard_Error(t *testing.T) {
 	base := os.ErrDeadlineExceeded
-	injected := &ChaosError{Err: base}
+	injected := &chaosError{Err: base}
 
 	if got, want := IsChaosErr(injected), true; got != want {
 		t.Fatalf("IsChaosErr(injected)=%t, want %t", got, want)

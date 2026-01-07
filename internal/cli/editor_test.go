@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"tk/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
 // createMockEditor creates a mock editor script that writes its args to a file.

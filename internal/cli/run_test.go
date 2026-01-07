@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"tk/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
 func TestInvalidGlobalFlag(t *testing.T) {

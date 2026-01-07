@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"tk/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
 func TestReadyEmptyDir(t *testing.T) {

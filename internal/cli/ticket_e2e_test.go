@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"tk/internal/cli"
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
 func TestConcurrentTicketCreation(t *testing.T) {

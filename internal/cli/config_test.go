@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"tk/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
 // Helper to write a file (creates directories as needed).

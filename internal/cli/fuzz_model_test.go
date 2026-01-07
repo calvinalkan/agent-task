@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"tk/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
 // TicketModel represents the expected state of a single ticket.

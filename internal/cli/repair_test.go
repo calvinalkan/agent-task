@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"tk/internal/cli"
+	"github.com/calvinalkan/agent-task/internal/cli"
 
-	"tk/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
 func backdateCacheRepair(t *testing.T, ticketDir string) {
