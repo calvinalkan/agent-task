@@ -4,9 +4,8 @@
 /tk-seed
 *.test
 
-# Lock files (but not flake.lock)
-*.lock
-!flake.lock
+# Lock files (only in .tickets)
+.tickets/**/*.lock
 
 # Ticket cache
 .tickets/.cache
