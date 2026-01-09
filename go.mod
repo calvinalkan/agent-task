@@ -1,8 +1,6 @@
 module github.com/calvinalkan/agent-task
 
-go 1.25
-
-toolchain go1.25.5
+go 1.25.5
 
 require (
 	github.com/spf13/pflag v1.0.10
