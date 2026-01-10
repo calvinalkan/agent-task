@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
@@ -15,21 +16,49 @@ import (
 
 // ReadyCmd returns the ready command.
 func ReadyCmd(cfg ticket.Config) *Command {
+	fs := flag.NewFlagSet("ready", flag.ContinueOnError)
+	fs.Bool("json", false, "Output as JSON array")
+	fs.Int("limit", 0, "Maximum tickets to show (0 = no limit)")
+	fs.String("field", "", "Output only this field (id|priority|status|type|title|parent|created)")
+
 	return &Command{
-		Flags: flag.NewFlagSet("ready", flag.ContinueOnError),
-		Usage: "ready",
+		Flags: fs,
+		Usage: "ready [flags]",
 		Short: "List actionable tickets (unblocked, not closed)",
 		Long: `List actionable tickets that can be worked on now.
-Shows open tickets with all blockers closed.
 
-Output sorted by priority (P1 first), then by ID.`,
+A ticket is ready if:
+  - Status is open
+  - All blockers are closed
+  - Parent is started (in_progress) or no parent
+
+Output sorted by priority (P1 first), then by ID.
+
+Examples:
+  tk ready                          # List all ready tickets
+  tk ready --limit 1                # Show only the top priority ticket
+  tk ready --field id --limit 1     # Get just the ID of top ticket
+  tk ready --json                   # Output as JSON array
+  tk ready --json --field id        # JSON array of IDs: ["id1", "id2"]
+
+  # Start the highest priority ready ticket:
+  tk start $(tk ready --field id --limit 1)`,
 		Exec: func(_ context.Context, io *IO, args []string) error {
-			return execReady(io, cfg)
+			jsonOutput, _ := fs.GetBool("json")
+			limit, _ := fs.GetInt("limit")
+			field, _ := fs.GetString("field")
+			return execReady(io, cfg, jsonOutput, limit, field)
 		},
 	}
 }
 
-func execReady(io *IO, cfg ticket.Config) error {
+var errInvalidField = fmt.Errorf("invalid field (valid: id, priority, status, type, title, parent, created)")
+
+func execReady(io *IO, cfg ticket.Config, jsonOutput bool, limit int, field string) error {
+	if field != "" && !isValidReadyField(field) {
+		return errInvalidField
+	}
+
 	results, err := ticket.ListTickets(cfg.TicketDirAbs, ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
 		return err
@@ -49,9 +78,130 @@ func execReady(io *IO, cfg ticket.Config) error {
 		return strings.Compare(a.ID, b.ID)
 	})
 
+	if limit > 0 && len(ready) > limit {
+		ready = ready[:limit]
+	}
+
+	if jsonOutput {
+		if field != "" {
+			return outputReadyFieldJSON(io, ready, field)
+		}
+
+		return outputReadyJSON(io, ready)
+	}
+
+	if len(ready) == 0 {
+		io.ErrPrintln("no tickets ready for pickup")
+
+		return nil
+	}
+
+	if field != "" {
+		for _, summary := range ready {
+			io.Println(getFieldValue(summary, field))
+		}
+
+		return nil
+	}
+
 	for _, summary := range ready {
 		io.Println(formatReadyLine(summary))
 	}
+
+	return nil
+}
+
+func isValidReadyField(field string) bool {
+	switch field {
+	case "id", "priority", "status", "type", "title", "parent", "created":
+		return true
+	default:
+		return false
+	}
+}
+
+func getFieldValue(s *ticket.Summary, field string) string {
+	switch field {
+	case "id":
+		return s.ID
+	case "priority":
+		return strconv.Itoa(s.Priority)
+	case "status":
+		return s.Status
+	case "type":
+		return s.Type
+	case "title":
+		return s.Title
+	case "parent":
+		return s.Parent
+	case "created":
+		return s.Created
+	default:
+		return ""
+	}
+}
+
+func outputReadyFieldJSON(io *IO, ready []*ticket.Summary, field string) error {
+	values := make([]any, 0, len(ready))
+
+	for _, s := range ready {
+		switch field {
+		case "priority":
+			values = append(values, s.Priority)
+		default:
+			values = append(values, getFieldValue(s, field))
+		}
+	}
+
+	data, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+
+	io.Println(string(data))
+
+	return nil
+}
+
+// readyTicketJSON is the JSON representation of a ready ticket.
+type readyTicketJSON struct {
+	ID        string   `json:"id"`
+	Priority  int      `json:"priority"`
+	Status    string   `json:"status"`
+	Type      string   `json:"type"`
+	Title     string   `json:"title"`
+	Parent    string   `json:"parent,omitempty"`
+	BlockedBy []string `json:"blocked_by"`
+	Created   string   `json:"created"`
+}
+
+func outputReadyJSON(io *IO, ready []*ticket.Summary) error {
+	tickets := make([]readyTicketJSON, 0, len(ready))
+
+	for _, s := range ready {
+		blockedBy := s.BlockedBy
+		if blockedBy == nil {
+			blockedBy = []string{}
+		}
+
+		tickets = append(tickets, readyTicketJSON{
+			ID:        s.ID,
+			Priority:  s.Priority,
+			Status:    s.Status,
+			Type:      s.Type,
+			Title:     s.Title,
+			Parent:    s.Parent,
+			BlockedBy: blockedBy,
+			Created:   s.Created,
+		})
+	}
+
+	data, err := json.Marshal(tickets)
+	if err != nil {
+		return err
+	}
+
+	io.Println(string(data))
 
 	return nil
 }
@@ -108,7 +258,7 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 		go func(resultIdx int, s *ticket.Summary) {
 			defer waitGroup.Done()
 
-			isReady, warnings := checkBlockersResolved(s, statusMap)
+			isReady, warnings := checkTicketReady(s, statusMap)
 			checkResults[resultIdx] = readyCheckResult{
 				summary:  s,
 				isReady:  isReady,
@@ -132,10 +282,11 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 	return ready, allWarnings
 }
 
-// checkBlockersResolved checks if a ticket has all its blockers resolved.
-func checkBlockersResolved(summary *ticket.Summary, statusMap map[string]string) (bool, []readyWarning) {
+// checkTicketReady checks if a ticket can be started (blockers resolved, parent started).
+func checkTicketReady(summary *ticket.Summary, statusMap map[string]string) (bool, []readyWarning) {
 	var warnings []readyWarning
 
+	// Check blockers are all closed
 	for _, blockerID := range summary.BlockedBy {
 		status, exists := statusMap[blockerID]
 
@@ -154,6 +305,23 @@ func checkBlockersResolved(summary *ticket.Summary, statusMap map[string]string)
 		}
 	}
 
+	// Check parent is started (not open)
+	if summary.Parent != "" {
+		parentStatus, exists := statusMap[summary.Parent]
+
+		if !exists {
+			warnings = append(warnings, readyWarning{
+				issue: fmt.Sprintf("%s has non-existent parent %s (treating as no parent)",
+					summary.ID, summary.Parent),
+				action: "remove the parent reference or create the missing ticket",
+			})
+		} else if parentStatus != ticket.StatusInProgress {
+			// Parent must be in_progress for child to be startable
+			// (Parent can't be closed while child is open - we enforce this)
+			return false, warnings
+		}
+	}
+
 	return true, warnings
 }
 
@@ -167,6 +335,12 @@ func formatReadyLine(summary *ticket.Summary) string {
 	builder.WriteString(summary.Status)
 	builder.WriteString("] - ")
 	builder.WriteString(summary.Title)
+
+	if summary.Parent != "" {
+		builder.WriteString(" (parent: ")
+		builder.WriteString(summary.Parent)
+		builder.WriteString(")")
+	}
 
 	return builder.String()
 }
