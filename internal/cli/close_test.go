@@ -144,3 +144,89 @@ func TestCloseHelp(t *testing.T) {
 		})
 	}
 }
+
+func TestCloseWithOpenChildFails(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	// Start parent
+	c.MustRun("start", parentID)
+
+	// Try to close parent while child is open
+	stderr := c.MustFail("close", parentID)
+	cli.AssertContains(t, stderr, "ticket has open children")
+	cli.AssertContains(t, stderr, childID)
+}
+
+func TestCloseWithInProgressChildFails(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	// Start parent and child
+	c.MustRun("start", parentID)
+	c.MustRun("start", childID)
+
+	// Try to close parent while child is in_progress
+	stderr := c.MustFail("close", parentID)
+	cli.AssertContains(t, stderr, "ticket has open children")
+	cli.AssertContains(t, stderr, childID)
+}
+
+func TestCloseWithClosedChildSucceeds(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	// Start and close both
+	c.MustRun("start", parentID)
+	c.MustRun("start", childID)
+	c.MustRun("close", childID)
+	c.MustRun("close", parentID)
+
+	// Verify parent is closed
+	content := c.ReadTicket(parentID)
+	cli.AssertContains(t, content, "status: closed")
+}
+
+func TestCloseWithMultipleChildrenOneOpen(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	child1ID := c.MustRun("create", "Child 1", "--parent", parentID)
+	child2ID := c.MustRun("create", "Child 2", "--parent", parentID)
+
+	// Start parent and both children
+	c.MustRun("start", parentID)
+	c.MustRun("start", child1ID)
+	c.MustRun("start", child2ID)
+
+	// Close only child1
+	c.MustRun("close", child1ID)
+
+	// Try to close parent - should fail because child2 is still open
+	stderr := c.MustFail("close", parentID)
+	cli.AssertContains(t, stderr, "ticket has open children")
+	cli.AssertContains(t, stderr, child2ID)
+}
+
+func TestCloseWithNoChildrenSucceeds(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	ticketID := c.MustRun("create", "Ticket without children")
+
+	c.MustRun("start", ticketID)
+	c.MustRun("close", ticketID)
+
+	content := c.ReadTicket(ticketID)
+	cli.AssertContains(t, content, "status: closed")
+}

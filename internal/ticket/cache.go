@@ -20,10 +20,11 @@ import (
 // Binary cache format constants.
 const (
 	cacheMagic       = "TKC1"
-	cacheVersionNum  = 4
+	cacheVersionNum  = 6 // Bumped for parent in index
 	cacheHeaderSize  = 32
-	indexEntrySize   = 56
+	indexEntrySize   = 68 // Was 56, added 12 for parent
 	maxFilenameLen   = 32
+	maxParentLen     = 12 // 11 char max ID + null terminator
 	minCacheFileSize = cacheHeaderSize
 )
 
@@ -201,6 +202,7 @@ type indexEntryData struct {
 	status     uint8
 	priority   uint8
 	ticketType uint8
+	parent     string
 }
 
 // GetEntryByIndex returns the filename and summary at the given cache index.
@@ -212,6 +214,17 @@ func (bc *BinaryCache) GetEntryByIndex(idx int) (string, Summary) {
 	entry := bc.readIndexEntry(idx)
 
 	return entry.filename, bc.readDataEntry(entry)
+}
+
+// FilterEntriesOpts contains filter options for FilterEntries.
+type FilterEntriesOpts struct {
+	Status    int    // -1 = any, otherwise status byte (0=open,1=in_progress,2=closed)
+	Priority  int    // 0 = any, otherwise exact priority (1-4)
+	Type      int    // -1 = any, otherwise type byte (0-4)
+	Parent    string // "" = any, otherwise exact parent ID
+	RootsOnly bool   // true = only entries without parent
+	Limit     int    // 0 = no limit
+	Offset    int    // skip first N matches
 }
 
 // FilterEntries returns indices of entries matching the given filter criteria.
@@ -226,6 +239,18 @@ func (bc *BinaryCache) GetEntryByIndex(idx int) (string, Summary) {
 //
 // Returns nil if offset is out of bounds (only when offset > 0).
 func (bc *BinaryCache) FilterEntries(status, priority, ticketType, limit, offset int) []int {
+	return bc.FilterEntriesWithOpts(FilterEntriesOpts{
+		Status:   status,
+		Priority: priority,
+		Type:     ticketType,
+		Limit:    limit,
+		Offset:   offset,
+	})
+}
+
+// FilterEntriesWithOpts returns indices of entries matching the given filter options.
+// Returns nil if offset is out of bounds (only when offset > 0).
+func (bc *BinaryCache) FilterEntriesWithOpts(opts FilterEntriesOpts) []int {
 	if bc.data == nil {
 		panic("BinaryCache: read from closed cache")
 	}
@@ -233,7 +258,7 @@ func (bc *BinaryCache) FilterEntries(status, priority, ticketType, limit, offset
 	results := make([]int, 0)
 
 	if bc.entryCount == 0 {
-		if offset > 0 {
+		if opts.Offset > 0 {
 			return nil
 		}
 
@@ -247,21 +272,30 @@ func (bc *BinaryCache) FilterEntries(status, priority, ticketType, limit, offset
 		entryStatus := int(bc.data[entryOffset+46])
 		entryPriority := int(bc.data[entryOffset+47])
 		entryType := int(bc.data[entryOffset+48])
+		entryParent := bc.readParentAt(entryOffset + 49)
 
-		if status != -1 && entryStatus != status {
+		if opts.Status != -1 && entryStatus != opts.Status {
 			continue
 		}
 
-		if priority != 0 && entryPriority != priority {
+		if opts.Priority != 0 && entryPriority != opts.Priority {
 			continue
 		}
 
-		if ticketType != -1 && entryType != ticketType {
+		if opts.Type != -1 && entryType != opts.Type {
+			continue
+		}
+
+		if opts.Parent != "" && entryParent != opts.Parent {
+			continue
+		}
+
+		if opts.RootsOnly && entryParent != "" {
 			continue
 		}
 
 		// Match
-		if matchCount < offset {
+		if matchCount < opts.Offset {
 			matchCount++
 
 			continue
@@ -270,16 +304,28 @@ func (bc *BinaryCache) FilterEntries(status, priority, ticketType, limit, offset
 		results = append(results, i)
 		matchCount++
 
-		if limit > 0 && len(results) >= limit {
+		if opts.Limit > 0 && len(results) >= opts.Limit {
 			break
 		}
 	}
 
-	if offset > 0 && matchCount <= offset {
+	if opts.Offset > 0 && matchCount <= opts.Offset {
 		return nil
 	}
 
 	return results
+}
+
+// readParentAt reads the null-terminated parent ID at the given offset.
+func (bc *BinaryCache) readParentAt(offset int) string {
+	parentBytes := bc.data[offset : offset+maxParentLen]
+
+	end := bytes.IndexByte(parentBytes, 0)
+	if end < 0 {
+		end = maxParentLen
+	}
+
+	return string(parentBytes[:end])
 }
 
 // binarySearch finds filename in sorted index, returns -1 if not found.
@@ -338,6 +384,14 @@ func (bc *BinaryCache) readIndexEntry(idx int) indexEntryData {
 		mtime = int64(mtimeRaw)
 	}
 
+	// Read parent (null-terminated, 12 bytes max at offset 49)
+	parentBytes := data[49 : 49+maxParentLen]
+	parentEnd := bytes.IndexByte(parentBytes, 0)
+
+	if parentEnd < 0 {
+		parentEnd = maxParentLen
+	}
+
 	return indexEntryData{
 		filename:   string(nameBytes[:end]),
 		mtime:      mtime,
@@ -346,6 +400,7 @@ func (bc *BinaryCache) readIndexEntry(idx int) indexEntryData {
 		status:     data[46],
 		priority:   data[47],
 		ticketType: data[48],
+		parent:     string(parentBytes[:parentEnd]),
 	}
 }
 
@@ -395,6 +450,9 @@ func (bc *BinaryCache) readDataEntry(entry indexEntryData) Summary {
 		blockedBy = append(blockedBy, readString1())
 	}
 
+	// Read Parent (1 byte length + string)
+	parent := readString1()
+
 	// Status from index entry
 	status := statusByteToString(entry.status)
 
@@ -402,13 +460,14 @@ func (bc *BinaryCache) readDataEntry(entry indexEntryData) Summary {
 		SchemaVersion: schemaVersion,
 		ID:            id,
 		Status:        status,
+		BlockedBy:     blockedBy,
+		Parent:        parent,
 		Title:         title,
 		Type:          typeByteToString(entry.ticketType),
 		Priority:      int(entry.priority),
 		Created:       created,
 		Closed:        closed,
 		Assignee:      assignee,
-		BlockedBy:     blockedBy,
 		Path:          path,
 	}
 }
@@ -419,6 +478,7 @@ type rawCacheEntry struct {
 	status     uint8
 	priority   uint8
 	ticketType uint8
+	parent     string
 	data       []byte
 }
 
@@ -431,6 +491,7 @@ func (bc *BinaryCache) readRawEntry(idx int) rawCacheEntry {
 		status:     entry.status,
 		priority:   entry.priority,
 		ticketType: entry.ticketType,
+		parent:     entry.parent,
 		data:       bc.data[entry.dataOffset : entry.dataOffset+uint32(entry.dataLength)],
 	}
 }
@@ -469,6 +530,7 @@ func writeBinaryCache(path string, entries map[string]CacheEntry) error {
 			status:     statusStringToByte(entry.Summary.Status),
 			priority:   prio,
 			ticketType: typeStringToByte(entry.Summary.Type),
+			parent:     entry.Summary.Parent,
 			data:       data,
 		}
 	}
@@ -562,7 +624,10 @@ func writeBinaryCacheRaw(path string, entries map[string]rawCacheEntry) error {
 		buf[offset+47] = entry.priority
 		buf[offset+48] = entry.ticketType
 
-		// bytes 49-55 reserved (zeros)
+		// Parent (null-padded, 12 bytes at offset 49)
+		copy(buf[offset+49:offset+49+maxParentLen], entry.parent)
+
+		// bytes 61-67 reserved (zeros)
 	}
 
 	// Write data section
@@ -622,6 +687,7 @@ var (
 	errClosedTooLong     = errors.New("closed too long (max 255 chars)")
 	errTitleTooLong      = errors.New("title too long (max 65535 chars)")
 	errPathTooLong       = errors.New("path too long (max 65535 chars)")
+	errParentTooLong     = errors.New("parent too long (max 255 chars)")
 )
 
 func encodeSummaryData(summary *Summary) ([]byte, error) {
@@ -640,6 +706,10 @@ func encodeSummaryData(summary *Summary) ([]byte, error) {
 
 	if len(summary.Assignee) > uint8Max {
 		return nil, errAssigneeTooLong
+	}
+
+	if len(summary.Parent) > uint8Max {
+		return nil, errParentTooLong
 	}
 
 	// Validate 2-byte length strings
@@ -709,6 +779,9 @@ func encodeSummaryData(summary *Summary) ([]byte, error) {
 	for _, blocker := range summary.BlockedBy {
 		writeString1(blocker)
 	}
+
+	// Write Parent (1 byte length + string)
+	writeString1(summary.Parent)
 
 	if dataBuf.Len() > uint16Max {
 		return nil, errEntryTooLarge
@@ -842,6 +915,7 @@ func UpdateCacheEntry(ticketDir, filename string, summary *Summary) error {
 			status:     statusStringToByte(summary.Status),
 			priority:   prio,
 			ticketType: typeStringToByte(summary.Type),
+			parent:     summary.Parent,
 			data:       data,
 		}
 
@@ -965,6 +1039,7 @@ func reconcileRawCacheEntries(ticketDir string, entries map[string]rawCacheEntry
 			status:     statusStringToByte(summary.Status),
 			priority:   prio,
 			ticketType: typeStringToByte(summary.Type),
+			parent:     summary.Parent,
 			data:       data,
 		}
 	}

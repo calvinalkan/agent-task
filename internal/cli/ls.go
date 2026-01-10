@@ -21,6 +21,8 @@ func LsCmd(cfg ticket.Config) *Command {
 	fs.String("type", "", "Filter by type (bug|feature|task|epic|chore)")
 	fs.Int("limit", defaultLimit, "Maximum tickets to show")
 	fs.Int("offset", 0, "Skip first N tickets")
+	fs.String("parent", "", "Filter by parent ticket ID")
+	fs.Bool("roots", false, "Show only tickets without a parent")
 
 	return &Command{
 		Flags: fs,
@@ -32,6 +34,11 @@ func LsCmd(cfg ticket.Config) *Command {
 		},
 	}
 }
+
+var (
+	errConflictingFlags  = errors.New("--parent and --roots cannot be used together")
+	errOffsetOutOfBounds = errors.New("offset out of bounds")
+)
 
 func execLs(io *IO, cfg ticket.Config, fs *flag.FlagSet) error {
 	status, _ := fs.GetString("status")
@@ -66,12 +73,21 @@ func execLs(io *IO, cfg ticket.Config, fs *flag.FlagSet) error {
 		return errors.New("--offset must be non-negative")
 	}
 
+	parentFilter, _ := fs.GetString("parent")
+	rootsOnly, _ := fs.GetBool("roots")
+
+	if parentFilter != "" && rootsOnly {
+		return errConflictingFlags
+	}
+
 	listOpts := ticket.ListTicketsOptions{
-		Status:   status,
-		Priority: priority,
-		Type:     ticketType,
-		Limit:    limit,
-		Offset:   offset,
+		Status:    status,
+		Priority:  priority,
+		Type:      ticketType,
+		Parent:    parentFilter,
+		RootsOnly: rootsOnly,
+		Limit:     limit,
+		Offset:    offset,
 	}
 
 	results, err := ticket.ListTickets(cfg.TicketDirAbs, listOpts, nil)
@@ -127,6 +143,12 @@ func formatTicketLine(summary *ticket.Summary) string {
 	builder.WriteString(summary.Status)
 	builder.WriteString("] - ")
 	builder.WriteString(summary.Title)
+
+	if summary.Parent != "" {
+		builder.WriteString(" (parent: ")
+		builder.WriteString(summary.Parent)
+		builder.WriteString(")")
+	}
 
 	if len(summary.BlockedBy) > 0 {
 		builder.WriteString(" <- blocked-by: [")

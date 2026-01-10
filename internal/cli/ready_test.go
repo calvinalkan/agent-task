@@ -60,7 +60,9 @@ func TestReadyJSONWithTickets(t *testing.T) {
 	}
 
 	var tickets []map[string]any
-	if err := json.Unmarshal([]byte(stdout), &tickets); err != nil {
+
+	err := json.Unmarshal([]byte(stdout), &tickets)
+	if err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
 
@@ -109,6 +111,7 @@ func TestReadyLimit(t *testing.T) {
 
 	// Without limit, should show all 3
 	stdout := c.MustRun("ready")
+
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
 	if got, want := len(lines), 3; got != want {
 		t.Errorf("without limit: got %d lines, want %d", got, want)
@@ -116,14 +119,17 @@ func TestReadyLimit(t *testing.T) {
 
 	// With limit 1, should show only P1
 	stdout = c.MustRun("ready", "--limit", "1")
+
 	lines = strings.Split(strings.TrimSpace(stdout), "\n")
 	if got, want := len(lines), 1; got != want {
 		t.Errorf("with limit 1: got %d lines, want %d", got, want)
 	}
+
 	cli.AssertContains(t, lines[0], "[P1]")
 
 	// With limit 2, should show P1 and P2
 	stdout = c.MustRun("ready", "--limit", "2")
+
 	lines = strings.Split(strings.TrimSpace(stdout), "\n")
 	if got, want := len(lines), 2; got != want {
 		t.Errorf("with limit 2: got %d lines, want %d", got, want)
@@ -140,7 +146,9 @@ func TestReadyLimitJSON(t *testing.T) {
 	stdout := c.MustRun("ready", "--json", "--limit", "1")
 
 	var tickets []map[string]any
-	if err := json.Unmarshal([]byte(stdout), &tickets); err != nil {
+
+	err := json.Unmarshal([]byte(stdout), &tickets)
+	if err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
 
@@ -201,7 +209,9 @@ func TestReadyFieldJSON(t *testing.T) {
 	stdout := c.MustRun("ready", "--json", "--field", "id")
 
 	var ids []string
-	if err := json.Unmarshal([]byte(stdout), &ids); err != nil {
+
+	err := json.Unmarshal([]byte(stdout), &ids)
+	if err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
 
@@ -228,7 +238,9 @@ func TestReadyFieldPriorityJSON(t *testing.T) {
 	stdout := c.MustRun("ready", "--json", "--field", "priority")
 
 	var priorities []int
-	if err := json.Unmarshal([]byte(stdout), &priorities); err != nil {
+
+	err := json.Unmarshal([]byte(stdout), &priorities)
+	if err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
 
@@ -634,6 +646,7 @@ func TestReadyCacheRegenAfterVersionChange(t *testing.T) {
 
 	// Delete cache
 	cachePath := filepath.Join(c.TicketDir(), ".cache")
+
 	err := os.Remove(cachePath)
 	if err != nil {
 		t.Fatalf("failed to remove cache: %v", err)

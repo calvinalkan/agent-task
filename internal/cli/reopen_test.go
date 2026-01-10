@@ -160,3 +160,99 @@ func TestReopenHelp(t *testing.T) {
 		})
 	}
 }
+
+func TestReopenWithClosedParentFails(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	// Start and close both
+	c.MustRun("start", parentID)
+	c.MustRun("start", childID)
+	c.MustRun("close", childID)
+	c.MustRun("close", parentID)
+
+	// Try to reopen child while parent is closed
+	stderr := c.MustFail("reopen", childID)
+	cli.AssertContains(t, stderr, "parent ticket is closed")
+	cli.AssertContains(t, stderr, parentID)
+}
+
+func TestReopenWithOpenParentSucceeds(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	// Start parent and child
+	c.MustRun("start", parentID)
+	c.MustRun("start", childID)
+
+	// Close child
+	c.MustRun("close", childID)
+
+	// Reopen child while parent is still in_progress
+	c.MustRun("reopen", childID)
+
+	content := c.ReadTicket(childID)
+	cli.AssertContains(t, content, "status: open")
+}
+
+func TestReopenWithInProgressParentSucceeds(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	// Start parent and child, close child
+	c.MustRun("start", parentID)
+	c.MustRun("start", childID)
+	c.MustRun("close", childID)
+
+	// Reopen child
+	c.MustRun("reopen", childID)
+
+	content := c.ReadTicket(childID)
+	cli.AssertContains(t, content, "status: open")
+}
+
+func TestReopenWithNoParentSucceeds(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	ticketID := c.MustRun("create", "Ticket without parent")
+
+	c.MustRun("start", ticketID)
+	c.MustRun("close", ticketID)
+	c.MustRun("reopen", ticketID)
+
+	content := c.ReadTicket(ticketID)
+	cli.AssertContains(t, content, "status: open")
+}
+
+func TestReopenParentThenChild(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	// Start and close both
+	c.MustRun("start", parentID)
+	c.MustRun("start", childID)
+	c.MustRun("close", childID)
+	c.MustRun("close", parentID)
+
+	// Reopen parent first
+	c.MustRun("reopen", parentID)
+
+	// Now reopen child should succeed
+	c.MustRun("reopen", childID)
+
+	content := c.ReadTicket(childID)
+	cli.AssertContains(t, content, "status: open")
+}

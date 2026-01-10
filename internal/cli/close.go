@@ -16,7 +16,11 @@ func CloseCmd(cfg ticket.Config) *Command {
 		Flags: flag.NewFlagSet("close", flag.ContinueOnError),
 		Usage: "close <id>",
 		Short: "Set status to closed",
-		Long:  "Set ticket status to closed. Only works on in_progress tickets.",
+		Long: `Set ticket status to closed.
+
+Requirements:
+  - Ticket must be in_progress
+  - All child tickets must be closed first`,
 		Exec: func(_ context.Context, io *IO, args []string) error {
 			return execClose(io, cfg, args)
 		},
@@ -35,6 +39,16 @@ func execClose(io *IO, cfg ticket.Config, args []string) error {
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
+
+	// Check for open children before closing
+	openChildren, childErr := ticket.FindOpenChildren(cfg.TicketDirAbs, ticketID)
+	if childErr != nil {
+		return fmt.Errorf("checking children: %w", childErr)
+	}
+
+	if len(openChildren) > 0 {
+		return fmt.Errorf("%w: %s", ticket.ErrHasOpenChildren, openChildren[0])
+	}
 
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		status, statusErr := ticket.GetStatusFromContent(content)

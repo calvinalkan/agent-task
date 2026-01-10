@@ -22,10 +22,14 @@ type CLI struct {
 func NewCLI(t *testing.T) *CLI {
 	t.Helper()
 
+	dir := t.TempDir()
+
 	return &CLI{
 		t:   t,
-		Dir: t.TempDir(),
-		Env: map[string]string{},
+		Dir: dir,
+		Env: map[string]string{
+			"TMPDIR": dir, // Isolate temp files per test
+		},
 	}
 }
 
@@ -137,5 +141,35 @@ func AssertNotContains(t *testing.T, content, substr string) {
 
 	if strings.Contains(content, substr) {
 		t.Errorf("content should NOT contain %q\ncontent:\n%s", substr, content)
+	}
+}
+
+// AssertTicketListed fails the test if the ticket ID is not listed as a primary entry.
+// A primary entry starts at the beginning of a line followed by a space.
+func AssertTicketListed(t *testing.T, content, ticketID string) {
+	t.Helper()
+
+	prefix := ticketID + " "
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return
+		}
+	}
+
+	t.Errorf("ticket %q should be listed\ncontent:\n%s", ticketID, content)
+}
+
+// AssertTicketNotListed fails the test if the ticket ID is listed as a primary entry.
+// This avoids false positives from "(parent: ID)" references and IDs that are prefixes of other IDs.
+func AssertTicketNotListed(t *testing.T, content, ticketID string) {
+	t.Helper()
+
+	prefix := ticketID + " "
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			t.Errorf("ticket %q should NOT be listed\ncontent:\n%s", ticketID, content)
+
+			return
+		}
 	}
 }

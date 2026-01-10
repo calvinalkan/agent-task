@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -47,12 +48,13 @@ Examples:
 			jsonOutput, _ := fs.GetBool("json")
 			limit, _ := fs.GetInt("limit")
 			field, _ := fs.GetString("field")
+
 			return execReady(io, cfg, jsonOutput, limit, field)
 		},
 	}
 }
 
-var errInvalidField = fmt.Errorf("invalid field (valid: id, priority, status, type, title, parent, created)")
+var errInvalidField = errors.New("invalid field (valid: id, priority, status, type, title, parent, created)")
 
 func execReady(io *IO, cfg ticket.Config, jsonOutput bool, limit int, field string) error {
 	if field != "" && !isValidReadyField(field) {

@@ -464,6 +464,56 @@ func TestCreateHelp(t *testing.T) {
 			cli.AssertContains(t, stdout, "--priority")
 			cli.AssertContains(t, stdout, "--assignee")
 			cli.AssertContains(t, stdout, "--blocked-by")
+			cli.AssertContains(t, stdout, "--parent")
 		})
 	}
+}
+
+func TestCreateWithParent(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	content := c.ReadTicket(childID)
+	cli.AssertContains(t, content, "parent: "+parentID)
+}
+
+func TestCreateWithInvalidParent(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	stderr := c.MustFail("create", "Child ticket", "--parent", "nonexistent")
+	cli.AssertContains(t, stderr, "parent not found")
+}
+
+func TestCreateWithClosedParent(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	c.MustRun("start", parentID)
+	c.MustRun("close", parentID)
+
+	stderr := c.MustFail("create", "Child ticket", "--parent", parentID)
+	cli.AssertContains(t, stderr, "parent ticket is closed")
+}
+
+func TestCreateWithEmptyParent(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	stderr := c.MustFail("create", "Test", "--parent", "")
+	cli.AssertContains(t, stderr, "empty value not allowed: --parent")
+}
+
+func TestCreateOmitsParentIfNotProvided(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	id := c.MustRun("create", "Test")
+	content := c.ReadTicket(id)
+
+	cli.AssertNotContains(t, content, "parent:")
 }

@@ -2550,6 +2550,7 @@ func Test_Chaos_Same_Seed_Produces_Identical_Error_Types(t *testing.T) {
 		}
 
 		var errno syscall.Errno
+
 		ok := errors.As(pathErr.Err, &errno)
 		if !ok {
 			t.Fatalf("expected syscall.Errno, got %T", pathErr.Err)

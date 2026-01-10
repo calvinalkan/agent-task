@@ -22,6 +22,7 @@ type Ticket struct {
 	ID            string
 	Status        string
 	BlockedBy     []string
+	Parent        string
 	Created       time.Time
 	Type          string
 	Priority      int
@@ -151,6 +152,11 @@ func FormatTicket(ticket *Ticket) string {
 	builder.WriteString("id: " + ticket.ID + "\n")
 	builder.WriteString("status: " + ticket.Status + "\n")
 	builder.WriteString("blocked-by: " + formatBlockedBy(ticket.BlockedBy) + "\n")
+
+	if ticket.Parent != "" {
+		builder.WriteString("parent: " + ticket.Parent + "\n")
+	}
+
 	builder.WriteString("created: " + ticket.Created.UTC().Format(time.RFC3339) + "\n")
 	builder.WriteString("type: " + ticket.Type + "\n")
 	builder.WriteString(fmt.Sprintf("priority: %d\n", ticket.Priority))
@@ -526,6 +532,7 @@ type Summary struct {
 	ID            string
 	Status        string
 	BlockedBy     []string
+	Parent        string // empty if no parent
 	Created       string // Keep as string for simplicity
 	Type          string
 	Priority      int
@@ -571,11 +578,13 @@ func IsValidTicketType(ticketType string) bool {
 
 // ListTicketsOptions configures ListTickets behavior.
 type ListTicketsOptions struct {
-	Status   string // filter by status ("" = all)
-	Priority int    // filter by priority (0 = all)
-	Type     string // filter by type ("" = all)
-	Limit    int    // max tickets to return (0 = no limit)
-	Offset   int    // skip first N matching tickets
+	Status    string // filter by status ("" = all)
+	Priority  int    // filter by priority (0 = all)
+	Type      string // filter by type ("" = all)
+	Parent    string // filter by parent ID ("" = all)
+	RootsOnly bool   // only tickets without parent
+	Limit     int    // max tickets to return (0 = no limit)
+	Offset    int    // skip first N matching tickets
 }
 
 // ListTickets reads all ticket files from a directory and returns parsed summaries.
@@ -668,7 +677,15 @@ func ListTickets(ticketDir string, opts ListTicketsOptions, diagOut io.Writer) (
 		typeFilter = int(typeStringToByte(opts.Type))
 	}
 
-	indexes := cache.FilterEntries(statusFilter, priorityFilter, typeFilter, opts.Limit, opts.Offset)
+	indexes := cache.FilterEntriesWithOpts(FilterEntriesOpts{
+		Status:    statusFilter,
+		Priority:  priorityFilter,
+		Type:      typeFilter,
+		Parent:    opts.Parent,
+		RootsOnly: opts.RootsOnly,
+		Limit:     opts.Limit,
+		Offset:    opts.Offset,
+	})
 	if indexes == nil {
 		return nil, errOffsetOutOfBounds
 	}
@@ -743,6 +760,14 @@ func ticketSummaryMatches(summary *Summary, opts ListTicketsOptions) bool {
 	}
 
 	if opts.Type != "" && summary.Type != opts.Type {
+		return false
+	}
+
+	if opts.Parent != "" && summary.Parent != opts.Parent {
+		return false
+	}
+
+	if opts.RootsOnly && summary.Parent != "" {
 		return false
 	}
 
@@ -1134,6 +1159,13 @@ func ParseTicketFrontmatter(path string) (Summary, error) {
 
 					summary.BlockedBy = blockedBy
 
+				case "parent":
+					if value == "" {
+						return Summary{}, fmt.Errorf("%w: parent (empty)", errInvalidFieldValue)
+					}
+
+					summary.Parent = value
+
 				case "assignee":
 					if value == "" {
 						return Summary{}, fmt.Errorf("%w: assignee (empty)", errInvalidFieldValue)
@@ -1305,6 +1337,104 @@ func ReadTicketBlockedBy(path string) ([]string, error) {
 	}
 
 	return GetBlockedByFromContent(content)
+}
+
+// GetParentFromContent extracts the parent field from ticket content.
+func GetParentFromContent(content []byte) string {
+	lines := strings.Split(string(content), "\n")
+	inFrontmatter := false
+
+	for _, line := range lines {
+		if line == frontmatterDelimiter {
+			if inFrontmatter {
+				break // End of frontmatter
+			}
+
+			inFrontmatter = true
+
+			continue
+		}
+
+		if inFrontmatter && strings.HasPrefix(line, "parent: ") {
+			return strings.TrimPrefix(line, "parent: ")
+		}
+	}
+
+	return ""
+}
+
+// ReadTicketParent reads the parent field from a ticket file.
+func ReadTicketParent(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading ticket: %w", err)
+	}
+
+	return GetParentFromContent(content), nil
+}
+
+// FindChildren returns IDs of all tickets that have the given ticket as parent.
+func FindChildren(ticketDir, parentID string) ([]string, error) {
+	entries, err := os.ReadDir(ticketDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("reading ticket directory: %w", err)
+	}
+
+	var children []string
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+
+		path := filepath.Join(ticketDir, name)
+
+		parent, err := ReadTicketParent(path)
+		if err != nil {
+			continue // Skip files we can't read
+		}
+
+		if parent == parentID {
+			ticketID := strings.TrimSuffix(name, ".md")
+			children = append(children, ticketID)
+		}
+	}
+
+	return children, nil
+}
+
+// FindOpenChildren returns IDs of children that are not closed.
+func FindOpenChildren(ticketDir, parentID string) ([]string, error) {
+	children, err := FindChildren(ticketDir, parentID)
+	if err != nil {
+		return nil, err
+	}
+
+	var openChildren []string
+
+	for _, childID := range children {
+		path := Path(ticketDir, childID)
+
+		status, err := ReadTicketStatus(path)
+		if err != nil {
+			continue // Skip files we can't read
+		}
+
+		if status != StatusClosed {
+			openChildren = append(openChildren, childID)
+		}
+	}
+
+	return openChildren, nil
 }
 
 // UpdateBlockedByInContent updates the blocked-by field in ticket content.

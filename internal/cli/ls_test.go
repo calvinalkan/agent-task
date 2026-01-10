@@ -1367,3 +1367,339 @@ func TestLsBitmapStaleStatusChangedNowMatches(t *testing.T) {
 	cli.AssertNotContains(t, stdout, "b-002")
 	cli.AssertNotContains(t, stdout, "a-001")
 }
+
+func TestLsParentFilter(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	child1ID := c.MustRun("create", "Child 1", "--parent", parentID)
+	child2ID := c.MustRun("create", "Child 2", "--parent", parentID)
+	standaloneID := c.MustRun("create", "Standalone")
+
+	stdout := c.MustRun("ls", "--parent", parentID)
+
+	cli.AssertTicketListed(t, stdout, child1ID)
+	cli.AssertTicketListed(t, stdout, child2ID)
+	cli.AssertTicketNotListed(t, stdout, parentID)
+	cli.AssertTicketNotListed(t, stdout, standaloneID)
+}
+
+func TestLsRootsFilter(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child", "--parent", parentID)
+	standaloneID := c.MustRun("create", "Standalone")
+
+	stdout := c.MustRun("ls", "--roots")
+
+	cli.AssertTicketListed(t, stdout, parentID)
+	cli.AssertTicketListed(t, stdout, standaloneID)
+	cli.AssertTicketNotListed(t, stdout, childID)
+}
+
+func TestLsParentAndRootsConflict(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	c.MustRun("create", "Some ticket")
+
+	stderr := c.MustFail("ls", "--parent", "abc", "--roots")
+	cli.AssertContains(t, stderr, "--parent and --roots cannot be used together")
+}
+
+func TestLsShowsParentInOutput(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket")
+	childID := c.MustRun("create", "Child ticket", "--parent", parentID)
+
+	stdout := c.MustRun("ls")
+
+	// Child should show parent
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, childID) {
+			cli.AssertContains(t, line, "(parent: "+parentID+")")
+		}
+
+		if strings.Contains(line, parentID) && !strings.Contains(line, childID) {
+			cli.AssertNotContains(t, line, "(parent:")
+		}
+	}
+}
+
+func TestLsParentFilterWithOtherFilters(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	parentID := c.MustRun("create", "Parent ticket", "-t", "epic")
+	child1ID := c.MustRun("create", "Bug child", "--parent", parentID, "-t", "bug")
+	child2ID := c.MustRun("create", "Feature child", "--parent", parentID, "-t", "feature")
+
+	// Filter by parent AND type
+	stdout := c.MustRun("ls", "--parent", parentID, "--type", "bug")
+
+	cli.AssertTicketListed(t, stdout, child1ID)
+	cli.AssertTicketNotListed(t, stdout, child2ID)
+	cli.AssertTicketNotListed(t, stdout, parentID)
+}
+
+func TestLsRootsWithStatusFilter(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	openRootID := c.MustRun("create", "Open root")
+	closedRootID := c.MustRun("create", "Closed root")
+	c.MustRun("start", closedRootID)
+	c.MustRun("close", closedRootID)
+	childID := c.MustRun("create", "Child of open", "--parent", openRootID)
+
+	// Roots + status=open
+	stdout := c.MustRun("ls", "--roots", "--status", "open")
+	cli.AssertTicketListed(t, stdout, openRootID)
+	cli.AssertTicketNotListed(t, stdout, closedRootID)
+	cli.AssertTicketNotListed(t, stdout, childID)
+
+	// Roots + status=closed
+	stdout = c.MustRun("ls", "--roots", "--status", "closed")
+	cli.AssertTicketListed(t, stdout, closedRootID)
+	cli.AssertTicketNotListed(t, stdout, openRootID)
+}
+
+func TestLsHelpShowsParentAndRootsFlags(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	stdout := c.MustRun("ls", "--help")
+
+	cli.AssertContains(t, stdout, "--parent")
+	cli.AssertContains(t, stdout, "--roots")
+}
+
+func TestLsCacheRegenAfterVersionChange(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	// Create parent and children
+	parentID := c.MustRun("create", "Parent ticket", "-t", "epic")
+	child1ID := c.MustRun("create", "Child 1", "--parent", parentID)
+	child2ID := c.MustRun("create", "Child 2", "--parent", parentID)
+	standaloneID := c.MustRun("create", "Standalone")
+
+	// Use ls to ensure cache is built
+	c.MustRun("ls")
+
+	// Delete the cache to force regeneration
+	cachePath := filepath.Join(c.TicketDir(), ".cache")
+
+	err := os.Remove(cachePath)
+	if err != nil {
+		t.Fatalf("failed to remove cache: %v", err)
+	}
+
+	// ls --parent should still work (cache regenerates)
+	stdout := c.MustRun("ls", "--parent", parentID)
+	cli.AssertTicketListed(t, stdout, child1ID)
+	cli.AssertTicketListed(t, stdout, child2ID)
+	cli.AssertTicketNotListed(t, stdout, parentID)
+	cli.AssertTicketNotListed(t, stdout, standaloneID)
+
+	// ls --roots should work
+	stdout = c.MustRun("ls", "--roots")
+	cli.AssertTicketListed(t, stdout, parentID)
+	cli.AssertTicketListed(t, stdout, standaloneID)
+	cli.AssertTicketNotListed(t, stdout, child1ID)
+	cli.AssertTicketNotListed(t, stdout, child2ID)
+}
+
+func TestLsParentFilterUsesIndex(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	// Create hierarchy
+	parentID := c.MustRun("create", "Parent")
+	childID := c.MustRun("create", "Child", "--parent", parentID)
+	c.MustRun("create", "Standalone")
+
+	// First run builds cache
+	stdout1 := c.MustRun("ls", "--parent", parentID)
+	cli.AssertTicketListed(t, stdout1, childID)
+
+	// Second run uses cached index
+	stdout2 := c.MustRun("ls", "--parent", parentID)
+
+	if stdout1 != stdout2 {
+		t.Errorf("output differs:\nfirst: %q\nsecond: %q", stdout1, stdout2)
+	}
+}
+
+func TestLsRootsFilterUsesIndex(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	parentID := c.MustRun("create", "Parent")
+	c.MustRun("create", "Child", "--parent", parentID)
+
+	// First run builds cache
+	stdout1 := c.MustRun("ls", "--roots")
+	cli.AssertTicketListed(t, stdout1, parentID)
+
+	// Second run uses cached index
+	stdout2 := c.MustRun("ls", "--roots")
+
+	if stdout1 != stdout2 {
+		t.Errorf("output differs:\nfirst: %q\nsecond: %q", stdout1, stdout2)
+	}
+}
+
+func TestLsParentWithStatusFilter(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	parentID := c.MustRun("create", "Parent", "-t", "epic")
+	openChildID := c.MustRun("create", "Open child", "--parent", parentID)
+	closedChildID := c.MustRun("create", "Closed child", "--parent", parentID)
+
+	// Start parent and close one child
+	c.MustRun("start", parentID)
+	c.MustRun("start", closedChildID)
+	c.MustRun("close", closedChildID)
+
+	// Filter by parent AND status=open
+	stdout := c.MustRun("ls", "--parent", parentID, "--status", "open")
+	cli.AssertTicketListed(t, stdout, openChildID)
+	cli.AssertTicketNotListed(t, stdout, closedChildID)
+
+	// Filter by parent AND status=closed
+	stdout = c.MustRun("ls", "--parent", parentID, "--status", "closed")
+	cli.AssertTicketListed(t, stdout, closedChildID)
+	cli.AssertTicketNotListed(t, stdout, openChildID)
+}
+
+func TestLsParentWithPriorityFilter(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	parentID := c.MustRun("create", "Parent", "-t", "epic")
+	p1ChildID := c.MustRun("create", "P1 child", "--parent", parentID, "-p", "1")
+	p3ChildID := c.MustRun("create", "P3 child", "--parent", parentID, "-p", "3")
+
+	// Filter by parent AND priority=1
+	stdout := c.MustRun("ls", "--parent", parentID, "--priority", "1")
+	cli.AssertTicketListed(t, stdout, p1ChildID)
+	cli.AssertTicketNotListed(t, stdout, p3ChildID)
+}
+
+func TestLsParentWithTypeFilter(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	parentID := c.MustRun("create", "Parent", "-t", "epic")
+	bugChildID := c.MustRun("create", "Bug child", "--parent", parentID, "-t", "bug")
+	featureChildID := c.MustRun("create", "Feature child", "--parent", parentID, "-t", "feature")
+
+	// Filter by parent AND type=bug
+	stdout := c.MustRun("ls", "--parent", parentID, "--type", "bug")
+	cli.AssertTicketListed(t, stdout, bugChildID)
+	cli.AssertTicketNotListed(t, stdout, featureChildID)
+}
+
+func TestLsRootsWithPriorityFilter(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	p1RootID := c.MustRun("create", "P1 root", "-p", "1")
+	p4RootID := c.MustRun("create", "P4 root", "-p", "4")
+	childID := c.MustRun("create", "Child", "--parent", p1RootID, "-p", "1")
+
+	// Roots + priority=1
+	stdout := c.MustRun("ls", "--roots", "--priority", "1")
+	cli.AssertTicketListed(t, stdout, p1RootID)
+	cli.AssertTicketNotListed(t, stdout, p4RootID)
+	cli.AssertTicketNotListed(t, stdout, childID)
+}
+
+func TestLsRootsWithTypeFilter(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	epicRootID := c.MustRun("create", "Epic root", "-t", "epic")
+	bugRootID := c.MustRun("create", "Bug root", "-t", "bug")
+	childID := c.MustRun("create", "Child", "--parent", epicRootID, "-t", "task")
+
+	// Roots + type=epic
+	stdout := c.MustRun("ls", "--roots", "--type", "epic")
+	cli.AssertTicketListed(t, stdout, epicRootID)
+	cli.AssertTicketNotListed(t, stdout, bugRootID)
+	cli.AssertTicketNotListed(t, stdout, childID)
+}
+
+func TestLsParentWithMultipleFilters(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	parentID := c.MustRun("create", "Parent", "-t", "epic")
+	matchID := c.MustRun("create", "Match", "--parent", parentID, "-t", "bug", "-p", "1")
+	wrongTypeID := c.MustRun("create", "Wrong type", "--parent", parentID, "-t", "feature", "-p", "1")
+	wrongPrioID := c.MustRun("create", "Wrong prio", "--parent", parentID, "-t", "bug", "-p", "4")
+
+	// Filter by parent + type + priority
+	stdout := c.MustRun("ls", "--parent", parentID, "--type", "bug", "--priority", "1")
+	cli.AssertTicketListed(t, stdout, matchID)
+	cli.AssertTicketNotListed(t, stdout, wrongTypeID)
+	cli.AssertTicketNotListed(t, stdout, wrongPrioID)
+}
+
+func TestLsRootsWithMultipleFilters(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	matchID := c.MustRun("create", "Match", "-t", "bug", "-p", "1")
+	wrongTypeID := c.MustRun("create", "Wrong type", "-t", "epic", "-p", "1")
+	wrongPrioID := c.MustRun("create", "Wrong prio", "-t", "bug", "-p", "4")
+	childID := c.MustRun("create", "Child", "--parent", matchID, "-t", "bug", "-p", "1")
+
+	// Roots + type + priority
+	stdout := c.MustRun("ls", "--roots", "--type", "bug", "--priority", "1")
+	cli.AssertTicketListed(t, stdout, matchID)
+	cli.AssertTicketNotListed(t, stdout, wrongTypeID)
+	cli.AssertTicketNotListed(t, stdout, wrongPrioID)
+	cli.AssertTicketNotListed(t, stdout, childID)
+}
+
+func TestLsParentWithLimitOffset(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+
+	parentID := c.MustRun("create", "Parent")
+	child1 := c.MustRun("create", "Child 1", "--parent", parentID)
+	child2 := c.MustRun("create", "Child 2", "--parent", parentID)
+	child3 := c.MustRun("create", "Child 3", "--parent", parentID)
+
+	// Limit=2
+	stdout := c.MustRun("ls", "--parent", parentID, "--limit", "2")
+	cli.AssertTicketListed(t, stdout, child1)
+	cli.AssertTicketListed(t, stdout, child2)
+	cli.AssertTicketNotListed(t, stdout, child3)
+
+	// Offset=1, Limit=1
+	stdout = c.MustRun("ls", "--parent", parentID, "--offset", "1", "--limit", "1")
+	cli.AssertTicketNotListed(t, stdout, child1)
+	cli.AssertTicketListed(t, stdout, child2)
+	cli.AssertTicketNotListed(t, stdout, child3)
+}

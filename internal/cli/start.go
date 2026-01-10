@@ -15,7 +15,11 @@ func StartCmd(cfg ticket.Config) *Command {
 		Flags: flag.NewFlagSet("start", flag.ContinueOnError),
 		Usage: "start <id>",
 		Short: "Set status to in_progress",
-		Long:  "Set ticket status to in_progress. Only works on open tickets.",
+		Long: `Set ticket status to in_progress.
+
+Requirements:
+  - Ticket must be open
+  - Parent ticket must be started first (if any)`,
 		Exec: func(_ context.Context, io *IO, args []string) error {
 			return execStart(io, cfg, args)
 		},
@@ -34,6 +38,25 @@ func execStart(io *IO, cfg ticket.Config, args []string) error {
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
+
+	// Check parent constraints before acquiring lock
+	parentID, parentErr := ticket.ReadTicketParent(path)
+	if parentErr != nil {
+		return fmt.Errorf("reading parent: %w", parentErr)
+	}
+
+	if parentID != "" {
+		parentPath := ticket.Path(cfg.TicketDirAbs, parentID)
+
+		parentStatus, statusErr := ticket.ReadTicketStatus(parentPath)
+		if statusErr != nil {
+			return fmt.Errorf("reading parent status: %w", statusErr)
+		}
+
+		if parentStatus == ticket.StatusOpen {
+			return fmt.Errorf("%w: %s", ticket.ErrParentNotStarted, parentID)
+		}
+	}
 
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		status, statusErr := ticket.GetStatusFromContent(content)

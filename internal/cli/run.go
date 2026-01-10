@@ -148,7 +148,7 @@ func allCommands(cfg ticket.Config, env map[string]string) []*Command {
 		UnblockCmd(cfg),
 		ReadyCmd(cfg),
 		RepairCmd(cfg),
-		EditorCmd(cfg, env),
+		EditCmd(cfg, env),
 		PrintConfigCmd(cfg),
 	}
 }

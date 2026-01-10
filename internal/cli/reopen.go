@@ -15,7 +15,11 @@ func ReopenCmd(cfg ticket.Config) *Command {
 		Flags: flag.NewFlagSet("reopen", flag.ContinueOnError),
 		Usage: "reopen <id>",
 		Short: "Set status to open",
-		Long:  "Set ticket status back to open. Only works on closed tickets.",
+		Long: `Set ticket status back to open.
+
+Requirements:
+  - Ticket must be closed
+  - Parent ticket must not be closed (reopen parent first)`,
 		Exec: func(_ context.Context, io *IO, args []string) error {
 			return execReopen(io, cfg, args)
 		},
@@ -34,6 +38,25 @@ func execReopen(io *IO, cfg ticket.Config, args []string) error {
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
+
+	// Check parent constraints before acquiring lock
+	parentID, parentErr := ticket.ReadTicketParent(path)
+	if parentErr != nil {
+		return fmt.Errorf("reading parent: %w", parentErr)
+	}
+
+	if parentID != "" {
+		parentPath := ticket.Path(cfg.TicketDirAbs, parentID)
+
+		parentStatus, statusErr := ticket.ReadTicketStatus(parentPath)
+		if statusErr != nil {
+			return fmt.Errorf("reading parent status: %w", statusErr)
+		}
+
+		if parentStatus == ticket.StatusClosed {
+			return fmt.Errorf("%w: %s", ticket.ErrParentClosed, parentID)
+		}
+	}
 
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		status, statusErr := ticket.GetStatusFromContent(content)
