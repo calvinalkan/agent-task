@@ -9,65 +9,8 @@ import (
 	"time"
 
 	"github.com/calvinalkan/agent-task/internal/cli"
-
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
-
-func loadCachedSummary(t *testing.T, ticketDir, filename string) ticket.Summary {
-	t.Helper()
-
-	cache, err := ticket.LoadBinaryCache(ticketDir)
-	if err != nil {
-		t.Fatalf("LoadBinaryCache failed: %v", err)
-	}
-
-	defer func() { _ = cache.Close() }()
-
-	entry := cache.Lookup(filename)
-	if entry == nil {
-		t.Fatalf("cache lookup returned nil for %s", filename)
-	}
-
-	return entry.Summary
-}
-
-func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, ticketType string, priority int, blockedBy []string) {
-	t.Helper()
-
-	blockedByStr := "[]"
-	if len(blockedBy) > 0 {
-		blockedByStr = "[" + strings.Join(blockedBy, ", ") + "]"
-	}
-
-	closedLine := ""
-	if status == ticket.StatusClosed {
-		closedLine = "closed: " + time.Now().UTC().Format(time.RFC3339) + "\n"
-	}
-
-	content := "---\n" +
-		"schema_version: 1\n" +
-		"id: " + ticketID + "\n" +
-		"status: " + status + "\n" +
-		"blocked-by: " + blockedByStr + "\n" +
-		"created: 2026-01-04T00:00:00Z\n" +
-		"type: " + ticketType + "\n" +
-		"priority: " + string(rune('0'+priority)) + "\n" +
-		closedLine +
-		"---\n" +
-		"# " + title + "\n"
-
-	err := os.MkdirAll(ticketDir, 0o750)
-	if err != nil {
-		t.Fatalf("failed to create ticket dir: %v", err)
-	}
-
-	path := filepath.Join(ticketDir, ticketID+".md")
-
-	err = os.WriteFile(path, []byte(content), 0o600)
-	if err != nil {
-		t.Fatalf("failed to create test ticket: %v", err)
-	}
-}
 
 func TestWriteThroughCacheCreateStartCloseReopen(t *testing.T) {
 	t.Parallel()
@@ -150,7 +93,7 @@ func TestWriteThroughCacheRepairUpdatesEntry(t *testing.T) {
 	createTestTicketFull(t, ticketDir, "a-001", ticket.StatusOpen, "A", "task", 2, []string{"missing-123"})
 
 	// Build cache once
-	_, err = ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, nil)
+	_, err = ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,19 +117,14 @@ func TestConcurrentWritesDoNotCorruptCache(t *testing.T) {
 	th.MustRun("start", id2)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
 
-	go func() {
-		defer wg.Done()
-
+	wg.Go(func() {
 		th.Run("close", id1)
-	}()
+	})
 
-	go func() {
-		defer wg.Done()
-
+	wg.Go(func() {
 		th.Run("close", id2)
-	}()
+	})
 
 	wg.Wait()
 
@@ -199,5 +137,61 @@ func TestConcurrentWritesDoNotCorruptCache(t *testing.T) {
 
 	if got, want := s2.Status, ticket.StatusClosed; got != want {
 		t.Fatalf("ticket2 status=%q, want=%q", got, want)
+	}
+}
+
+func loadCachedSummary(t *testing.T, ticketDir, filename string) ticket.Summary {
+	t.Helper()
+
+	cache, err := ticket.LoadBinaryCache(ticketDir)
+	if err != nil {
+		t.Fatalf("LoadBinaryCache failed: %v", err)
+	}
+
+	defer func() { _ = cache.Close() }()
+
+	entry := cache.Lookup(filename)
+	if entry == nil {
+		t.Fatalf("cache lookup returned nil for %s", filename)
+	}
+
+	return entry.Summary
+}
+
+func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, ticketType string, priority int, blockedBy []string) {
+	t.Helper()
+
+	blockedByStr := "[]"
+	if len(blockedBy) > 0 {
+		blockedByStr = "[" + strings.Join(blockedBy, ", ") + "]"
+	}
+
+	closedLine := ""
+	if status == ticket.StatusClosed {
+		closedLine = "closed: " + time.Now().UTC().Format(time.RFC3339) + "\n"
+	}
+
+	content := "---\n" +
+		"schema_version: 1\n" +
+		"id: " + ticketID + "\n" +
+		"status: " + status + "\n" +
+		"blocked-by: " + blockedByStr + "\n" +
+		"created: 2026-01-04T00:00:00Z\n" +
+		"type: " + ticketType + "\n" +
+		"priority: " + string(rune('0'+priority)) + "\n" +
+		closedLine +
+		"---\n" +
+		"# " + title + "\n"
+
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatalf("failed to create ticket dir: %v", err)
+	}
+
+	path := filepath.Join(ticketDir, ticketID+".md")
+
+	err = os.WriteFile(path, []byte(content), 0o600)
+	if err != nil {
+		t.Fatalf("failed to create test ticket: %v", err)
 	}
 }

@@ -12,7 +12,7 @@ import (
 )
 
 // BlockCmd returns the block command.
-func BlockCmd(cfg ticket.Config) *Command {
+func BlockCmd(cfg *ticket.Config) *Command {
 	return &Command{
 		Flags: flag.NewFlagSet("block", flag.ContinueOnError),
 		Usage: "block <id> <blocker>",
@@ -24,7 +24,7 @@ func BlockCmd(cfg ticket.Config) *Command {
 	}
 }
 
-func execBlock(io *IO, cfg ticket.Config, args []string) error {
+func execBlock(io *IO, cfg *ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
@@ -65,17 +65,17 @@ func execBlock(io *IO, cfg ticket.Config, args []string) error {
 		return ticket.UpdateBlockedByInContent(content, blockedBy)
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("update ticket: %w", err)
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		return parseErr
+		return fmt.Errorf("parse frontmatter: %w", parseErr)
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
-		return cacheErr
+		return fmt.Errorf("update cache: %w", cacheErr)
 	}
 
 	io.Println("Blocked", ticketID, "by", blockerID)

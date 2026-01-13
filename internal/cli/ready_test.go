@@ -76,8 +76,10 @@ func TestReadyJSONWithTickets(t *testing.T) {
 		t.Errorf("id=%v, want=%v", got, want)
 	}
 
-	if got, want := ticket["priority"].(float64), float64(1); got != want {
-		t.Errorf("priority=%v, want=%v", got, want)
+	if priority, ok := ticket["priority"].(float64); !ok {
+		t.Errorf("priority should be float64, got %T", ticket["priority"])
+	} else if priority != float64(1) {
+		t.Errorf("priority=%v, want=%v", priority, float64(1))
 	}
 
 	if got, want := ticket["status"], "open"; got != want {
@@ -156,8 +158,10 @@ func TestReadyLimitJSON(t *testing.T) {
 		t.Fatalf("got %d tickets, want %d", got, want)
 	}
 
-	if got, want := tickets[0]["priority"].(float64), float64(1); got != want {
-		t.Errorf("priority=%v, want=%v (should be highest priority)", got, want)
+	if priority, ok := tickets[0]["priority"].(float64); !ok {
+		t.Errorf("priority should be float64, got %T", tickets[0]["priority"])
+	} else if priority != float64(1) {
+		t.Errorf("priority=%v, want=%v (should be highest priority)", priority, float64(1))
 	}
 }
 

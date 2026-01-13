@@ -11,7 +11,7 @@ import (
 )
 
 // UnblockCmd returns the unblock command.
-func UnblockCmd(cfg ticket.Config) *Command {
+func UnblockCmd(cfg *ticket.Config) *Command {
 	return &Command{
 		Flags: flag.NewFlagSet("unblock", flag.ContinueOnError),
 		Usage: "unblock <id> <blocker>",
@@ -23,7 +23,7 @@ func UnblockCmd(cfg ticket.Config) *Command {
 	}
 }
 
-func execUnblock(io *IO, cfg ticket.Config, args []string) error {
+func execUnblock(io *IO, cfg *ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
@@ -57,17 +57,17 @@ func execUnblock(io *IO, cfg ticket.Config, args []string) error {
 		return ticket.UpdateBlockedByInContent(content, blockedBy)
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("update ticket: %w", err)
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		return parseErr
+		return fmt.Errorf("parse frontmatter: %w", parseErr)
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
-		return cacheErr
+		return fmt.Errorf("update cache: %w", cacheErr)
 	}
 
 	io.Println("Unblocked", ticketID, "from", blockerID)

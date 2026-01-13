@@ -22,7 +22,7 @@ var (
 )
 
 // CreateCmd returns the create command.
-func CreateCmd(cfg ticket.Config) *Command {
+func CreateCmd(cfg *ticket.Config) *Command {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	fs.StringP("description", "d", "", "Description text")
 	fs.String("design", "", "Design notes")
@@ -46,7 +46,7 @@ If --parent is specified, the parent ticket must exist and not be closed.`,
 	}
 }
 
-func execCreate(io *IO, cfg ticket.Config, fs *flag.FlagSet, args []string) error {
+func execCreate(io *IO, cfg *ticket.Config, fs *flag.FlagSet, args []string) error {
 	title := ""
 	if len(args) > 0 {
 		title = args[0]
@@ -126,17 +126,17 @@ func execCreate(io *IO, cfg ticket.Config, fs *flag.FlagSet, args []string) erro
 
 	ticketID, ticketPath, writeErr := ticket.WriteTicketAtomic(cfg.TicketDirAbs, &tkt)
 	if writeErr != nil {
-		return writeErr
+		return fmt.Errorf("write ticket: %w", writeErr)
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(ticketPath)
 	if parseErr != nil {
-		return parseErr
+		return fmt.Errorf("parse frontmatter: %w", parseErr)
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
-		return cacheErr
+		return fmt.Errorf("update cache: %w", cacheErr)
 	}
 
 	io.Println(ticketID)

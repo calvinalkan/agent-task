@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"strconv"
 	"strings"
@@ -33,7 +33,7 @@ type ChaosConfig struct {
 	// PartialReadRate controls how often reads return incomplete data.
 	// For FS.ReadFile: returns a truncated prefix of the file contents along
 	// with an EIO error, simulating a read that fails partway through.
-	// For File.Read: returns a short read (n < len(p), err==nil) by limiting
+	// For File.Read: returns a short read (n < len(data), err==nil) by limiting
 	// the underlying read size. This is valid io.Reader behavior, not an error,
 	// and tests that callers correctly loop until EOF.
 	PartialReadRate float64
@@ -71,6 +71,10 @@ type ChaosConfig struct {
 	// underlying file descriptor is always closed (to avoid leaks) even when
 	// an error is returned. Returns EIO.
 	CloseFailRate float64
+
+	// ChmodFailRate controls how often File.Chmod fails on an open file
+	// handle, returning EACCES, EPERM, EIO, or EROFS.
+	ChmodFailRate float64
 
 	// OpenFailRate controls how often FS.Open, FS.Create, and FS.OpenFile fail
 	// to open a file. For read-only opens: EACCES, EIO, EMFILE, ENFILE, ENOTDIR.
@@ -111,22 +115,6 @@ type ChaosConfig struct {
 	TraceCapacity int
 }
 
-// NewChaos creates a new [Chaos] filesystem wrapping the given [FS].
-// The seed controls random fault injection for reproducibility.
-// Panics if fs is nil.
-func NewChaos(fs FS, seed int64, config ChaosConfig) *Chaos {
-	if fs == nil {
-		panic("fs is nil")
-	}
-
-	return &Chaos{
-		fs:     fs,
-		rng:    rand.New(rand.NewSource(seed)),
-		config: config,
-		trace:  newChaosTrace(config.TraceCapacity),
-	}
-}
-
 // ChaosMode controls how [Chaos] behaves.
 type ChaosMode uint8
 
@@ -156,6 +144,7 @@ type ChaosStats struct {
 	SeekFails       int64
 	SyncFails       int64
 	CloseFails      int64
+	ChmodFails      int64
 }
 
 // chaosError marks an error as intentionally injected by [Chaos].
@@ -167,7 +156,7 @@ type ChaosStats struct {
 // keep working via unwrapping, while [IsChaosErr] can still distinguish chaos vs
 // real OS errors in tests.
 //
-// All methods panic if the receiver or Err is nil.
+// Error panics if receiver or Err is nil. Unwrap panics if receiver is nil.
 type chaosError struct {
 	Err error
 }
@@ -224,7 +213,7 @@ func IsChaosErr(err error) bool {
 //   - File.Sync injected failures return a non-nil error.
 //   - File.Close injected failures still close the underlying file to avoid
 //     descriptor leaks in tests.
-//   - Chaos does not inject impossible anomalies like n>len(p) or "n==0 &&
+//   - Chaos does not inject impossible anomalies like n>len(data) or "n==0 &&
 //     err==nil" mid-write. EOF is not treated as an injected "failure"; it comes
 //     from the wrapped filesystem as bare io.EOF.
 //
@@ -267,6 +256,23 @@ type Chaos struct {
 	seekFails       atomic.Int64
 	syncFails       atomic.Int64
 	closeFails      atomic.Int64
+	chmodFails      atomic.Int64
+}
+
+// NewChaos creates a new [Chaos] filesystem wrapping the given [FS].
+// The seed controls random fault injection for reproducibility.
+// Panics if underlying is nil.
+func NewChaos(underlying FS, seed int64, config *ChaosConfig) *Chaos {
+	if underlying == nil {
+		panic("underlying fs is nil")
+	}
+
+	return &Chaos{
+		fs:     underlying,
+		rng:    rand.New(rand.NewPCG(uint64(seed), uint64(seed))),
+		config: *config,
+		trace:  newChaosTrace(config.TraceCapacity),
+	}
 }
 
 // SetMode updates [Chaos] behavior.
@@ -309,35 +315,40 @@ func (c *Chaos) Stats() ChaosStats {
 		SeekFails:       c.seekFails.Load(),
 		SyncFails:       c.syncFails.Load(),
 		CloseFails:      c.closeFails.Load(),
+		ChmodFails:      c.chmodFails.Load(),
 	}
 }
 
 // TotalFaults returns the total number of injected faults.
 func (c *Chaos) TotalFaults() int64 {
-	s := c.Stats()
+	stats := c.Stats()
 
-	return s.OpenFails + s.ReadFails + s.WriteFails + s.PartialReads +
-		s.PartialWrites + s.ReadDirFails + s.PartialReadDirs +
-		s.RemoveFails + s.RenameFails + s.StatFails + s.MkdirAllFails +
-		s.FileStatFails + s.SeekFails + s.SyncFails + s.CloseFails
+	return stats.OpenFails + stats.ReadFails + stats.WriteFails + stats.PartialReads +
+		stats.PartialWrites + stats.ReadDirFails + stats.PartialReadDirs +
+		stats.RemoveFails + stats.RenameFails + stats.StatFails + stats.MkdirAllFails +
+		stats.FileStatFails + stats.SeekFails + stats.SyncFails + stats.CloseFails +
+		stats.ChmodFails
 }
 
+// Open opens a file for reading with fault injection.
 func (c *Chaos) Open(path string) (File, error) {
-	return c.openWithChaos(path, "open", func() (File, error) {
+	return c.openWithChaos(path, chaosOpOpen, func() (File, error) {
 		return c.fs.Open(path)
 	})
 }
 
+// Create creates a file for writing with fault injection.
 func (c *Chaos) Create(path string) (File, error) {
-	return c.openWithChaos(path, "create", func() (File, error) {
+	return c.openWithChaos(path, chaosOpCreate, func() (File, error) {
 		return c.fs.Create(path)
 	})
 }
 
+// OpenFile opens a file with the specified flags and permissions with fault injection.
 func (c *Chaos) OpenFile(path string, flag int, perm os.FileMode) (File, error) {
-	op := "open"
+	op := chaosOpOpen
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_APPEND|os.O_CREATE|os.O_TRUNC) != 0 {
-		op = "create"
+		op = chaosOpCreate
 	}
 
 	return c.openWithChaos(path, op, func() (File, error) {
@@ -345,49 +356,9 @@ func (c *Chaos) OpenFile(path string, flag int, perm os.FileMode) (File, error) 
 	})
 }
 
-// openWithChaos wraps file-open operations with fault injection.
-// The op parameter controls which errno set is used (via pickError).
-// Returns the wrapped chaosFile on success, or an injected error.
-func (c *Chaos) openWithChaos(path, op string, openFn func() (File, error)) (File, error) {
-	mode := ChaosMode(c.mode.Load())
-	if mode == ChaosModeNoOp {
-		f, err := openFn()
-		if err != nil {
-			c.trace.add(op, path, "fail", err, false)
-
-			return nil, err
-		}
-
-		c.trace.add(op, path, "ok", nil, false)
-
-		return &chaosFile{f: f, chaos: c, path: path}, nil
-	}
-
-	if c.should(mode, c.config.OpenFailRate) {
-		errno := c.pickError(op)
-		c.openFails.Add(1)
-
-		err := pathError("open", path, errno)
-
-		c.trace.add(op, path, "fail", err, true, TraceAttr{"errno", errno.Error()})
-
-		return nil, err
-	}
-
-	f, err := openFn()
-	if err != nil {
-		c.trace.add(op, path, "fail", err, false)
-
-		return nil, err
-	}
-
-	c.trace.add(op, path, "ok", nil, false)
-
-	return &chaosFile{f: f, chaos: c, path: path}, nil
-}
-
+// ReadFile reads a file's contents with fault injection.
 func (c *Chaos) ReadFile(path string) ([]byte, error) {
-	mode := ChaosMode(c.mode.Load())
+	mode := c.getMode()
 	if mode == ChaosModeNoOp {
 		data, err := c.fs.ReadFile(path)
 
@@ -440,7 +411,7 @@ func (c *Chaos) ReadFile(path string) ([]byte, error) {
 // WriteFailRate and PartialWriteRate affect the write, CloseFailRate affects
 // the close.
 func (c *Chaos) WriteFile(path string, data []byte, perm os.FileMode) error {
-	f, err := c.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	file, err := c.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		c.trace.add("writefile", path, "fail", err, IsChaosErr(err),
 			TraceAttr{"phase", "open"})
@@ -448,33 +419,35 @@ func (c *Chaos) WriteFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 
-	n, err := f.Write(data)
+	written, err := file.Write(data)
 	if err != nil {
-		_ = f.Close() // best-effort close on write error
+		_ = file.Close() // best-effort close on write error
 
 		c.trace.add("writefile", path, "fail", err, IsChaosErr(err),
 			TraceAttr{"phase", "write"},
-			TraceAttr{"n", strconv.Itoa(n)},
+			TraceAttr{"n", strconv.Itoa(written)},
 			TraceAttr{"len", strconv.Itoa(len(data))})
 
 		return err
 	}
 
-	if err := f.Close(); err != nil {
-		c.trace.add("writefile", path, "fail", err, IsChaosErr(err),
+	closeErr := file.Close()
+	if closeErr != nil {
+		c.trace.add("writefile", path, "fail", closeErr, IsChaosErr(closeErr),
 			TraceAttr{"phase", "close"})
 
-		return err
+		return closeErr
 	}
 
 	c.trace.add("writefile", path, "ok", nil, false,
-		TraceAttr{"n", strconv.Itoa(n)})
+		TraceAttr{"n", strconv.Itoa(written)})
 
 	return nil
 }
 
+// ReadDir reads directory contents with fault injection.
 func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
-	mode := ChaosMode(c.mode.Load())
+	mode := c.getMode()
 	if mode == ChaosModeNoOp {
 		entries, err := c.fs.ReadDir(path)
 
@@ -522,6 +495,7 @@ func (c *Chaos) ReadDir(path string) ([]os.DirEntry, error) {
 	return entries, nil
 }
 
+// MkdirAll creates a directory and parents with fault injection.
 func (c *Chaos) MkdirAll(path string, perm os.FileMode) error {
 	err := c.introduceChaos(path, faultMkdirAll)
 	if err != nil {
@@ -536,6 +510,7 @@ func (c *Chaos) MkdirAll(path string, perm os.FileMode) error {
 	return err
 }
 
+// Stat returns file info with fault injection.
 func (c *Chaos) Stat(path string) (os.FileInfo, error) {
 	err := c.introduceChaos(path, faultStat)
 	if err != nil {
@@ -546,9 +521,14 @@ func (c *Chaos) Stat(path string) (os.FileInfo, error) {
 
 	c.trace.add("stat", path, boolKind(err == nil), err, false)
 
-	return info, err
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
 }
 
+// Exists checks file existence with fault injection.
 func (c *Chaos) Exists(path string) (bool, error) {
 	err := c.introduceChaos(path, faultStat)
 	if err != nil {
@@ -563,6 +543,7 @@ func (c *Chaos) Exists(path string) (bool, error) {
 	return exists, err
 }
 
+// Remove removes a file with fault injection.
 func (c *Chaos) Remove(path string) error {
 	err := c.introduceChaos(path, faultRemove)
 	if err != nil {
@@ -576,6 +557,7 @@ func (c *Chaos) Remove(path string) error {
 	return err
 }
 
+// RemoveAll removes a path and its contents with fault injection.
 func (c *Chaos) RemoveAll(path string) error {
 	err := c.introduceChaos(path, faultRemoveAll)
 	if err != nil {
@@ -589,8 +571,9 @@ func (c *Chaos) RemoveAll(path string) error {
 	return err
 }
 
+// Rename renames a file with fault injection.
 func (c *Chaos) Rename(oldpath, newpath string) error {
-	mode := ChaosMode(c.mode.Load())
+	mode := c.getMode()
 	if mode == ChaosModeNoOp {
 		err := c.fs.Rename(oldpath, newpath)
 
@@ -620,6 +603,63 @@ func (c *Chaos) Rename(oldpath, newpath string) error {
 	return err
 }
 
+// getMode returns the current ChaosMode safely.
+func (c *Chaos) getMode() ChaosMode {
+	v := c.mode.Load()
+	if v > uint32(ChaosModeNoOp) {
+		return ChaosModeActive
+	}
+
+	return ChaosMode(v)
+}
+
+// openWithChaos wraps file-open operations with fault injection.
+// The op parameter controls which errno set is used (via pickError).
+// Returns the wrapped chaosFile on success, or an injected error.
+func (c *Chaos) openWithChaos(path, op string, openFn func() (File, error)) (File, error) {
+	mode := c.getMode()
+	if mode == ChaosModeNoOp {
+		file, err := openFn()
+		if err != nil {
+			c.trace.add(op, path, "fail", err, false)
+
+			return nil, err
+		}
+
+		c.trace.add(op, path, "ok", nil, false)
+
+		return &chaosFile{f: file, chaos: c, path: path}, nil
+	}
+
+	if c.should(mode, c.config.OpenFailRate) {
+		errno := c.pickError(op)
+		c.openFails.Add(1)
+
+		err := pathError("open", path, errno)
+
+		c.trace.add(op, path, "fail", err, true, TraceAttr{"errno", errno.Error()})
+
+		return nil, err
+	}
+
+	file, err := openFn()
+	if err != nil {
+		c.trace.add(op, path, "fail", err, false)
+
+		return nil, err
+	}
+
+	c.trace.add(op, path, "ok", nil, false)
+
+	return &chaosFile{f: file, chaos: c, path: path}, nil
+}
+
+// chaosOp identifies operation names used in Chaos fault injection.
+const (
+	chaosOpOpen   = "open"
+	chaosOpCreate = "create"
+)
+
 // faultKind identifies a type of fault that can be injected.
 // The string value is used as the operation name in error messages.
 type faultKind string
@@ -636,9 +676,10 @@ const (
 type fileFaultKind string
 
 const (
-	fileFaultSeek fileFaultKind = "seek"
-	fileFaultStat fileFaultKind = "stat"
-	fileFaultSync fileFaultKind = "sync"
+	fileFaultSeek  fileFaultKind = "seek"
+	fileFaultStat  fileFaultKind = fileFaultKind(faultStat)
+	fileFaultSync  fileFaultKind = "sync"
+	fileFaultChmod fileFaultKind = "chmod"
 )
 
 // introduceChaos checks if a fault should be injected for the given operation.
@@ -651,7 +692,7 @@ const (
 //   - EINTR ("interrupted system call") is generally retried internally by the
 //     Go stdlib, so surfacing it is usually less os-like than surfacing EIO.
 func (c *Chaos) introduceChaos(path string, kind faultKind) error {
-	mode := ChaosMode(c.mode.Load())
+	mode := c.getMode()
 	if mode != ChaosModeActive {
 		return nil
 	}
@@ -670,17 +711,7 @@ func (c *Chaos) introduceChaos(path string, kind faultKind) error {
 		counter = &c.statFails
 		errnos = []syscall.Errno{syscall.EACCES, syscall.EIO}
 
-	case faultRemove:
-		// EACCES: permission denied (file/directory permissions or ACLs)
-		// EPERM: operation not permitted (policy/flags disallow the operation)
-		// EBUSY: resource/device busy (in use)
-		// EIO: I/O error (device/filesystem failure)
-		// EROFS: read-only filesystem (writes/mutations are rejected)
-		rate = c.config.RemoveFailRate
-		counter = &c.removeFails
-		errnos = []syscall.Errno{syscall.EACCES, syscall.EPERM, syscall.EBUSY, syscall.EIO, syscall.EROFS}
-
-	case faultRemoveAll:
+	case faultRemove, faultRemoveAll:
 		// EACCES: permission denied (file/directory permissions or ACLs)
 		// EPERM: operation not permitted (policy/flags disallow the operation)
 		// EBUSY: resource/device busy (in use)
@@ -740,7 +771,7 @@ func (c *Chaos) randFloat() float64 {
 // randIntn returns a random int in [0, n) (thread-safe).
 func (c *Chaos) randIntn(n int) int {
 	c.rngMu.Lock()
-	result := c.rng.Intn(n)
+	result := c.rng.IntN(n)
 	c.rngMu.Unlock()
 
 	return result
@@ -771,11 +802,11 @@ func (c *Chaos) pickRandom(errs []syscall.Errno) syscall.Errno {
 
 // pickReadFileError returns an injected error consistent with os.ReadFile:
 // the failure can be either an open-time error or a later read-time error.
-func (c *Chaos) pickReadFileError() (op string, errno syscall.Errno) {
+func (c *Chaos) pickReadFileError() (string, syscall.Errno) {
 	// Only include errors that keep os.Is* classification working and avoid
 	// injecting ENOENT (missing-path errors should come from the wrapped FS).
 	if c.randFloat() < 0.5 {
-		return "open", c.pickRandom([]syscall.Errno{
+		return chaosOpOpen, c.pickRandom([]syscall.Errno{
 			syscall.EACCES,
 			syscall.EMFILE,
 			syscall.ENFILE,
@@ -801,7 +832,7 @@ func (c *Chaos) pickReadFileError() (op string, errno syscall.Errno) {
 //   - fdclose: EIO only (avoid EACCES/ENOENT post-open)
 func (c *Chaos) pickError(op string) syscall.Errno {
 	switch op {
-	case "open":
+	case chaosOpOpen:
 		// EACCES: permission denied (file/directory permissions or ACLs)
 		// EIO: I/O error (device/filesystem failure)
 		// EMFILE: too many open files for this process (per-process FD limit)
@@ -815,7 +846,7 @@ func (c *Chaos) pickError(op string) syscall.Errno {
 			syscall.ENOTDIR,
 		})
 
-	case "create":
+	case chaosOpCreate:
 		// EACCES: permission denied (file/directory permissions or ACLs)
 		// EIO: I/O error (device/filesystem failure)
 		// ENOSPC: no space left on device
@@ -865,10 +896,6 @@ func (c *Chaos) pickError(op string) syscall.Errno {
 			syscall.EPERM,
 		})
 
-	case "fdread":
-		// EIO only: avoid EACCES/ENOENT post-open; match os.File.Read shape
-		return syscall.EIO
-
 	case "fdwrite":
 		// EIO: I/O error (device/filesystem failure)
 		// ENOSPC: no space left on device
@@ -882,11 +909,8 @@ func (c *Chaos) pickError(op string) syscall.Errno {
 			syscall.EROFS,
 		})
 
-	case "fdclose":
-		// EIO only: avoid EACCES/ENOENT post-open
-		return syscall.EIO
-
 	default:
+		// For fdread/fdclose: EIO only to avoid EACCES/ENOENT post-open; match os.File.Read shape
 		return syscall.EIO
 	}
 }
@@ -901,10 +925,10 @@ type chaosFile struct {
 // Interface compliance.
 var _ File = (*chaosFile)(nil)
 
-func (cf *chaosFile) Read(p []byte) (int, error) {
-	mode := ChaosMode(cf.chaos.mode.Load())
+func (cf *chaosFile) Read(buf []byte) (int, error) {
+	mode := cf.chaos.getMode()
 	if mode == ChaosModeNoOp {
-		n, err := cf.f.Read(p)
+		n, err := cf.f.Read(buf)
 
 		cf.chaos.trace.add("file.read", cf.path, boolKind(err == nil), err, false,
 			TraceAttr{"n", strconv.Itoa(n)})
@@ -926,22 +950,22 @@ func (cf *chaosFile) Read(p []byte) (int, error) {
 	// Partial read: return a short read WITHOUT skipping bytes.
 	// This must limit the underlying read, not just shrink the returned count,
 	// otherwise the file offset advances too far and callers silently lose data.
-	if cf.chaos.should(mode, cf.chaos.config.PartialReadRate) && len(p) > 1 {
+	if cf.chaos.should(mode, cf.chaos.config.PartialReadRate) && len(buf) > 1 {
 		cf.chaos.partialReads.Add(1)
-		cutoff := cf.chaos.randIntn(len(p)-1) + 1 // [1, len(p)-1]
+		cutoff := cf.chaos.randIntn(len(buf)-1) + 1 // [1, len(buf)-1]
 
-		n, err := cf.f.Read(p[:cutoff])
+		bytesRead, err := cf.f.Read(buf[:cutoff])
 
 		// Short read with nil error is valid io.Reader behavior
 		cf.chaos.trace.add("file.read", cf.path, "short_read", err, true,
-			TraceAttr{"n", strconv.Itoa(n)},
-			TraceAttr{"requested", strconv.Itoa(len(p))},
+			TraceAttr{"n", strconv.Itoa(bytesRead)},
+			TraceAttr{"requested", strconv.Itoa(len(buf))},
 			TraceAttr{"cutoff", strconv.Itoa(cutoff)})
 
-		return n, err
+		return bytesRead, err
 	}
 
-	n, err := cf.f.Read(p)
+	n, err := cf.f.Read(buf)
 
 	cf.chaos.trace.add("file.read", cf.path, boolKind(err == nil), err, false,
 		TraceAttr{"n", strconv.Itoa(n)})
@@ -949,10 +973,10 @@ func (cf *chaosFile) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (cf *chaosFile) Write(p []byte) (int, error) {
-	mode := ChaosMode(cf.chaos.mode.Load())
+func (cf *chaosFile) Write(data []byte) (int, error) {
+	mode := cf.chaos.getMode()
 	if mode == ChaosModeNoOp {
-		n, err := cf.f.Write(p)
+		n, err := cf.f.Write(data)
 
 		cf.chaos.trace.add("file.write", cf.path, boolKind(err == nil), err, false,
 			TraceAttr{"n", strconv.Itoa(n)})
@@ -972,11 +996,11 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 	}
 
 	// Partial write
-	if cf.chaos.should(mode, cf.chaos.config.PartialWriteRate) && len(p) > 1 {
+	if cf.chaos.should(mode, cf.chaos.config.PartialWriteRate) && len(data) > 1 {
 		cf.chaos.partialWrites.Add(1)
-		cutoff := cf.chaos.randIntn(len(p)-1) + 1 // [1, len(p)-1]
+		cutoff := cf.chaos.randIntn(len(data)-1) + 1 // [1, len(data)-1]
 
-		wrote, err := cf.f.Write(p[:cutoff])
+		wrote, err := cf.f.Write(data[:cutoff])
 		if err != nil {
 			cf.chaos.trace.add("file.write", cf.path, "fail", err, false,
 				TraceAttr{"n", strconv.Itoa(wrote)})
@@ -992,7 +1016,7 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 
 			cf.chaos.trace.add("file.write", cf.path, "short_write", err, true,
 				TraceAttr{"n", strconv.Itoa(wrote)},
-				TraceAttr{"requested", strconv.Itoa(len(p))})
+				TraceAttr{"requested", strconv.Itoa(len(data))})
 
 			return wrote, err
 		}
@@ -1002,13 +1026,13 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 
 		cf.chaos.trace.add("file.write", cf.path, "partial_write", err, true,
 			TraceAttr{"n", strconv.Itoa(wrote)},
-			TraceAttr{"requested", strconv.Itoa(len(p))},
+			TraceAttr{"requested", strconv.Itoa(len(data))},
 			TraceAttr{"errno", errno.Error()})
 
 		return wrote, err
 	}
 
-	n, err := cf.f.Write(p)
+	n, err := cf.f.Write(data)
 
 	cf.chaos.trace.add("file.write", cf.path, boolKind(err == nil), err, false,
 		TraceAttr{"n", strconv.Itoa(n)})
@@ -1017,7 +1041,7 @@ func (cf *chaosFile) Write(p []byte) (int, error) {
 }
 
 func (cf *chaosFile) Close() error {
-	mode := ChaosMode(cf.chaos.mode.Load())
+	mode := cf.chaos.getMode()
 	if mode == ChaosModeNoOp {
 		err := cf.f.Close()
 
@@ -1053,10 +1077,74 @@ func (cf *chaosFile) Close() error {
 	return nil
 }
 
+func (cf *chaosFile) Seek(offset int64, whence int) (int64, error) {
+	err := cf.introduceChaos(fileFaultSeek)
+	if err != nil {
+		return 0, err
+	}
+
+	pos, err := cf.f.Seek(offset, whence)
+
+	cf.chaos.trace.add("file.seek", cf.path, boolKind(err == nil), err, false,
+		TraceAttr{"offset", strconv.FormatInt(offset, 10)},
+		TraceAttr{"whence", strconv.Itoa(whence)},
+		TraceAttr{"pos", strconv.FormatInt(pos, 10)})
+
+	return pos, err
+}
+
+func (cf *chaosFile) Fd() uintptr {
+	return cf.f.Fd()
+}
+
+func (cf *chaosFile) Stat() (os.FileInfo, error) {
+	err := cf.introduceChaos(fileFaultStat)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := cf.f.Stat()
+
+	cf.chaos.trace.add("file.stat", cf.path, boolKind(err == nil), err, false)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+func (cf *chaosFile) Sync() error {
+	err := cf.introduceChaos(fileFaultSync)
+	if err != nil {
+		return err
+	}
+
+	err = cf.f.Sync()
+
+	cf.chaos.trace.add("file.sync", cf.path, boolKind(err == nil), err, false)
+
+	return err
+}
+
+func (cf *chaosFile) Chmod(mode os.FileMode) error {
+	err := cf.introduceChaos(fileFaultChmod)
+	if err != nil {
+		return err
+	}
+
+	err = cf.f.Chmod(mode)
+
+	cf.chaos.trace.add("file.chmod", cf.path, boolKind(err == nil), err, false,
+		TraceAttr{"mode", fmt.Sprintf("%#o", mode)})
+
+	return err
+}
+
 // introduceChaos checks if a fault should be injected for file handle operations.
 // Returns a non-nil error if a fault was injected, nil otherwise.
 func (cf *chaosFile) introduceChaos(kind fileFaultKind) error {
-	mode := ChaosMode(cf.chaos.mode.Load())
+	mode := cf.chaos.getMode()
 	if mode != ChaosModeActive {
 		return nil
 	}
@@ -1090,6 +1178,15 @@ func (cf *chaosFile) introduceChaos(kind fileFaultKind) error {
 		counter = &cf.chaos.syncFails
 		errnos = []syscall.Errno{syscall.EIO, syscall.ENOSPC, syscall.EDQUOT, syscall.EROFS}
 
+	case fileFaultChmod:
+		// EACCES: permission denied
+		// EPERM: operation not permitted
+		// EIO: I/O error
+		// EROFS: read-only filesystem
+		rate = cf.chaos.config.ChmodFailRate
+		counter = &cf.chaos.chmodFails
+		errnos = []syscall.Errno{syscall.EACCES, syscall.EPERM, syscall.EIO, syscall.EROFS}
+
 	default:
 		panic("unknown file fault kind: " + string(kind))
 	}
@@ -1107,52 +1204,6 @@ func (cf *chaosFile) introduceChaos(kind fileFaultKind) error {
 	}
 
 	return nil
-}
-
-func (cf *chaosFile) Seek(offset int64, whence int) (int64, error) {
-	err := cf.introduceChaos(fileFaultSeek)
-	if err != nil {
-		return 0, err
-	}
-
-	pos, err := cf.f.Seek(offset, whence)
-
-	cf.chaos.trace.add("file.seek", cf.path, boolKind(err == nil), err, false,
-		TraceAttr{"offset", strconv.FormatInt(offset, 10)},
-		TraceAttr{"whence", strconv.Itoa(whence)},
-		TraceAttr{"pos", strconv.FormatInt(pos, 10)})
-
-	return pos, err
-}
-
-func (cf *chaosFile) Fd() uintptr {
-	return cf.f.Fd()
-}
-
-func (cf *chaosFile) Stat() (os.FileInfo, error) {
-	err := cf.introduceChaos(fileFaultStat)
-	if err != nil {
-		return nil, err
-	}
-
-	info, err := cf.f.Stat()
-
-	cf.chaos.trace.add("file.stat", cf.path, boolKind(err == nil), err, false)
-
-	return info, err
-}
-
-func (cf *chaosFile) Sync() error {
-	err := cf.introduceChaos(fileFaultSync)
-	if err != nil {
-		return err
-	}
-
-	err = cf.f.Sync()
-
-	cf.chaos.trace.add("file.sync", cf.path, boolKind(err == nil), err, false)
-
-	return err
 }
 
 var _ FS = (*Chaos)(nil)
@@ -1175,8 +1226,9 @@ type TraceEvent struct {
 	// This includes both error injection and non-error alterations
 	// like short reads.
 	Injected bool
-	// Kind describes what Chaos did: "ok" (passthrough), "fail" (error
-	// injection), "short_read", "short_write", "partial_readdir", etc.
+	// Kind is a short label for what happened: "ok", "fail", "short_read",
+	// "short_write", "partial_readdir", etc. Use [TraceEvent.Injected] to
+	// distinguish injected behavior from passthrough outcomes.
 	Kind string
 	// Attrs contains additional key-value details (e.g., "cutoff=42", "errno=EIO").
 	Attrs []TraceAttr
@@ -1189,34 +1241,34 @@ type TraceAttr struct {
 }
 
 func (e TraceEvent) String() string {
-	var b strings.Builder
+	var sb strings.Builder
 
-	fmt.Fprintf(&b, "#%d", e.Seq)
+	fmt.Fprintf(&sb, "#%d", e.Seq)
 
 	if e.Injected {
-		fmt.Fprintf(&b, " [CHAOS:%s]", e.Kind)
+		fmt.Fprintf(&sb, " [CHAOS:%s]", e.Kind)
 	}
 
-	fmt.Fprintf(&b, " %s", e.Op)
+	fmt.Fprintf(&sb, " %s", e.Op)
 
 	if e.Path != "" {
-		fmt.Fprintf(&b, " path=%q", e.Path)
+		fmt.Fprintf(&sb, " path=%q", e.Path)
 	}
 
 	for _, a := range e.Attrs {
-		fmt.Fprintf(&b, " %s=%s", a.Key, a.Value)
+		fmt.Fprintf(&sb, " %s=%s", a.Key, a.Value)
 	}
 
 	if !e.Injected {
-		b.WriteString(" ")
-		b.WriteString(e.Kind)
+		sb.WriteString(" ")
+		sb.WriteString(e.Kind)
 	}
 
 	if e.Err != nil {
-		fmt.Fprintf(&b, " err=%v", e.Err)
+		fmt.Fprintf(&sb, " err=%v", e.Err)
 	}
 
-	return b.String()
+	return sb.String()
 }
 
 // chaosTrace is a bounded circular buffer of [TraceEvent].
@@ -1238,6 +1290,25 @@ func newChaosTrace(capacity int) *chaosTrace {
 		capacity: capacity,
 		events:   make([]TraceEvent, 0, capacity),
 	}
+}
+
+func (t *chaosTrace) String() string {
+	events := t.snapshot()
+	if len(events) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	for i, e := range events {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+
+		sb.WriteString(e.String())
+	}
+
+	return sb.String()
 }
 
 func (t *chaosTrace) add(op, path, kind string, err error, injected bool, attrs ...TraceAttr) {
@@ -1288,25 +1359,6 @@ func (t *chaosTrace) snapshot() []TraceEvent {
 	out = append(out, t.events[:t.next]...)
 
 	return out
-}
-
-func (t *chaosTrace) String() string {
-	events := t.snapshot()
-	if len(events) == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-
-	for i, e := range events {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-
-		b.WriteString(e.String())
-	}
-
-	return b.String()
 }
 
 func boolKind(ok bool) string {

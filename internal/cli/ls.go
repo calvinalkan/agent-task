@@ -14,7 +14,7 @@ import (
 const defaultLimit = 100
 
 // LsCmd returns the ls command.
-func LsCmd(cfg ticket.Config) *Command {
+func LsCmd(cfg *ticket.Config) *Command {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	fs.String("status", "", "Filter by status (open|in_progress|closed)")
 	fs.Int("priority", 0, "Filter by priority (1-4)")
@@ -29,18 +29,15 @@ func LsCmd(cfg ticket.Config) *Command {
 		Usage: "ls [flags]",
 		Short: "List tickets",
 		Long:  "List all tickets. Output sorted by ID (oldest first).",
-		Exec: func(_ context.Context, io *IO, args []string) error {
+		Exec: func(_ context.Context, io *IO, _ []string) error {
 			return execLs(io, cfg, fs)
 		},
 	}
 }
 
-var (
-	errConflictingFlags  = errors.New("--parent and --roots cannot be used together")
-	errOffsetOutOfBounds = errors.New("offset out of bounds")
-)
+var errConflictingFlags = errors.New("--parent and --roots cannot be used together")
 
-func execLs(io *IO, cfg ticket.Config, fs *flag.FlagSet) error {
+func execLs(io *IO, cfg *ticket.Config, fs *flag.FlagSet) error {
 	status, _ := fs.GetString("status")
 	if fs.Changed("status") {
 		err := validateStatusFlag(status)
@@ -90,9 +87,9 @@ func execLs(io *IO, cfg ticket.Config, fs *flag.FlagSet) error {
 		Offset:    offset,
 	}
 
-	results, err := ticket.ListTickets(cfg.TicketDirAbs, listOpts, nil)
+	results, err := ticket.ListTickets(cfg.TicketDirAbs, &listOpts, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("list tickets: %w", err)
 	}
 
 	var valid []*ticket.Summary

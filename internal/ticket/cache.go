@@ -792,8 +792,6 @@ func encodeSummaryData(summary *Summary) ([]byte, error) {
 
 func statusByteToString(b uint8) string {
 	switch b {
-	case statusByteOpen:
-		return StatusOpen
 	case statusByteInProgress:
 		return StatusInProgress
 	case statusByteClosed:
@@ -805,8 +803,6 @@ func statusByteToString(b uint8) string {
 
 func statusStringToByte(s string) uint8 {
 	switch s {
-	case StatusOpen:
-		return statusByteOpen
 	case StatusInProgress:
 		return statusByteInProgress
 	case StatusClosed:
@@ -818,8 +814,6 @@ func statusStringToByte(s string) uint8 {
 
 func typeStringToByte(s string) uint8 {
 	switch strings.ToLower(s) {
-	case TypeBug:
-		return typeByteBug
 	case TypeFeature:
 		return typeByteFeature
 	case TypeTask:
@@ -835,8 +829,6 @@ func typeStringToByte(s string) uint8 {
 
 func typeByteToString(b uint8) string {
 	switch b {
-	case typeByteBug:
-		return TypeBug
 	case typeByteFeature:
 		return TypeFeature
 	case typeByteTask:

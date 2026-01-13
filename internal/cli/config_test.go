@@ -8,23 +8,6 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-// Helper to write a file (creates directories as needed).
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-
-	dir := filepath.Dir(path)
-
-	err := os.MkdirAll(dir, 0o750)
-	if err != nil {
-		t.Fatalf("failed to create dir %s: %v", dir, err)
-	}
-
-	err = os.WriteFile(path, []byte(content), 0o600)
-	if err != nil {
-		t.Fatalf("failed to write %s: %v", path, err)
-	}
-}
-
 // Tests for print-config command.
 
 func TestPrintConfig_Defaults(t *testing.T) {
@@ -119,11 +102,12 @@ func TestConfig_InvalidJSON(t *testing.T) {
 func TestConfig_EmptyTicketDir(t *testing.T) {
 	t.Parallel()
 
+	// Empty string in config file is treated as "not set" and uses default
 	c := cli.NewCLI(t)
 	writeFile(t, filepath.Join(c.Dir, ".tk.json"), `{"ticket_dir": ""}`)
 
-	stderr := c.MustFail("print-config")
-	cli.AssertContains(t, stderr, "ticket-dir cannot be empty")
+	stdout, _, _ := c.Run("print-config")
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
 func TestConfig_EmptyTicketDirViaCLI(t *testing.T) {
@@ -343,14 +327,15 @@ func TestConfig_GlobalConfig_InvalidJSON(t *testing.T) {
 func TestConfig_GlobalConfig_EmptyTicketDir(t *testing.T) {
 	t.Parallel()
 
+	// Empty string in global config file is treated as "not set" and uses default
 	c := cli.NewCLI(t)
 	xdgDir := t.TempDir()
 
 	writeFile(t, filepath.Join(xdgDir, "tk", "config.json"), `{"ticket_dir": ""}`)
 
 	c.Env["XDG_CONFIG_HOME"] = xdgDir
-	stderr := c.MustFail("print-config")
-	cli.AssertContains(t, stderr, "ticket-dir cannot be empty")
+	stdout, _, _ := c.Run("print-config")
+	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
 func TestConfig_Precedence_ProjectOverridesGlobal(t *testing.T) {
@@ -514,4 +499,21 @@ func TestPrintConfig_ShowsBothSources(t *testing.T) {
 	cli.AssertContains(t, stdout, "# sources")
 	cli.AssertContains(t, stdout, "global_config="+globalPath)
 	cli.AssertContains(t, stdout, "project_config="+projectPath)
+}
+
+// Helper to write a file (creates directories as needed).
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+
+	dir := filepath.Dir(path)
+
+	err := os.MkdirAll(dir, 0o750)
+	if err != nil {
+		t.Fatalf("failed to create dir %s: %v", dir, err)
+	}
+
+	err = os.WriteFile(path, []byte(content), 0o600)
+	if err != nil {
+		t.Fatalf("failed to write %s: %v", path, err)
+	}
 }

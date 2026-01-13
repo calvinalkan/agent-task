@@ -16,54 +16,54 @@ func NewReal() *Real {
 	return &Real{}
 }
 
-// A passthrough wrapper for [os.Open].
-func (r *Real) Open(path string) (File, error) {
+// Open is a passthrough wrapper for [os.Open].
+func (*Real) Open(path string) (File, error) {
 	return os.Open(path)
 }
 
-// A passthrough wrapper for [os.Create].
-func (r *Real) Create(path string) (File, error) {
+// Create is a passthrough wrapper for [os.Create].
+func (*Real) Create(path string) (File, error) {
 	return os.Create(path)
 }
 
-// A passthrough wrapper for [os.OpenFile].
-func (r *Real) OpenFile(path string, flag int, perm os.FileMode) (File, error) {
+// OpenFile is a passthrough wrapper for [os.OpenFile].
+func (*Real) OpenFile(path string, flag int, perm os.FileMode) (File, error) {
 	return os.OpenFile(path, flag, perm)
 }
 
-// A passthrough wrapper for [os.ReadFile].
-func (r *Real) ReadFile(path string) ([]byte, error) {
+// ReadFile is a passthrough wrapper for [os.ReadFile].
+func (*Real) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
 // WriteFile is a passthrough wrapper for [os.WriteFile].
-func (r *Real) WriteFile(path string, data []byte, perm os.FileMode) error {
+func (*Real) WriteFile(path string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(path, data, perm)
 }
 
 // --- Directory Operations ---
 
-// A passthrough wrapper for [os.ReadDir].
-func (r *Real) ReadDir(path string) ([]os.DirEntry, error) {
+// ReadDir is a passthrough wrapper for [os.ReadDir].
+func (*Real) ReadDir(path string) ([]os.DirEntry, error) {
 	return os.ReadDir(path)
 }
 
-// A passthrough wrapper for [os.MkdirAll].
-func (r *Real) MkdirAll(path string, perm os.FileMode) error {
+// MkdirAll is a passthrough wrapper for [os.MkdirAll].
+func (*Real) MkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(path, perm)
 }
 
 // --- Metadata ---
 
-// A passthrough wrapper for [os.Stat].
-func (r *Real) Stat(path string) (os.FileInfo, error) {
+// Stat is a passthrough wrapper for [os.Stat].
+func (*Real) Stat(path string) (os.FileInfo, error) {
 	return os.Stat(path)
 }
 
 // Exists checks if a file exists using [os.Stat].
 // Returns (true, nil) if the file exists, (false, nil) if it does not,
 // or (false, err) for other errors.
-func (r *Real) Exists(path string) (bool, error) {
+func (*Real) Exists(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if err == nil {
 		return true, nil
@@ -78,18 +78,18 @@ func (r *Real) Exists(path string) (bool, error) {
 
 // --- Mutations ---
 
-// A passthrough wrapper for [os.Remove].
-func (r *Real) Remove(path string) error {
+// Remove is a passthrough wrapper for [os.Remove].
+func (*Real) Remove(path string) error {
 	return os.Remove(path)
 }
 
-// A passthrough wrapper for [os.RemoveAll].
-func (r *Real) RemoveAll(path string) error {
+// RemoveAll is a passthrough wrapper for [os.RemoveAll].
+func (*Real) RemoveAll(path string) error {
 	return os.RemoveAll(path)
 }
 
-// A passthrough wrapper for [os.Rename].
-func (r *Real) Rename(oldpath, newpath string) error {
+// Rename is a passthrough wrapper for [os.Rename].
+func (*Real) Rename(oldpath, newpath string) error {
 	return os.Rename(oldpath, newpath)
 }
 

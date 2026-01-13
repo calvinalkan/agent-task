@@ -21,9 +21,6 @@ const (
 // Frontmatter delimiter.
 const frontmatterDelimiter = "---"
 
-// Field name for closed timestamp.
-const fieldClosed = "closed"
-
 // Error variables for ticket operations.
 var (
 	ErrConfigFileNotFound         = errors.New("config file not found")

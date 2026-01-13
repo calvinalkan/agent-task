@@ -1,5 +1,10 @@
 #!/bin/bash
 # Prevents new lint suppression directives from being added to the codebase.
+#
+# Usage:
+#   ./no-lint-suppress.sh              # Check git diff (changed/untracked files)
+#   ./no-lint-suppress.sh file.go      # Check specific file
+#   cat file.go | ./no-lint-suppress.sh -   # Read from stdin
 set -eou pipefail
 
 # Patterns to block:
@@ -9,25 +14,55 @@ set -eou pipefail
 #   /*nolint*/, /* nolint */ - block comment style
 RG_PATTERN='//\s*nolint|#nosec|//\s*lint:ignore|/\*\s*nolint'
 
-FOUND=""
+get_suppressions_from_git() {
+    local result=""
 
-# Check changed lines in tracked files
-CHANGED=$(git diff HEAD -U0 -- '*.go' | rg "^\+\+\+ b/|^@@|^\+.*($RG_PATTERN)" | awk '
-    /^\+\+\+ b\//{file=substr($0,7)}
-    /^@@/{split($3,a,","); gsub(/\+/,"",a[1]); line=a[1]}
-    /^\+.*(\/\/.*nolint|#nosec|\/\/.*lint:ignore|\/\*.*nolint)/{print file":"line": "$0}
-' || true)
+    # Check changed lines in tracked files
+    local changed=$(git diff HEAD -U0 -- '*.go' | rg "^\+\+\+ b/|^@@|^\+.*($RG_PATTERN)" | awk '
+        /^\+\+\+ b\//{file=substr($0,7)}
+        /^@@/{split($3,a,","); gsub(/\+/,"",a[1]); line=a[1]}
+        /^\+.*(\/\/.*nolint|#nosec|\/\/.*lint:ignore|\/\*.*nolint)/{gsub(/^\+/, "", $0); print file":"line":"$0}
+    ' || true)
 
-# Check untracked .go files
-UNTRACKED=$(git ls-files --others --exclude-standard '*.go' | \
-    xargs -r rg -n "$RG_PATTERN" 2>/dev/null || true)
+    # Check untracked .go files
+    local untracked=$(git ls-files --others --exclude-standard '*.go' | \
+        xargs -r rg -n "$RG_PATTERN" 2>/dev/null || true)
 
-FOUND="${CHANGED}${CHANGED:+$'\n'}${UNTRACKED}"
-FOUND=$(echo "$FOUND" | sed '/^$/d')  # Remove empty lines
+    result="${changed}${changed:+$'\n'}${untracked}"
+    echo "$result" | sed '/^$/d'
+}
+
+get_suppressions_from_file() {
+    local file="$1"
+    rg -n "$RG_PATTERN" "$file" | sed "s|^|${file}:|" || true
+}
+
+get_suppressions_from_stdin() {
+    rg -n "$RG_PATTERN" | sed 's|^|<stdin>:|' || true
+}
+
+# Determine input source
+if [ $# -gt 0 ]; then
+    if [ "$1" = "-" ]; then
+        FOUND=$(get_suppressions_from_stdin)
+    elif [ -f "$1" ]; then
+        FOUND=$(get_suppressions_from_file "$1")
+    else
+        echo "Error: File not found: $1" >&2
+        exit 1
+    fi
+else
+    FOUND=$(get_suppressions_from_git)
+fi
+
+FOUND=$(echo "$FOUND" | sed '/^$/d')
 
 if [ -n "$FOUND" ]; then
     echo "Error: Lint suppression directives are forbidden (nolint, nosec, lint:ignore)."
-    echo "Fix the underlying issue instead of suppressing the warning."
-    echo "$FOUND"
+    echo "Fix the underlying issues, otherwise you will not be able to commit."
+    echo ""
+    echo "$FOUND" | while IFS=: read -r file line rest; do
+        printf "  %s:%s: %s\n" "$file" "$line" "$rest"
+    done
     exit 1
 fi

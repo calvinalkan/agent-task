@@ -12,52 +12,6 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-func writeCacheFileCT(t *testing.T, dir string, entries map[string]ticket.CacheEntry) string {
-	t.Helper()
-
-	path := filepath.Join(dir, ticket.CacheFileName)
-
-	err := ticket.TestWriteBinaryCache(path, entries)
-	if err != nil {
-		t.Fatalf("writeBinaryCache failed: %v", err)
-	}
-
-	return path
-}
-
-func createTestTicketFullCT(t *testing.T, ticketDir, ticketID, status, title, ticketType string, priority int, blockedBy []string) {
-	t.Helper()
-
-	blockedByStr := "[]"
-	if len(blockedBy) > 0 {
-		blockedByStr = "[" + strings.Join(blockedBy, ", ") + "]"
-	}
-
-	closedLine := ""
-	if status == ticket.StatusClosed {
-		closedLine = "closed: " + time.Now().UTC().Format(time.RFC3339) + "\n"
-	}
-
-	content := "---\n" +
-		"schema_version: 1\n" +
-		"id: " + ticketID + "\n" +
-		"status: " + status + "\n" +
-		"blocked-by: " + blockedByStr + "\n" +
-		"created: 2026-01-04T00:00:00Z\n" +
-		"type: " + ticketType + "\n" +
-		"priority: " + string(rune('0'+priority)) + "\n" +
-		closedLine +
-		"---\n" +
-		"# " + title + "\n"
-
-	path := filepath.Join(ticketDir, ticketID+".md")
-
-	err := os.WriteFile(path, []byte(content), ticket.TestFilePerms)
-	if err != nil {
-		t.Fatalf("failed to create test ticket: %v", err)
-	}
-}
-
 func TestCacheVersion4HeaderAndEntrySize(t *testing.T) {
 	t.Parallel()
 
@@ -532,4 +486,50 @@ func strconvItoaCT(i int) string {
 	}
 
 	return string(buf[pos:])
+}
+
+func writeCacheFileCT(t *testing.T, dir string, entries map[string]ticket.CacheEntry) string {
+	t.Helper()
+
+	path := filepath.Join(dir, ticket.CacheFileName)
+
+	err := ticket.TestWriteBinaryCache(path, entries)
+	if err != nil {
+		t.Fatalf("writeBinaryCache failed: %v", err)
+	}
+
+	return path
+}
+
+func createTestTicketFullCT(t *testing.T, ticketDir, ticketID, status, title, ticketType string, priority int, blockedBy []string) {
+	t.Helper()
+
+	blockedByStr := "[]"
+	if len(blockedBy) > 0 {
+		blockedByStr = "[" + strings.Join(blockedBy, ", ") + "]"
+	}
+
+	closedLine := ""
+	if status == ticket.StatusClosed {
+		closedLine = "closed: " + time.Now().UTC().Format(time.RFC3339) + "\n"
+	}
+
+	content := "---\n" +
+		"schema_version: 1\n" +
+		"id: " + ticketID + "\n" +
+		"status: " + status + "\n" +
+		"blocked-by: " + blockedByStr + "\n" +
+		"created: 2026-01-04T00:00:00Z\n" +
+		"type: " + ticketType + "\n" +
+		"priority: " + string(rune('0'+priority)) + "\n" +
+		closedLine +
+		"---\n" +
+		"# " + title + "\n"
+
+	path := filepath.Join(ticketDir, ticketID+".md")
+
+	err := os.WriteFile(path, []byte(content), ticket.TestFilePerms)
+	if err != nil {
+		t.Fatalf("failed to create test ticket: %v", err)
+	}
 }

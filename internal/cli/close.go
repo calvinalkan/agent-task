@@ -11,7 +11,7 @@ import (
 )
 
 // CloseCmd returns the close command.
-func CloseCmd(cfg ticket.Config) *Command {
+func CloseCmd(cfg *ticket.Config) *Command {
 	return &Command{
 		Flags: flag.NewFlagSet("close", flag.ContinueOnError),
 		Usage: "close <id>",
@@ -27,7 +27,7 @@ Requirements:
 	}
 }
 
-func execClose(io *IO, cfg ticket.Config, args []string) error {
+func execClose(io *IO, cfg *ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
@@ -78,17 +78,17 @@ func execClose(io *IO, cfg ticket.Config, args []string) error {
 		return ticket.AddFieldToContent(newContent, "closed", closedTime)
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("update ticket: %w", err)
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		return parseErr
+		return fmt.Errorf("parse frontmatter: %w", parseErr)
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
-		return cacheErr
+		return fmt.Errorf("update cache: %w", cacheErr)
 	}
 
 	io.Println("Closed", ticketID)

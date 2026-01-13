@@ -10,7 +10,7 @@ import (
 )
 
 // ShowCmd returns the show command.
-func ShowCmd(cfg ticket.Config) *Command {
+func ShowCmd(cfg *ticket.Config) *Command {
 	return &Command{
 		Flags: flag.NewFlagSet("show", flag.ContinueOnError),
 		Usage: "show <id>",
@@ -22,7 +22,7 @@ func ShowCmd(cfg ticket.Config) *Command {
 	}
 }
 
-func execShow(io *IO, cfg ticket.Config, args []string) error {
+func execShow(io *IO, cfg *ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
@@ -37,7 +37,7 @@ func execShow(io *IO, cfg ticket.Config, args []string) error {
 
 	content, err := ticket.ReadTicket(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("read ticket: %w", err)
 	}
 
 	io.Printf("%s", content)

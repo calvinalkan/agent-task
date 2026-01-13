@@ -10,6 +10,27 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
+func Test_CreateTestTicketFull_Adds_Closed_Timestamp_When_Status_Is_Closed(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	createTestTicketFull(t, tmpDir, "closed-001", ticket.StatusClosed, "Closed Ticket", "task", 2, nil)
+
+	content, err := os.ReadFile(filepath.Join(tmpDir, "closed-001.md"))
+	if err != nil {
+		t.Fatalf("failed to read ticket: %v", err)
+	}
+
+	if !strings.Contains(string(content), "status: closed") {
+		t.Error("expected status: closed in ticket content")
+	}
+
+	if !strings.Contains(string(content), "closed: 20") {
+		t.Error("expected closed timestamp in ticket content")
+	}
+}
+
 func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, ticketType string, priority int, blockedBy []string) {
 	t.Helper()
 
@@ -40,26 +61,5 @@ func createTestTicketFull(t *testing.T, ticketDir, ticketID, status, title, tick
 	err := os.WriteFile(path, []byte(content), 0o600)
 	if err != nil {
 		t.Fatalf("failed to create test ticket: %v", err)
-	}
-}
-
-func TestCreateTestTicketFullWithClosedStatus(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-
-	createTestTicketFull(t, tmpDir, "closed-001", ticket.StatusClosed, "Closed Ticket", "task", 2, nil)
-
-	content, err := os.ReadFile(filepath.Join(tmpDir, "closed-001.md"))
-	if err != nil {
-		t.Fatalf("failed to read ticket: %v", err)
-	}
-
-	if !strings.Contains(string(content), "status: closed") {
-		t.Error("expected status: closed in ticket content")
-	}
-
-	if !strings.Contains(string(content), "closed: 20") {
-		t.Error("expected closed timestamp in ticket content")
 	}
 }

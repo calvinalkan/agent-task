@@ -44,50 +44,51 @@ func (c *Command) HelpLine() string {
 }
 
 // PrintHelp prints the full help output for "tk <cmd> --help".
-func (c *Command) PrintHelp(o *IO) {
-	o.Println("Usage: tk", c.Usage)
-	o.Println()
+func (c *Command) PrintHelp(out *IO) {
+	out.Println("Usage: tk", c.Usage)
+	out.Println()
 
 	desc := c.Long
 	if desc == "" {
 		desc = c.Short
 	}
 
-	o.Println(desc)
+	out.Println(desc)
 
 	if c.Flags != nil && c.Flags.HasFlags() {
-		o.Println()
-		o.Println("Flags:")
+		out.Println()
+		out.Println("Flags:")
 
 		var buf strings.Builder
 		c.Flags.SetOutput(&buf)
 		c.Flags.PrintDefaults()
-		o.Printf("%s", buf.String())
+		out.Printf("%s", buf.String())
 	}
 }
 
 // Run parses flags and executes the command. Returns exit code.
 // Handles error printing internally for consistent output ordering.
-func (c *Command) Run(ctx context.Context, o *IO, args []string) int {
+func (c *Command) Run(ctx context.Context, out *IO, args []string) int {
 	c.Flags.SetOutput(&strings.Builder{}) // discard pflag output
 
 	err := c.Flags.Parse(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			c.PrintHelp(o)
+			c.PrintHelp(out)
 
 			return 0
 		}
 
-		o.ErrPrintln("error:", err)
-		o.ErrPrintln()
-		c.PrintHelp(o)
+		out.ErrPrintln("error:", err)
+		out.ErrPrintln()
+		c.PrintHelp(out)
 
 		return 1
 	}
 
-	if err := c.Exec(ctx, o, c.Flags.Args()); err != nil {
-		o.ErrPrintln("error:", err)
+	execErr := c.Exec(ctx, out, c.Flags.Args())
+	if execErr != nil {
+		out.ErrPrintln("error:", execErr)
 
 		return 1
 	}

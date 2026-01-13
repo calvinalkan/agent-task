@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -43,19 +44,22 @@ type Config struct {
 	ReconcileRunsLarge int
 }
 
+// HyperfineResultEntry represents a single hyperfine benchmark result.
+type HyperfineResultEntry struct {
+	Command string    `json:"command"`
+	Mean    float64   `json:"mean"`
+	Stddev  float64   `json:"stddev"`
+	Median  float64   `json:"median"`
+	User    float64   `json:"user"`
+	System  float64   `json:"system"`
+	Min     float64   `json:"min"`
+	Max     float64   `json:"max"`
+	Times   []float64 `json:"times"`
+}
+
 // HyperfineResult represents hyperfine JSON output.
 type HyperfineResult struct {
-	Results []struct {
-		Command string    `json:"command"`
-		Mean    float64   `json:"mean"`
-		Stddev  float64   `json:"stddev"`
-		Median  float64   `json:"median"`
-		User    float64   `json:"user"`
-		System  float64   `json:"system"`
-		Min     float64   `json:"min"`
-		Max     float64   `json:"max"`
-		Times   []float64 `json:"times"`
-	} `json:"results"`
+	Results []HyperfineResultEntry `json:"results"`
 }
 
 // BenchResult holds a single benchmark result.
@@ -107,14 +111,14 @@ func main() {
 	flag.IntVar(&cfg.ReconcileRunsLarge, "reconcile-runs-large", 3, "Reconcile runs for large datasets")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: go run bench.go [flags]\n\n")
-		fmt.Fprintf(os.Stderr, "Benchmarks tk performance: ls filters, mutations (start/close/reopen), and cache stress.\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fmt.Fprint(os.Stderr, "Usage: go run bench.go [flags]\n\n")
+		fmt.Fprint(os.Stderr, "Benchmarks tk performance: ls filters, mutations (start/close/reopen), and cache stress.\n\n")
+		fmt.Fprint(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  go run bench.go                           # Run benchmarks with defaults\n")
-		fmt.Fprintf(os.Stderr, "  go run bench.go -counts=1000              # Quick test with small dataset\n")
-		fmt.Fprintf(os.Stderr, "  go run bench.go -min-runs=50 -warmup=5    # Custom run counts\n")
+		fmt.Fprint(os.Stderr, "\nExamples:\n")
+		fmt.Fprint(os.Stderr, "  go run bench.go                           # Run benchmarks with defaults\n")
+		fmt.Fprint(os.Stderr, "  go run bench.go -counts=1000              # Quick test with small dataset\n")
+		fmt.Fprint(os.Stderr, "  go run bench.go -min-runs=50 -warmup=5    # Custom run counts\n")
 	}
 
 	flag.Parse()
@@ -136,7 +140,7 @@ func main() {
 	}
 
 	if len(cfg.Counts) == 0 {
-		fmt.Fprintf(os.Stderr, "no counts specified\n")
+		fmt.Fprint(os.Stderr, "no counts specified\n")
 		os.Exit(1)
 	}
 
@@ -206,8 +210,10 @@ func getSystemInfo() string {
 	timestampUTC := time.Now().UTC().Format(time.RFC3339)
 	sb.WriteString(fmt.Sprintf("## Run %s\n\n", timestampUTC))
 
+	ctx := context.Background()
+
 	// Git revision
-	gitRev, gitErr := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
+	gitRev, gitErr := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD").Output()
 	if gitErr == nil {
 		sb.WriteString(fmt.Sprintf("- git: %s\n", strings.TrimSpace(string(gitRev))))
 	} else {
@@ -215,13 +221,13 @@ func getSystemInfo() string {
 	}
 
 	// Go version
-	goVer, goErr := exec.Command("go", "version").Output()
+	goVer, goErr := exec.CommandContext(ctx, "go", "version").Output()
 	if goErr == nil {
 		sb.WriteString(fmt.Sprintf("- %s\n", strings.TrimSpace(string(goVer))))
 	}
 
 	// Hyperfine version
-	hfVer, hfErr := exec.Command("hyperfine", "--version").Output()
+	hfVer, hfErr := exec.CommandContext(ctx, "hyperfine", "--version").Output()
 	if hfErr == nil {
 		sb.WriteString(fmt.Sprintf("- %s\n", strings.TrimSpace(string(hfVer))))
 	}
@@ -261,7 +267,7 @@ func runHyperfineBench(cfg *Config) error {
 		_ = os.Remove(filepath.Join(ticketDir, ".cache.lock"))
 
 		// Prime cache
-		_ = exec.Command(cfg.Bin, "-C", workDir, "ls", "--limit=1").Run()
+		_ = exec.CommandContext(context.Background(), cfg.Bin, "-C", workDir, "ls", "--limit=1").Run()
 
 		// Build hyperfine command
 		tmpFile, err := os.CreateTemp("", "hyperfine-*.md")
@@ -287,7 +293,7 @@ func runHyperfineBench(cfg *Config) error {
 		args = append(args, "--export-markdown", tmpFileName)
 		args = append(args, commands...)
 
-		cmd := exec.Command("hyperfine", args...)
+		cmd := exec.CommandContext(context.Background(), "hyperfine", args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
@@ -353,7 +359,7 @@ func runMutationBench(cfg *Config) error {
 		fmt.Fprintf(os.Stderr, "%s\n\n", strings.Repeat("=", 60))
 
 		// Reset t000001 to open state for consistent starting point
-		_ = exec.Command(cfg.Bin, "-C", workDir, "reopen", "t000001").Run()
+		_ = exec.CommandContext(context.Background(), cfg.Bin, "-C", workDir, "reopen", "t000001").Run()
 
 		// Build hyperfine command with prepare steps for each mutation
 		tmpFile, err := os.CreateTemp("", "hyperfine-*.md")
@@ -408,7 +414,7 @@ func runMutationBench(cfg *Config) error {
 			args = append(args, "--prepare", c.prepare, c.cmd)
 		}
 
-		cmd := exec.Command("hyperfine", args...)
+		cmd := exec.CommandContext(context.Background(), "hyperfine", args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
@@ -441,7 +447,7 @@ func runMutationBench(cfg *Config) error {
 		report.WriteString("\n")
 
 		// Reset ticket to open state after benchmark
-		_ = exec.Command(cfg.Bin, "-C", workDir, "reopen", "t000001").Run()
+		_ = exec.CommandContext(context.Background(), cfg.Bin, "-C", workDir, "reopen", "t000001").Run()
 	}
 
 	err := os.WriteFile(outFile, []byte(report.String()), 0o600)
@@ -485,7 +491,7 @@ func runCacheStressBench(cfg *Config) error {
 		_ = os.Remove(filepath.Join(ticketDir, ".cache"))
 		_ = os.Remove(filepath.Join(ticketDir, ".cache.lock"))
 		_ = os.Remove(filepath.Join(ticketDir, ".bench-trigger"))
-		_ = exec.Command(cfg.Bin, "-C", workDir, "ls", "--limit=1").Run()
+		_ = exec.CommandContext(context.Background(), cfg.Bin, "-C", workDir, "ls", "--limit=1").Run()
 
 		var results []BenchResult
 
@@ -546,7 +552,7 @@ func runCacheStressBench(cfg *Config) error {
 		// Warm after corrupt rebuild
 		_ = os.Remove(filepath.Join(ticketDir, ".cache.lock"))
 		_ = os.WriteFile(filepath.Join(ticketDir, ".cache"), []byte("corrupt"), 0o600)
-		_ = exec.Command(cfg.Bin, "-C", workDir, "ls", "--limit=1").Run()
+		_ = exec.CommandContext(context.Background(), cfg.Bin, "-C", workDir, "ls", "--limit=1").Run()
 
 		res, err = benchOne(cfg, "warm after corrupt rebuild", cfg.WarmRuns, "", cmdLs)
 		if err != nil {
@@ -559,7 +565,7 @@ func runCacheStressBench(cfg *Config) error {
 		_ = os.Remove(filepath.Join(ticketDir, ".cache"))
 		_ = os.Remove(filepath.Join(ticketDir, ".cache.lock"))
 		_ = os.Remove(filepath.Join(ticketDir, ".bench-trigger"))
-		_ = exec.Command(cfg.Bin, "-C", workDir, "ls", "--limit=1").Run()
+		_ = exec.CommandContext(context.Background(), cfg.Bin, "-C", workDir, "ls", "--limit=1").Run()
 
 		// Force reconcile by making cache mtime old
 		reconcilePrepare := fmt.Sprintf("touch -t 200001010000 '%s/.cache'", ticketDir)
@@ -629,7 +635,7 @@ func benchOne(cfg *Config, label string, runs int, prepare, cmd string) (BenchRe
 
 	args = append(args, cmd)
 
-	hfCmd := exec.Command("hyperfine", args...)
+	hfCmd := exec.CommandContext(context.Background(), "hyperfine", args...)
 	hfCmd.Stdout = os.Stdout
 	hfCmd.Stderr = os.Stderr
 

@@ -12,39 +12,6 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-func createTestTicketFullMtime(t *testing.T, ticketDir, ticketID, status, title, ticketType string, priority int, blockedBy []string) {
-	t.Helper()
-
-	blockedByStr := "[]"
-	if len(blockedBy) > 0 {
-		blockedByStr = "[" + strings.Join(blockedBy, ", ") + "]"
-	}
-
-	closedLine := ""
-	if status == ticket.StatusClosed {
-		closedLine = "closed: " + time.Now().UTC().Format(time.RFC3339) + "\n"
-	}
-
-	content := "---\n" +
-		"schema_version: 1\n" +
-		"id: " + ticketID + "\n" +
-		"status: " + status + "\n" +
-		"blocked-by: " + blockedByStr + "\n" +
-		"created: 2026-01-04T00:00:00Z\n" +
-		"type: " + ticketType + "\n" +
-		"priority: " + string(rune('0'+priority)) + "\n" +
-		closedLine +
-		"---\n" +
-		"# " + title + "\n"
-
-	path := filepath.Join(ticketDir, ticketID+".md")
-
-	err := os.WriteFile(path, []byte(content), ticket.TestFilePerms)
-	if err != nil {
-		t.Fatalf("failed to create test ticket: %v", err)
-	}
-}
-
 func TestListTicketsEmptyDirCreatesCache(t *testing.T) {
 	t.Parallel()
 
@@ -56,7 +23,7 @@ func TestListTicketsEmptyDirCreatesCache(t *testing.T) {
 		t.Fatal(mkdirErr)
 	}
 
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	results, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets failed: %v", err)
 	}
@@ -82,18 +49,6 @@ func TestListTicketsEmptyDirCreatesCache(t *testing.T) {
 	}
 }
 
-func backdateCacheMtime(t *testing.T, ticketDir string) {
-	t.Helper()
-
-	cachePath := filepath.Join(ticketDir, ticket.CacheFileName)
-	past := time.Now().Add(-10 * time.Second)
-
-	err := os.Chtimes(cachePath, past, past)
-	if err != nil {
-		t.Fatalf("failed to backdate cache: %v", err)
-	}
-}
-
 func TestListTicketsDirMtimeAdditionTriggersReconcile(t *testing.T) {
 	t.Parallel()
 
@@ -108,7 +63,7 @@ func TestListTicketsDirMtimeAdditionTriggersReconcile(t *testing.T) {
 	createTestTicketFullMtime(t, ticketDir, "a-001", ticket.StatusOpen, "A", "task", 2, nil)
 
 	// Cold build.
-	_, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	_, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (cold) failed: %v", err)
 	}
@@ -119,7 +74,7 @@ func TestListTicketsDirMtimeAdditionTriggersReconcile(t *testing.T) {
 	// External add.
 	createTestTicketFullMtime(t, ticketDir, "b-002", ticket.StatusOpen, "B", "bug", 1, nil)
 
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	results, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (reconcile) failed: %v", err)
 	}
@@ -153,7 +108,7 @@ func TestListTicketsDirMtimeDeletionTriggersReconcile(t *testing.T) {
 	createTestTicketFullMtime(t, ticketDir, "a-001", ticket.StatusOpen, "A", "task", 2, nil)
 	createTestTicketFullMtime(t, ticketDir, "b-002", ticket.StatusOpen, "B", "task", 2, nil)
 
-	_, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	_, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (cold) failed: %v", err)
 	}
@@ -166,7 +121,7 @@ func TestListTicketsDirMtimeDeletionTriggersReconcile(t *testing.T) {
 		t.Fatal(removeErr)
 	}
 
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	results, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (reconcile) failed: %v", err)
 	}
@@ -197,7 +152,7 @@ func TestListTicketsDoesNotReparseWhenDirUnchanged(t *testing.T) {
 
 	createTestTicketFullMtime(t, ticketDir, "a-001", ticket.StatusOpen, "Original", "task", 2, nil)
 
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	results, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (cold) failed: %v", err)
 	}
@@ -216,7 +171,7 @@ func TestListTicketsDoesNotReparseWhenDirUnchanged(t *testing.T) {
 		t.Fatal(writeErr)
 	}
 
-	results, err = ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	results, err = ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (warm) failed: %v", err)
 	}
@@ -239,7 +194,7 @@ func TestListTicketsReconcileDoesNotReparseExisting(t *testing.T) {
 
 	createTestTicketFullMtime(t, ticketDir, "a-001", ticket.StatusOpen, "A", "task", 2, nil)
 
-	_, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	_, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (cold) failed: %v", err)
 	}
@@ -256,7 +211,7 @@ func TestListTicketsReconcileDoesNotReparseExisting(t *testing.T) {
 	// External add triggers reconcile; existing entry should come from cache without re-parse.
 	createTestTicketFullMtime(t, ticketDir, "b-002", ticket.StatusOpen, "B", "task", 2, nil)
 
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	results, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (reconcile) failed: %v", err)
 	}
@@ -285,7 +240,7 @@ func TestListTicketsCorruptCacheRebuildsAndWarns(t *testing.T) {
 
 	createTestTicketFullMtime(t, ticketDir, "a-001", ticket.StatusOpen, "A", "task", 2, nil)
 
-	_, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, io.Discard)
+	_, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, io.Discard)
 	if err != nil {
 		t.Fatalf("ListTickets (cold) failed: %v", err)
 	}
@@ -298,7 +253,7 @@ func TestListTicketsCorruptCacheRebuildsAndWarns(t *testing.T) {
 
 	var diag bytes.Buffer
 
-	results, err := ticket.ListTickets(ticketDir, ticket.ListTicketsOptions{Limit: 0}, &diag)
+	results, err := ticket.ListTickets(ticketDir, &ticket.ListTicketsOptions{Limit: 0}, &diag)
 	if err != nil {
 		t.Fatalf("ListTickets (rebuild) failed: %v", err)
 	}
@@ -376,17 +331,6 @@ func TestCacheMtimeIsNotOlderThanDirMtimeAfterWrite(t *testing.T) {
 	}
 }
 
-func mustReadFileMtime(t *testing.T, path string) []byte {
-	t.Helper()
-
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return b
-}
-
 func TestCreateTestTicketFullMtimeWithClosedStatus(t *testing.T) {
 	t.Parallel()
 
@@ -418,5 +362,61 @@ func TestCreateTestTicketFullMtimeWithBlockers(t *testing.T) {
 
 	if !strings.Contains(string(content), "blocked-by: [blocker-1, blocker-2]") {
 		t.Error("expected blocked-by list")
+	}
+}
+
+func backdateCacheMtime(t *testing.T, ticketDir string) {
+	t.Helper()
+
+	cachePath := filepath.Join(ticketDir, ticket.CacheFileName)
+	past := time.Now().Add(-10 * time.Second)
+
+	err := os.Chtimes(cachePath, past, past)
+	if err != nil {
+		t.Fatalf("failed to backdate cache: %v", err)
+	}
+}
+
+func mustReadFileMtime(t *testing.T, path string) []byte {
+	t.Helper()
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return b
+}
+
+func createTestTicketFullMtime(t *testing.T, ticketDir, ticketID, status, title, ticketType string, priority int, blockedBy []string) {
+	t.Helper()
+
+	blockedByStr := "[]"
+	if len(blockedBy) > 0 {
+		blockedByStr = "[" + strings.Join(blockedBy, ", ") + "]"
+	}
+
+	closedLine := ""
+	if status == ticket.StatusClosed {
+		closedLine = "closed: " + time.Now().UTC().Format(time.RFC3339) + "\n"
+	}
+
+	content := "---\n" +
+		"schema_version: 1\n" +
+		"id: " + ticketID + "\n" +
+		"status: " + status + "\n" +
+		"blocked-by: " + blockedByStr + "\n" +
+		"created: 2026-01-04T00:00:00Z\n" +
+		"type: " + ticketType + "\n" +
+		"priority: " + string(rune('0'+priority)) + "\n" +
+		closedLine +
+		"---\n" +
+		"# " + title + "\n"
+
+	path := filepath.Join(ticketDir, ticketID+".md")
+
+	err := os.WriteFile(path, []byte(content), ticket.TestFilePerms)
+	if err != nil {
+		t.Fatalf("failed to create test ticket: %v", err)
 	}
 }

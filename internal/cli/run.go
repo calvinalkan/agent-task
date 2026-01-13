@@ -27,8 +27,9 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 	flagTicketDir := globalFlags.String("ticket-dir", "", "Override ticket `directory`")
 
 	// Validate global flags.
-	if err := globalFlags.Parse(args[1:]); err != nil {
-		fprintln(errOut, "error:", err)
+	parseErr := globalFlags.Parse(args[1:])
+	if parseErr != nil {
+		fprintln(errOut, "error:", parseErr)
 		printGlobalOptions(errOut)
 
 		return 1
@@ -57,7 +58,7 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 
 	// Create all commands so that from now on, we can show
 	// all of them inside error output/help.
-	commands := allCommands(cfg, env)
+	commands := allCommands(&cfg, env)
 
 	commandMap := make(map[string]*Command, len(commands))
 	for _, cmd := range commands {
@@ -136,7 +137,7 @@ func Run(_ io.Reader, out io.Writer, errOut io.Writer, args []string, env map[st
 
 // allCommands returns all commands in display order.
 // Dependencies are captured via closures in each command constructor.
-func allCommands(cfg ticket.Config, env map[string]string) []*Command {
+func allCommands(cfg *ticket.Config, env map[string]string) []*Command {
 	return []*Command{
 		ShowCmd(cfg),
 		CreateCmd(cfg),
@@ -162,26 +163,26 @@ const globalOptionsHelp = `  -h, --help             Show help
   -c, --config <file>    Use specified config file
   --ticket-dir <dir>     Override ticket directory`
 
-func printGlobalOptions(w io.Writer) {
-	fprintln(w, "Usage: tk [flags] <command> [args]")
-	fprintln(w)
-	fprintln(w, "Global flags:")
-	fprintln(w, globalOptionsHelp)
-	fprintln(w)
-	fprintln(w, "Run 'tk --help' for a list of commands.")
+func printGlobalOptions(out io.Writer) {
+	fprintln(out, "Usage: tk [flags] <command> [args]")
+	fprintln(out)
+	fprintln(out, "Global flags:")
+	fprintln(out, globalOptionsHelp)
+	fprintln(out)
+	fprintln(out, "Run 'tk --help' for a list of commands.")
 }
 
-func printUsage(w io.Writer, commands []*Command) {
-	fprintln(w, "tk - minimal ticket system")
-	fprintln(w)
-	fprintln(w, "Usage: tk [flags] <command> [args]")
-	fprintln(w)
-	fprintln(w, "Flags:")
-	fprintln(w, globalOptionsHelp)
-	fprintln(w)
-	fprintln(w, "Commands:")
+func printUsage(out io.Writer, commands []*Command) {
+	fprintln(out, "tk - minimal ticket system")
+	fprintln(out)
+	fprintln(out, "Usage: tk [flags] <command> [args]")
+	fprintln(out)
+	fprintln(out, "Flags:")
+	fprintln(out, globalOptionsHelp)
+	fprintln(out)
+	fprintln(out, "Commands:")
 
 	for _, cmd := range commands {
-		fprintln(w, cmd.HelpLine())
+		fprintln(out, cmd.HelpLine())
 	}
 }

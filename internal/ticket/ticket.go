@@ -244,10 +244,9 @@ func WriteTicketAtomic(ticketDir string, ticket *Ticket) (string, string, error)
 		return "", "", fmt.Errorf("creating ticket directory: %w", mkdirErr)
 	}
 
-	// Generate base ID and lock on it to serialize concurrent creates
-	// TODO: Consider binding ticket.Created to the same timestamp/time source used
-	// for ID generation so ordering assumptions like "sort by ID == sort by
-	// created time" hold even under contention.
+	// Generate base ID and lock on it to serialize concurrent creates.
+	// Note: ticket.Created uses a different timestamp than ID generation,
+	// so "sort by ID == sort by created time" may not hold under contention.
 	baseID := GenerateID()
 	lockPath := filepath.Join(ticketDir, baseID+".md")
 
@@ -359,6 +358,7 @@ func UpdateStatusInContent(content []byte, newStatus string) ([]byte, error) {
 }
 
 // UpdateTicketStatus updates the status field in a ticket file.
+//
 // Deprecated: Use UpdateTicketStatusLocked for concurrent-safe updates.
 func UpdateTicketStatus(path, newStatus string) error {
 	content, err := os.ReadFile(path)
@@ -434,6 +434,7 @@ func AddFieldToContent(content []byte, field, value string) ([]byte, error) {
 }
 
 // AddTicketField adds a new field to the ticket frontmatter (after status).
+//
 // Deprecated: Use AddTicketFieldLocked for concurrent-safe updates.
 func AddTicketField(path, field, value string) error {
 	content, err := os.ReadFile(path)
@@ -499,6 +500,7 @@ func RemoveFieldFromContent(content []byte, field string) []byte {
 }
 
 // RemoveTicketField removes a field from the ticket frontmatter.
+//
 // Deprecated: Use RemoveTicketFieldLocked for concurrent-safe updates.
 func RemoveTicketField(path, field string) error {
 	content, err := os.ReadFile(path)
@@ -591,7 +593,7 @@ type ListTicketsOptions struct {
 // Uses a binary write-through cache with directory mtime validation.
 // Returns (nil, err) if directory cannot be read.
 // Returns (results, nil) if directory was read - individual results may have errors.
-func ListTickets(ticketDir string, opts ListTicketsOptions, diagOut io.Writer) ([]Result, error) {
+func ListTickets(ticketDir string, opts *ListTicketsOptions, diagOut io.Writer) ([]Result, error) {
 	if diagOut == nil {
 		diagOut = io.Discard
 	}
@@ -704,7 +706,7 @@ func ListTickets(ticketDir string, opts ListTicketsOptions, diagOut io.Writer) (
 	return results, nil
 }
 
-func filterTicketResults(results []Result, opts ListTicketsOptions) ([]Result, error) {
+func filterTicketResults(results []Result, opts *ListTicketsOptions) ([]Result, error) {
 	filtered := make([]Result, 0, len(results))
 
 	limitReached := false
@@ -750,7 +752,7 @@ func filterTicketResults(results []Result, opts ListTicketsOptions) ([]Result, e
 	return filtered, nil
 }
 
-func ticketSummaryMatches(summary *Summary, opts ListTicketsOptions) bool {
+func ticketSummaryMatches(summary *Summary, opts *ListTicketsOptions) bool {
 	if opts.Status != "" && summary.Status != opts.Status {
 		return false
 	}
@@ -1173,7 +1175,7 @@ func ParseTicketFrontmatter(path string) (Summary, error) {
 
 					summary.Assignee = value
 
-				case fieldClosed:
+				case StatusClosed:
 					if value == "" {
 						return Summary{}, fmt.Errorf("%w: closed (empty)", errInvalidFieldValue)
 					}
@@ -1471,6 +1473,7 @@ func UpdateBlockedByInContent(content []byte, blockedBy []string) ([]byte, error
 }
 
 // UpdateTicketBlockedBy updates the blocked-by list in a ticket file.
+//
 // Deprecated: Use UpdateTicketBlockedByLocked for concurrent-safe updates.
 func UpdateTicketBlockedBy(path string, blockedBy []string) error {
 	content, err := os.ReadFile(path)

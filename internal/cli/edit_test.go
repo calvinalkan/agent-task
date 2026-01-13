@@ -10,28 +10,6 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-// createMockEditor creates a mock editor script that writes its args to a file.
-// Returns the path to the mock editor and the path to the invoked args file.
-func createMockEditor(t *testing.T) (string, string) {
-	t.Helper()
-
-	mockDir := t.TempDir()
-	mockEditor := filepath.Join(mockDir, "mock-editor")
-	invokedFile := filepath.Join(mockDir, "invoked.txt")
-
-	script := `#!/bin/sh
-echo "$@" > "` + invokedFile + `"
-exit 0
-`
-
-	writeErr := os.WriteFile(mockEditor, []byte(script), 0o700)
-	if writeErr != nil {
-		t.Fatalf("failed to create mock editor: %v", writeErr)
-	}
-
-	return mockEditor, invokedFile
-}
-
 func TestEditLaunchCommand(t *testing.T) {
 	t.Parallel()
 
@@ -447,4 +425,26 @@ func TestEditInMainHelp(t *testing.T) {
 	c := cli.NewCLI(t)
 	stdout := c.MustRun("--help")
 	cli.AssertContains(t, stdout, "edit <id>")
+}
+
+// createMockEditor creates a mock editor script that writes its args to a file.
+// Returns the path to the mock editor and the path to the invoked args file.
+func createMockEditor(t *testing.T) (string, string) {
+	t.Helper()
+
+	mockDir := t.TempDir()
+	mockEditor := filepath.Join(mockDir, "mock-editor")
+	invokedFile := filepath.Join(mockDir, "invoked.txt")
+
+	script := `#!/bin/sh
+echo "$@" > "` + invokedFile + `"
+exit 0
+`
+
+	writeErr := os.WriteFile(mockEditor, []byte(script), 0o700)
+	if writeErr != nil {
+		t.Fatalf("failed to create mock editor: %v", writeErr)
+	}
+
+	return mockEditor, invokedFile
 }

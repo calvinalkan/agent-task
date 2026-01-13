@@ -15,8 +15,10 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
+const fieldPriority = "priority"
+
 // ReadyCmd returns the ready command.
-func ReadyCmd(cfg ticket.Config) *Command {
+func ReadyCmd(cfg *ticket.Config) *Command {
 	fs := flag.NewFlagSet("ready", flag.ContinueOnError)
 	fs.Bool("json", false, "Output as JSON array")
 	fs.Int("limit", 0, "Maximum tickets to show (0 = no limit)")
@@ -44,7 +46,7 @@ Examples:
 
   # Start the highest priority ready ticket:
   tk start $(tk ready --field id --limit 1)`,
-		Exec: func(_ context.Context, io *IO, args []string) error {
+		Exec: func(_ context.Context, io *IO, _ []string) error {
 			jsonOutput, _ := fs.GetBool("json")
 			limit, _ := fs.GetInt("limit")
 			field, _ := fs.GetString("field")
@@ -56,14 +58,14 @@ Examples:
 
 var errInvalidField = errors.New("invalid field (valid: id, priority, status, type, title, parent, created)")
 
-func execReady(io *IO, cfg ticket.Config, jsonOutput bool, limit int, field string) error {
+func execReady(io *IO, cfg *ticket.Config, jsonOutput bool, limit int, field string) error {
 	if field != "" && !isValidReadyField(field) {
 		return errInvalidField
 	}
 
-	results, err := ticket.ListTickets(cfg.TicketDirAbs, ticket.ListTicketsOptions{Limit: 0}, nil)
+	results, err := ticket.ListTickets(cfg.TicketDirAbs, &ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("list tickets: %w", err)
 	}
 
 	ready, warnings := filterReadyTickets(results)
@@ -115,29 +117,29 @@ func execReady(io *IO, cfg ticket.Config, jsonOutput bool, limit int, field stri
 
 func isValidReadyField(field string) bool {
 	switch field {
-	case "id", "priority", "status", "type", "title", "parent", "created":
+	case "id", fieldPriority, "status", "type", "title", "parent", "created":
 		return true
 	default:
 		return false
 	}
 }
 
-func getFieldValue(s *ticket.Summary, field string) string {
+func getFieldValue(summary *ticket.Summary, field string) string {
 	switch field {
 	case "id":
-		return s.ID
-	case "priority":
-		return strconv.Itoa(s.Priority)
+		return summary.ID
+	case fieldPriority:
+		return strconv.Itoa(summary.Priority)
 	case "status":
-		return s.Status
+		return summary.Status
 	case "type":
-		return s.Type
+		return summary.Type
 	case "title":
-		return s.Title
+		return summary.Title
 	case "parent":
-		return s.Parent
+		return summary.Parent
 	case "created":
-		return s.Created
+		return summary.Created
 	default:
 		return ""
 	}
@@ -146,18 +148,18 @@ func getFieldValue(s *ticket.Summary, field string) string {
 func outputReadyFieldJSON(io *IO, ready []*ticket.Summary, field string) error {
 	values := make([]any, 0, len(ready))
 
-	for _, s := range ready {
+	for _, summary := range ready {
 		switch field {
-		case "priority":
-			values = append(values, s.Priority)
+		case fieldPriority:
+			values = append(values, summary.Priority)
 		default:
-			values = append(values, getFieldValue(s, field))
+			values = append(values, getFieldValue(summary, field))
 		}
 	}
 
 	data, err := json.Marshal(values)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal json: %w", err)
 	}
 
 	io.Println(string(data))
@@ -180,27 +182,27 @@ type readyTicketJSON struct {
 func outputReadyJSON(io *IO, ready []*ticket.Summary) error {
 	tickets := make([]readyTicketJSON, 0, len(ready))
 
-	for _, s := range ready {
-		blockedBy := s.BlockedBy
+	for _, summary := range ready {
+		blockedBy := summary.BlockedBy
 		if blockedBy == nil {
 			blockedBy = []string{}
 		}
 
 		tickets = append(tickets, readyTicketJSON{
-			ID:        s.ID,
-			Priority:  s.Priority,
-			Status:    s.Status,
-			Type:      s.Type,
-			Title:     s.Title,
-			Parent:    s.Parent,
+			ID:        summary.ID,
+			Priority:  summary.Priority,
+			Status:    summary.Status,
+			Type:      summary.Type,
+			Title:     summary.Title,
+			Parent:    summary.Parent,
 			BlockedBy: blockedBy,
-			Created:   s.Created,
+			Created:   summary.Created,
 		})
 	}
 
 	data, err := json.Marshal(tickets)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal json: %w", err)
 	}
 
 	io.Println(string(data))

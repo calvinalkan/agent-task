@@ -91,7 +91,7 @@ func LoadConfig(input LoadConfigInput) (Config, error) {
 	}
 
 	cfg.Sources.Global = globalPath
-	cfg = mergeConfig(cfg, globalCfg)
+	cfg = mergeConfig(&cfg, &globalCfg)
 
 	// Load project/explicit config file
 	projectCfg, projectPath, err := loadProjectConfig(workDir, input.ConfigPath)
@@ -100,7 +100,7 @@ func LoadConfig(input LoadConfigInput) (Config, error) {
 	}
 
 	cfg.Sources.Project = projectPath
-	cfg = mergeConfig(cfg, projectCfg)
+	cfg = mergeConfig(&cfg, &projectCfg)
 
 	// Apply CLI overrides
 	if input.TicketDirOverride != "" {
@@ -108,7 +108,7 @@ func LoadConfig(input LoadConfigInput) (Config, error) {
 	}
 
 	// Validate
-	validateErr := validateConfig(cfg)
+	validateErr := validateConfig(&cfg)
 	if validateErr != nil {
 		return Config{}, validateErr
 	}
@@ -133,17 +133,13 @@ func loadGlobalConfig(env map[string]string) (Config, string, error) {
 		return Config{}, "", nil
 	}
 
-	globalCfg, explicitEmpty, loaded, err := loadConfigFile(globalCfgPath, false)
+	globalCfg, loaded, err := loadConfigFile(globalCfgPath, false)
 	if err != nil {
 		return Config{}, "", err
 	}
 
 	if !loaded {
 		return Config{}, "", nil
-	}
-
-	if explicitEmpty["ticket_dir"] {
-		return Config{}, "", fmt.Errorf("%w %s: %w", ErrConfigInvalid, globalCfgPath, ErrTicketDirEmpty)
 	}
 
 	return globalCfg, globalCfgPath, nil
@@ -176,7 +172,7 @@ func loadProjectConfig(workDir, configPath string) (Config, string, error) {
 		mustExist = false
 	}
 
-	fileCfg, explicitEmpty, loaded, err := loadConfigFile(cfgFile, mustExist)
+	fileCfg, loaded, err := loadConfigFile(cfgFile, mustExist)
 	if err != nil {
 		return Config{}, "", err
 	}
@@ -185,68 +181,51 @@ func loadProjectConfig(workDir, configPath string) (Config, string, error) {
 		return Config{}, "", nil
 	}
 
-	if explicitEmpty["ticket_dir"] {
-		return Config{}, "", fmt.Errorf("%w %s: %w", ErrConfigInvalid, cfgFile, ErrTicketDirEmpty)
-	}
-
 	return fileCfg, cfgFile, nil
 }
 
 // loadConfigFile loads a config file. If mustExist is false, missing files return zero config.
-// Returns the config, a map of explicitly empty fields, whether file was loaded, and any error.
-func loadConfigFile(path string, mustExist bool) (Config, map[string]bool, bool, error) {
+// Returns the config, whether file was loaded, and any error.
+func loadConfigFile(path string, mustExist bool) (Config, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) && !mustExist {
-			return Config{}, nil, false, nil
+			return Config{}, false, nil
 		}
 
 		if mustExist {
-			return Config{}, nil, false, fmt.Errorf("%w: %s", ErrConfigFileRead, path)
+			return Config{}, false, fmt.Errorf("%w: %s", ErrConfigFileRead, path)
 		}
 
-		return Config{}, nil, false, nil
+		return Config{}, false, nil
 	}
 
-	cfg, explicitEmpty, parseErr := parseConfig(data)
+	cfg, parseErr := parseConfig(data)
 	if parseErr != nil {
-		return Config{}, nil, false, fmt.Errorf("%w %s: %w", ErrConfigInvalid, path, parseErr)
+		return Config{}, false, fmt.Errorf("%w %s: %w", ErrConfigInvalid, path, parseErr)
 	}
 
-	return cfg, explicitEmpty, true, nil
+	return cfg, true, nil
 }
 
-func parseConfig(data []byte) (Config, map[string]bool, error) {
+func parseConfig(data []byte) (Config, error) {
 	// Standardize JSONC to JSON
 	standardized, err := hujson.Standardize(data)
 	if err != nil {
-		return Config{}, nil, fmt.Errorf("invalid JSONC: %w", err)
+		return Config{}, fmt.Errorf("invalid JSONC: %w", err)
 	}
 
 	var cfg Config
 
 	unmarshalErr := json.Unmarshal(standardized, &cfg)
 	if unmarshalErr != nil {
-		return Config{}, nil, fmt.Errorf("invalid JSON: %w", unmarshalErr)
+		return Config{}, fmt.Errorf("invalid JSON: %w", unmarshalErr)
 	}
 
-	// Check which fields were explicitly set to empty
-	var raw map[string]any
-
-	_ = json.Unmarshal(standardized, &raw)
-
-	explicitEmpty := make(map[string]bool)
-
-	if val, exists := raw["ticket_dir"]; exists {
-		if str, ok := val.(string); ok && str == "" {
-			explicitEmpty["ticket_dir"] = true
-		}
-	}
-
-	return cfg, explicitEmpty, nil
+	return cfg, nil
 }
 
-func mergeConfig(base, overlay Config) Config {
+func mergeConfig(base, overlay *Config) Config {
 	if overlay.TicketDir != "" {
 		base.TicketDir = overlay.TicketDir
 	}
@@ -255,10 +234,10 @@ func mergeConfig(base, overlay Config) Config {
 		base.Editor = overlay.Editor
 	}
 
-	return base
+	return *base
 }
 
-func validateConfig(cfg Config) error {
+func validateConfig(cfg *Config) error {
 	if cfg.TicketDir == "" {
 		return ErrTicketDirEmpty
 	}

@@ -26,12 +26,13 @@ modernize:
 vet:
 	$(GO) vet ./...
 
-fmt: modernize
+fmt:
+	golangci-lint run --fix --enable-only=modernize
 	golangci-lint fmt
 
 lint:
 	golangci-lint config verify
-	@./backpressure/no-lint-suppress.sh
+	@for script in ./backpressure/*.sh; do "$$script"; done
 	golangci-lint run --fix ./...
 
 test:
@@ -46,6 +47,7 @@ install:
 	$(GO) install ./cmd/tk
 
 install-tools:
-	$(GO) install golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest
+	@echo "golangci-lint includes all needed tools (modernize, etc.)"
+	@echo "Install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"
 
 check: vet lint test

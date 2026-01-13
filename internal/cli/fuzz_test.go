@@ -3,7 +3,7 @@ package cli_test
 import (
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,18 +36,18 @@ func FuzzStateMachine(f *testing.F) {
 	f.Add(int64(42))
 
 	f.Fuzz(func(t *testing.T, seed int64) {
-		rng := rand.New(rand.NewSource(seed))
+		rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed)))
 		c := cli.NewCLI(t)
 		model := NewModel()
 
 		// Track ticket IDs for use in subsequent operations
 		var realIDs []string
 
-		var ops []string
-
 		// Run 5-34 random operations per fuzz iteration.
 		// At ~800 iterations/sec for 30s, this executes ~500k operations total.
-		numOps := rng.Intn(30) + 5
+		numOps := rng.IntN(30) + 5
+
+		ops := make([]string, 0, numOps)
 		for range numOps {
 			op := genOp(rng, model, realIDs)
 			ops = append(ops, op.String())
@@ -98,11 +98,11 @@ func FuzzCLI(f *testing.F) {
 	f.Add("create test -d description")
 	f.Add("create test --type bug")
 	f.Add("create test -p 1")
-	f.Add("create")                // Missing title
-	f.Add("create --type invalid") // Invalid type
-	f.Add("create test -p 0")      // Invalid priority
-	f.Add("create test -p abc")    // Non-numeric priority
-	f.Add("create 日本語")            // Unicode title
+	f.Add("create")                    // Missing title
+	f.Add("create --type invalid")     // Invalid type
+	f.Add("create test -p 0")          // Invalid priority
+	f.Add("create test -p abc")        // Non-numeric priority
+	f.Add("create \u65e5\u672c\u8a9e") // Unicode title (日本語)
 
 	// === ls command ===
 	f.Add("ls")
@@ -309,7 +309,8 @@ func checkInvariants(t *testing.T, ticketDir string) {
 	t.Helper()
 
 	// Skip if ticket dir doesn't exist yet
-	if _, err := os.Stat(ticketDir); os.IsNotExist(err) {
+	_, statErr := os.Stat(ticketDir)
+	if os.IsNotExist(statErr) {
 		return
 	}
 
@@ -321,7 +322,9 @@ func checkInvariants(t *testing.T, ticketDir string) {
 	}
 
 	for _, f := range files {
-		data, err := os.ReadFile(f)
+		var data []byte
+
+		data, err = os.ReadFile(f)
 		if err != nil {
 			t.Errorf("unreadable file %s: %v", f, err)
 
@@ -415,7 +418,9 @@ func checkInvariants(t *testing.T, ticketDir string) {
 
 	// Invariant: No lock files left behind
 	locksDir := filepath.Join(ticketDir, ".locks")
-	if _, err := os.Stat(locksDir); err == nil {
+
+	_, locksDirErr := os.Stat(locksDir)
+	if locksDirErr == nil {
 		locks, _ := filepath.Glob(filepath.Join(locksDir, "*.lock"))
 		if len(locks) > 0 {
 			t.Errorf("lock files left behind: %v", locks)

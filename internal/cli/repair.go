@@ -12,7 +12,7 @@ import (
 )
 
 // RepairCmd returns the repair command.
-func RepairCmd(cfg ticket.Config) *Command {
+func RepairCmd(cfg *ticket.Config) *Command {
 	fs := flag.NewFlagSet("repair", flag.ContinueOnError)
 	fs.Bool("all", false, "Repair all tickets")
 	fs.Bool("dry-run", false, "Show what would be fixed without writing")
@@ -32,7 +32,7 @@ Use --dry-run to preview changes without writing.`,
 	}
 }
 
-func execRepair(io *IO, cfg ticket.Config, fs *flag.FlagSet, args []string) error {
+func execRepair(io *IO, cfg *ticket.Config, fs *flag.FlagSet, args []string) error {
 	all, _ := fs.GetBool("all")
 	dryRun, _ := fs.GetBool("dry-run")
 	rebuildCache, _ := fs.GetBool("rebuild-cache")
@@ -40,7 +40,7 @@ func execRepair(io *IO, cfg ticket.Config, fs *flag.FlagSet, args []string) erro
 	if rebuildCache {
 		results, err := ticket.BuildCacheParallelLocked(cfg.TicketDirAbs, nil)
 		if err != nil {
-			return err
+			return fmt.Errorf("rebuild cache: %w", err)
 		}
 
 		for _, r := range results {
@@ -79,7 +79,7 @@ func repairSingleTicket(io *IO, ticketDirAbs, ticketID string, dryRun bool) erro
 
 	blockedBy, err := ticket.ReadTicketBlockedBy(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("read blocked_by: %w", err)
 	}
 
 	staleBlockers := findStaleBlockers(ticketDirAbs, blockedBy)
@@ -106,17 +106,17 @@ func repairSingleTicket(io *IO, ticketDirAbs, ticketID string, dryRun bool) erro
 
 	err = ticket.UpdateTicketBlockedByLocked(path, newBlockedBy)
 	if err != nil {
-		return err
+		return fmt.Errorf("update blocked_by: %w", err)
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		return parseErr
+		return fmt.Errorf("parse frontmatter: %w", parseErr)
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(ticketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
-		return cacheErr
+		return fmt.Errorf("update cache: %w", cacheErr)
 	}
 
 	io.Println("Repaired", ticketID)
@@ -125,9 +125,9 @@ func repairSingleTicket(io *IO, ticketDirAbs, ticketID string, dryRun bool) erro
 }
 
 func repairAllTickets(io *IO, ticketDirAbs string, dryRun bool) error {
-	results, err := ticket.ListTickets(ticketDirAbs, ticket.ListTicketsOptions{Limit: 0}, nil)
+	results, err := ticket.ListTickets(ticketDirAbs, &ticket.ListTicketsOptions{Limit: 0}, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("list tickets: %w", err)
 	}
 
 	validIDs := buildValidIDMap(io, results)

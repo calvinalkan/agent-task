@@ -62,6 +62,7 @@ import (
 // ErrCode is a stable error code for programmatic error handling.
 type ErrCode string
 
+// Stable error codes for programmatic error handling.
 const (
 	ErrIDRequired           ErrCode = "id_required"
 	ErrTicketNotFound       ErrCode = "ticket_not_found"
@@ -116,18 +117,18 @@ type Error struct {
 
 // Error formats the error as logfmt: code=xxx key="value" key="value".
 func (e *Error) Error() string {
-	var b strings.Builder
-	b.WriteString("code=")
-	b.WriteString(string(e.Code))
+	var builder strings.Builder
+	builder.WriteString("code=")
+	builder.WriteString(string(e.Code))
 
 	for _, kv := range e.Context {
-		b.WriteString(" ")
-		b.WriteString(kv.K)
-		b.WriteString("=")
-		fmt.Fprintf(&b, "%q", kv.V)
+		builder.WriteString(" ")
+		builder.WriteString(kv.K)
+		builder.WriteString("=")
+		fmt.Fprintf(&builder, "%q", kv.V)
 	}
 
-	return b.String()
+	return builder.String()
 }
 
 func newErr(code ErrCode, kvs ...KV) *Error {
@@ -142,6 +143,7 @@ func kv(k, v string) KV {
 // Valid values are StatusOpen, StatusInProgress, and StatusClosed.
 type Status string
 
+// Valid status values.
 const (
 	StatusOpen       Status = "open"
 	StatusInProgress Status = "in_progress"
@@ -153,6 +155,7 @@ const (
 // PriorityLow (4) is least urgent.
 type Priority int
 
+// Valid priority values; lower is more urgent.
 const (
 	PriorityCritical Priority = 1
 	PriorityHigh     Priority = 2
@@ -164,6 +167,7 @@ const (
 // Valid values are TypeBug, TypeFeature, TypeTask, TypeEpic, and TypeChore.
 type Type string
 
+// Valid ticket type values.
 const (
 	TypeBug     Type = "bug"
 	TypeFeature Type = "feature"
@@ -172,6 +176,7 @@ const (
 	TypeChore   Type = "chore"
 )
 
+// Default values for new tickets.
 const (
 	DefaultType     = TypeTask
 	DefaultPriority = PriorityHigh
@@ -255,7 +260,7 @@ type UserCreateInput struct {
 // Panics if:
 //   - fuzz.ID is lexicographically less than or equal to the previous ID (violates ordering invariant)
 //   - fuzz.CreatedAt is chronologically before the previous CreatedAt (violates ordering invariant)
-func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Error) {
+func (m *Model) Create(user *UserCreateInput, fuzz FuzzCreateInput) (string, *Error) {
 	if fuzz.ID == "" {
 		return "", newErr(ErrIDRequired)
 	}
@@ -278,14 +283,16 @@ func (m *Model) Create(user UserCreateInput, fuzz FuzzCreateInput) (string, *Err
 	}
 
 	if user.Type != "" {
-		if _, err := toType(user.Type); err != nil {
-			return "", err
+		_, typeErr := toType(user.Type)
+		if typeErr != nil {
+			return "", typeErr
 		}
 	}
 
 	if user.Priority != 0 {
-		if _, err := toPriority(user.Priority); err != nil {
-			return "", err
+		_, prioErr := toPriority(user.Priority)
+		if prioErr != nil {
+			return "", prioErr
 		}
 	}
 
@@ -424,8 +431,9 @@ func (m *Model) Start(user UserStartInput, fuzz FuzzStartInput) *Error {
 		return newErr(ErrStartedBeforeCreated, kv("claimed_at", fuzz.ClaimedAt), kv("created_at", tk.CreatedAt.Format(time.RFC3339)))
 	}
 
-	if err := m.canStart(tk); err != nil {
-		return err
+	startErr := m.canStart(tk)
+	if startErr != nil {
+		return startErr
 	}
 
 	tk.Status = StatusInProgress
@@ -494,19 +502,6 @@ func (m *Model) Close(user UserCloseInput, fuzz FuzzCloseInput) *Error {
 	tk.ClaimedAt = time.Time{}
 
 	return nil
-}
-
-// findOpenChild returns the ID of the first child of parentID that is not closed.
-// Returns empty string if all children are closed (or there are no children).
-func (m *Model) findOpenChild(parentID string) string {
-	for _, id := range m.order {
-		tk := m.tickets[id]
-		if tk.ParentID == parentID && tk.Status != StatusClosed {
-			return id
-		}
-	}
-
-	return ""
 }
 
 // UserReopenInput contains user-provided values for reopening a ticket.
@@ -606,44 +601,6 @@ func (m *Model) Block(user UserBlockInput) *Error {
 	return nil
 }
 
-// findBlockerCyclePath checks if adding "id blocked by blockerID" would create a cycle.
-// If a cycle would be created, returns the path that forms the cycle (e.g. ["A", "B", "C", "A"]).
-// Returns nil if no cycle would be created.
-func (m *Model) findBlockerCyclePath(id, blockerID string) []string {
-	visited := make(map[string]bool)
-
-	path := m.findPathTo(blockerID, id, visited)
-	if path != nil {
-		// path is [blockerID, ..., id], add id at start to show full cycle
-		return append([]string{id}, path...)
-	}
-
-	return nil
-}
-
-// findPathTo searches for a path from "from" to "target" through the blocker graph.
-// Returns the path including both endpoints, or nil if no path exists.
-func (m *Model) findPathTo(from, target string, visited map[string]bool) []string {
-	if visited[from] {
-		return nil
-	}
-
-	visited[from] = true
-
-	if from == target {
-		return []string{target}
-	}
-
-	tk := m.tickets[from]
-	for _, bid := range tk.BlockedBy {
-		if path := m.findPathTo(bid, target, visited); path != nil {
-			return append([]string{from}, path...)
-		}
-	}
-
-	return nil
-}
-
 // UserUnblockInput contains user-provided values for unblocking a ticket.
 type UserUnblockInput struct {
 	ID        string // ticket ID to remove blocker from
@@ -737,6 +694,7 @@ type UserLSInput struct {
 func (m *Model) LS(user UserLSInput) ([]Ticket, *Error) {
 	// Validate filters
 	var statusFilter Status
+
 	if user.Status != "" {
 		s, err := toStatus(user.Status)
 		if err != nil {
@@ -747,6 +705,7 @@ func (m *Model) LS(user UserLSInput) ([]Ticket, *Error) {
 	}
 
 	var priorityFilter Priority
+
 	if user.Priority != 0 {
 		p, err := toPriority(user.Priority)
 		if err != nil {
@@ -757,6 +716,7 @@ func (m *Model) LS(user UserLSInput) ([]Ticket, *Error) {
 	}
 
 	var typeFilter Type
+
 	if user.Type != "" {
 		t, err := toType(user.Type)
 		if err != nil {
@@ -873,6 +833,57 @@ func (m *Model) Ready(user UserReadyInput) ([]Ticket, *Error) {
 	}
 
 	return ready, nil
+}
+
+// findOpenChild returns the ID of the first child of parentID that is not closed.
+// Returns empty string if all children are closed (or there are no children).
+func (m *Model) findOpenChild(parentID string) string {
+	for _, id := range m.order {
+		tk := m.tickets[id]
+		if tk.ParentID == parentID && tk.Status != StatusClosed {
+			return id
+		}
+	}
+
+	return ""
+}
+
+// findBlockerCyclePath checks if adding "id blocked by blockerID" would create a cycle.
+// If a cycle would be created, returns the path that forms the cycle (e.g. ["A", "B", "C", "A"]).
+// Returns nil if no cycle would be created.
+func (m *Model) findBlockerCyclePath(id, blockerID string) []string {
+	visited := make(map[string]bool)
+
+	path := m.findPathTo(blockerID, id, visited)
+	if path != nil {
+		// path is [blockerID, ..., id], add id at start to show full cycle
+		return append([]string{id}, path...)
+	}
+
+	return nil
+}
+
+// findPathTo searches for a path from "from" to "target" through the blocker graph.
+// Returns the path including both endpoints, or nil if no path exists.
+func (m *Model) findPathTo(from, target string, visited map[string]bool) []string {
+	if visited[from] {
+		return nil
+	}
+
+	visited[from] = true
+
+	if from == target {
+		return []string{target}
+	}
+
+	tk := m.tickets[from]
+	for _, bid := range tk.BlockedBy {
+		if path := m.findPathTo(bid, target, visited); path != nil {
+			return append([]string{from}, path...)
+		}
+	}
+
+	return nil
 }
 
 // canStart checks if a ticket can be started.

@@ -55,7 +55,12 @@ type Locker struct {
 }
 
 // NewLocker creates a Locker that uses the given filesystem for file operations.
+// Panics if fs is nil.
 func NewLocker(fs FS) *Locker {
+	if fs == nil {
+		panic("fs is nil")
+	}
+
 	return &Locker{
 		fs:    fs,
 		flock: syscall.Flock,
@@ -176,7 +181,7 @@ func (l *Locker) RLockWithTimeout(ctx context.Context, path string) (*Lock, erro
 // Returns immediately with [ErrWouldBlock] if the lock cannot be acquired
 // immediately. Use this for opportunistic locking where you have a fallback.
 func (l *Locker) TryLock(path string) (*Lock, error) {
-	return l.tryLock(path, exclusiveLock)
+	return l.acquireNonBlocking(path, exclusiveLock)
 }
 
 // TryRLock attempts to acquire a shared lock without blocking.
@@ -185,7 +190,7 @@ func (l *Locker) TryLock(path string) (*Lock, error) {
 // immediately (for example, if an exclusive lock is held). Multiple shared
 // locks can be held simultaneously.
 func (l *Locker) TryRLock(path string) (*Lock, error) {
-	return l.tryLock(path, sharedLock)
+	return l.acquireNonBlocking(path, sharedLock)
 }
 
 type lockType int
@@ -226,8 +231,8 @@ func (l *Locker) lockBlocking(path string, lt lockType) (*Lock, error) {
 	}
 }
 
-// tryLock attempts to acquire a lock without blocking.
-func (l *Locker) tryLock(path string, lt lockType) (*Lock, error) {
+// acquireNonBlocking attempts to acquire a lock without blocking.
+func (l *Locker) acquireNonBlocking(path string, lt lockType) (*Lock, error) {
 	openFlag := openFlagForLockType(lt)
 
 	file, err := l.openLockFile(path, openFlag)
@@ -256,7 +261,8 @@ func (l *Locker) lockPolling(ctx context.Context, path string, lt lockType) (*Lo
 	openFlag := openFlagForLockType(lt)
 
 	for {
-		if err := ctx.Err(); err != nil {
+		err := ctx.Err()
+		if err != nil {
 			return nil, fmt.Errorf("acquiring lock on %s: %w", path, err)
 		}
 
@@ -309,7 +315,8 @@ func (l *Locker) acquire(file File, path string, lt lockType, mode lockMode) err
 		flags |= syscall.LOCK_NB
 	}
 
-	if err := flockRetryEINTR(l.flock, fd, flags); err != nil {
+	err := flockRetryEINTR(l.flock, fd, flags)
+	if err != nil {
 		if isWouldBlock(err) {
 			return ErrWouldBlock
 		}
@@ -343,16 +350,26 @@ const (
 )
 
 func (l *Locker) openLockFile(path string, flag int) (File, error) {
-	f, err := l.fs.OpenFile(path, flag|os.O_CREATE, lockFilePerm)
-	if err == nil || !errors.Is(err, os.ErrNotExist) {
-		return f, err
+	file, err := l.fs.OpenFile(path, flag|os.O_CREATE, lockFilePerm)
+	if err == nil {
+		return file, nil
 	}
 
-	if err := l.fs.MkdirAll(filepath.Dir(path), lockDirPerm); err != nil {
-		return nil, err
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("open lock file: %w", err)
 	}
 
-	return l.fs.OpenFile(path, flag|os.O_CREATE, lockFilePerm)
+	err = l.fs.MkdirAll(filepath.Dir(path), lockDirPerm)
+	if err != nil {
+		return nil, fmt.Errorf("create lock dir: %w", err)
+	}
+
+	file, err = l.fs.OpenFile(path, flag|os.O_CREATE, lockFilePerm)
+	if err != nil {
+		return nil, fmt.Errorf("open lock file: %w", err)
+	}
+
+	return file, nil
 }
 
 // inodeMatchesPath verifies that f (the open file descriptor we're about to
@@ -382,7 +399,7 @@ func (l *Locker) openLockFile(path string, flag int) (File, error) {
 func (l *Locker) inodeMatchesPath(path string, f File) (bool, error) {
 	openInfo, err := f.Stat()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("stat open file: %w", err)
 	}
 
 	openSys, ok := openInfo.Sys().(*syscall.Stat_t)
@@ -392,7 +409,7 @@ func (l *Locker) inodeMatchesPath(path string, f File) (bool, error) {
 
 	pathInfo, err := l.fs.Stat(path)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("stat path: %w", err)
 	}
 
 	pathSys, ok := pathInfo.Sys().(*syscall.Stat_t)
@@ -428,7 +445,7 @@ func openFlagForLockType(lt lockType) int {
 // during a single flock call, something else is very wrong. Note that Go's
 // stdlib (ignoringEINTR in the os package) retries forever without a cap.
 func flockRetryEINTR(flock func(fd int, how int) error, fd int, how int) error {
-	const maxEINTRRetries = 10000
+	const maxEINTRRetries = atomicWriteMaxAttempts
 
 	var err error
 	for range maxEINTRRetries {

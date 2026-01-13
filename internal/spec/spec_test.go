@@ -1,23 +1,28 @@
-package spec
+package spec_test
 
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/calvinalkan/agent-task/internal/spec"
 )
 
 func TestBlockerCycleDetection(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
-		setup       func(m *Model) // create tickets and existing blocks
-		targetID    string         // ticket to add blocker to
-		blockedByID string         // ticket to add as blocker
-		wantErr     ErrCode        // expected error code, empty if should succeed
-		wantCycle   []string       // expected cycle path if error
+		setup       func(m *spec.Model) // create tickets and existing blocks
+		targetID    string              // ticket to add blocker to
+		blockedByID string              // ticket to add as blocker
+		wantErr     spec.ErrCode        // expected error code, empty if should succeed
+		wantCycle   []string            // expected cycle path if error
 	}{
 		{
 			name: "no cycle - simple block",
-			setup: func(m *Model) {
+			setup: func(m *spec.Model) {
 				createTicket(m, "A")
 				createTicket(m, "B")
 			},
@@ -27,7 +32,7 @@ func TestBlockerCycleDetection(t *testing.T) {
 		},
 		{
 			name: "no cycle - chain",
-			setup: func(m *Model) {
+			setup: func(m *spec.Model) {
 				createTicket(m, "A")
 				createTicket(m, "B")
 				createTicket(m, "C")
@@ -40,19 +45,19 @@ func TestBlockerCycleDetection(t *testing.T) {
 		},
 		{
 			name: "direct cycle - A blocked by B, B blocked by A",
-			setup: func(m *Model) {
+			setup: func(m *spec.Model) {
 				createTicket(m, "A")
 				createTicket(m, "B")
 				mustBlock(m, "A", "B") // A blocked by B
 			},
 			targetID:    "B",
 			blockedByID: "A",
-			wantErr:     ErrBlockerCycle,
+			wantErr:     spec.ErrBlockerCycle,
 			wantCycle:   []string{"B", "A", "B"},
 		},
 		{
 			name: "indirect cycle - A→B→C→A",
-			setup: func(m *Model) {
+			setup: func(m *spec.Model) {
 				createTicket(m, "A")
 				createTicket(m, "B")
 				createTicket(m, "C")
@@ -61,12 +66,12 @@ func TestBlockerCycleDetection(t *testing.T) {
 			},
 			targetID:    "C",
 			blockedByID: "A",
-			wantErr:     ErrBlockerCycle,
+			wantErr:     spec.ErrBlockerCycle,
 			wantCycle:   []string{"C", "A", "B", "C"},
 		},
 		{
 			name: "longer cycle - A→B→C→D→A",
-			setup: func(m *Model) {
+			setup: func(m *spec.Model) {
 				createTicket(m, "A")
 				createTicket(m, "B")
 				createTicket(m, "C")
@@ -77,12 +82,12 @@ func TestBlockerCycleDetection(t *testing.T) {
 			},
 			targetID:    "D",
 			blockedByID: "A",
-			wantErr:     ErrBlockerCycle,
+			wantErr:     spec.ErrBlockerCycle,
 			wantCycle:   []string{"D", "A", "B", "C", "D"},
 		},
 		{
 			name: "branching - no cycle through other branch",
-			setup: func(m *Model) {
+			setup: func(m *spec.Model) {
 				createTicket(m, "A")
 				createTicket(m, "B")
 				createTicket(m, "C")
@@ -97,7 +102,7 @@ func TestBlockerCycleDetection(t *testing.T) {
 		},
 		{
 			name: "branching - cycle through one branch",
-			setup: func(m *Model) {
+			setup: func(m *spec.Model) {
 				createTicket(m, "A")
 				createTicket(m, "B")
 				createTicket(m, "C")
@@ -108,17 +113,19 @@ func TestBlockerCycleDetection(t *testing.T) {
 			},
 			targetID:    "D",
 			blockedByID: "A",
-			wantErr:     ErrBlockerCycle,
+			wantErr:     spec.ErrBlockerCycle,
 			wantCycle:   []string{"D", "A", "C", "D"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := New()
+			t.Parallel()
+
+			m := spec.New()
 			tt.setup(m)
 
-			err := m.Block(UserBlockInput{ID: tt.targetID, BlockerID: tt.blockedByID})
+			err := m.Block(spec.UserBlockInput{ID: tt.targetID, BlockerID: tt.blockedByID})
 
 			if tt.wantErr == "" {
 				if err != nil {
@@ -152,29 +159,29 @@ func TestBlockerCycleDetection(t *testing.T) {
 	}
 }
 
-var ticketCounter int
+var ticketCounter atomic.Int64
 
-func createTicket(m *Model, id string) {
-	ticketCounter++
-	timestamp := fmt.Sprintf("2024-01-01T00:00:%02dZ", ticketCounter)
+func createTicket(m *spec.Model, id string) {
+	count := ticketCounter.Add(1)
+	timestamp := fmt.Sprintf("2024-01-01T00:00:%02dZ", count)
 
 	_, err := m.Create(
-		UserCreateInput{Title: "ticket " + id, Content: "content for " + id},
-		FuzzCreateInput{ID: id, CreatedAt: timestamp},
+		&spec.UserCreateInput{Title: "ticket " + id, Content: "content for " + id},
+		spec.FuzzCreateInput{ID: id, CreatedAt: timestamp},
 	)
 	if err != nil {
 		panic("createTicket failed: " + err.Error())
 	}
 }
 
-func mustBlock(m *Model, id, blockerID string) {
-	err := m.Block(UserBlockInput{ID: id, BlockerID: blockerID})
+func mustBlock(m *spec.Model, id, blockerID string) {
+	err := m.Block(spec.UserBlockInput{ID: id, BlockerID: blockerID})
 	if err != nil {
 		panic("mustBlock failed: " + err.Error())
 	}
 }
 
-func getContextValue(err *Error, key string) string {
+func getContextValue(err *spec.Error, key string) string {
 	for _, kv := range err.Context {
 		if kv.K == key {
 			return kv.V

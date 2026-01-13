@@ -3,12 +3,18 @@ package cli_test
 import (
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/calvinalkan/agent-task/internal/cli"
+)
+
+const (
+	statusOpen       = "open"
+	statusInProgress = "in_progress"
+	statusClosed     = "closed"
 )
 
 // TicketModel represents the expected state of a single ticket.
@@ -72,7 +78,7 @@ type CreateOpts struct {
 // Create adds a new ticket to the model.
 // The id parameter is the real ID from the CLI (passed after CLI creates the ticket).
 // If id is empty, only validation is performed (for when CLI failed).
-func (m *Model) Create(id string, opts CreateOpts) error {
+func (m *Model) Create(id string, opts *CreateOpts) error {
 	// Validation first
 	if opts.Title == "" {
 		return errModelTitleRequired
@@ -125,7 +131,7 @@ func (m *Model) Create(id string, opts CreateOpts) error {
 		Type:        ticketType,
 		Priority:    priority,
 		Assignee:    opts.Assignee,
-		Status:      "open",
+		Status:      statusOpen,
 		BlockedBy:   slices.Clone(opts.BlockedBy),
 		HasClosed:   false,
 	}
@@ -140,11 +146,11 @@ func (m *Model) Start(id string) error {
 		return errModelTicketNotFound
 	}
 
-	if tk.Status != "open" {
+	if tk.Status != statusOpen {
 		return fmt.Errorf("%w (current status: %s)", errModelTicketNotOpen, tk.Status)
 	}
 
-	tk.Status = "in_progress"
+	tk.Status = statusInProgress
 
 	return nil
 }
@@ -156,15 +162,15 @@ func (m *Model) Close(id string) error {
 		return errModelTicketNotFound
 	}
 
-	if tk.Status == "closed" {
+	if tk.Status == statusClosed {
 		return errModelAlreadyClosed
 	}
 
-	if tk.Status != "in_progress" {
+	if tk.Status != statusInProgress {
 		return errModelTicketNotStarted
 	}
 
-	tk.Status = "closed"
+	tk.Status = statusClosed
 	tk.HasClosed = true
 
 	return nil
@@ -177,15 +183,15 @@ func (m *Model) Reopen(id string) error {
 		return errModelTicketNotFound
 	}
 
-	if tk.Status == "open" {
+	if tk.Status == statusOpen {
 		return errModelAlreadyOpen
 	}
 
-	if tk.Status != "closed" {
+	if tk.Status != statusClosed {
 		return fmt.Errorf("%w (current status: %s)", errModelNotClosed, tk.Status)
 	}
 
-	tk.Status = "open"
+	tk.Status = statusOpen
 	tk.HasClosed = false
 
 	return nil
@@ -269,10 +275,10 @@ func (m *Model) TicketCount() int {
 type Op interface {
 	// Apply applies the operation to the model.
 	// For most operations, this is called after Run.
-	Apply(*Model) error
+	Apply(m *Model) error
 	// Run executes the operation against the real CLI.
 	// Returns (createdID, error) - createdID is only set for Create operations.
-	Run(*cli.CLI) (createdID string, err error)
+	Run(c *cli.CLI) (createdID string, err error)
 	String() string
 }
 
@@ -283,7 +289,7 @@ type CreateOp struct {
 }
 
 func (o *CreateOp) Apply(m *Model) error {
-	return m.Create(o.CreatedID, o.Opts)
+	return m.Create(o.CreatedID, &o.Opts)
 }
 
 func (o *CreateOp) Run(c *cli.CLI) (string, error) {
@@ -447,13 +453,13 @@ func (o UnblockOp) String() string {
 // ListOp lists all tickets.
 type ListOp struct{}
 
-func (o ListOp) Apply(m *Model) error {
+func (ListOp) Apply(m *Model) error {
 	_ = m.List()
 
 	return nil
 }
 
-func (o ListOp) Run(c *cli.CLI) (string, error) {
+func (ListOp) Run(c *cli.CLI) (string, error) {
 	_, stderr, code := c.Run("ls")
 	if code != 0 {
 		return "", errors.New(stderr)
@@ -462,7 +468,7 @@ func (o ListOp) Run(c *cli.CLI) (string, error) {
 	return "", nil
 }
 
-func (o ListOp) String() string {
+func (ListOp) String() string {
 	return "List()"
 }
 
@@ -515,8 +521,8 @@ func (o ShowOp) String() string {
 }
 
 // genOp generates a random operation based on current model state.
-func genOp(rng *rand.Rand, model *Model, realIDs []string) Op {
-	switch rng.Intn(10) {
+func genOp(rng *rand.Rand, _ *Model, realIDs []string) Op {
+	switch rng.IntN(10) {
 	case 0, 1:
 		return &CreateOp{Opts: genCreateOpts(rng, realIDs)}
 	case 2:
@@ -532,9 +538,9 @@ func genOp(rng *rand.Rand, model *Model, realIDs []string) Op {
 	case 7:
 		return ListOp{}
 	case 8:
-		statuses := []string{"open", "in_progress", "closed"}
+		statuses := []string{statusOpen, statusInProgress, statusClosed}
 
-		return ListByStatusOp{Status: statuses[rng.Intn(len(statuses))]}
+		return ListByStatusOp{Status: statuses[rng.IntN(len(statuses))]}
 	case 9:
 		return ShowOp{ID: pickTicketID(rng, realIDs)}
 	}
@@ -566,12 +572,12 @@ func genCreateOpts(rng *rand.Rand, existingIDs []string) CreateOpts {
 	// 50% chance of custom type
 	if rng.Float32() < 0.5 {
 		types := []string{"bug", "feature", "task", "epic", "chore"}
-		opts.Type = types[rng.Intn(len(types))]
+		opts.Type = types[rng.IntN(len(types))]
 	}
 
 	// 50% chance of custom priority
 	if rng.Float32() < 0.5 {
-		opts.Priority = rng.Intn(4) + 1 // 1-4
+		opts.Priority = rng.IntN(4) + 1 // 1-4
 	}
 
 	// 30% chance of assignee
@@ -581,9 +587,9 @@ func genCreateOpts(rng *rand.Rand, existingIDs []string) CreateOpts {
 
 	// 20% chance of blockers (if tickets exist)
 	if rng.Float32() < 0.2 && len(existingIDs) > 0 {
-		numBlockers := rng.Intn(2) + 1
+		numBlockers := rng.IntN(2) + 1
 		for i := 0; i < numBlockers && i < len(existingIDs); i++ {
-			opts.BlockedBy = append(opts.BlockedBy, existingIDs[rng.Intn(len(existingIDs))])
+			opts.BlockedBy = append(opts.BlockedBy, existingIDs[rng.IntN(len(existingIDs))])
 		}
 	}
 
@@ -600,7 +606,7 @@ func pickTitle(rng *rand.Rand) string {
 		"A",                      // minimal
 	}
 
-	return titles[rng.Intn(len(titles))]
+	return titles[rng.IntN(len(titles))]
 }
 
 // pickDescription returns a random description.
@@ -611,14 +617,14 @@ func pickDescription(rng *rand.Rand) string {
 		"A longer description with more details about what needs to be done",
 	}
 
-	return descriptions[rng.Intn(len(descriptions))]
+	return descriptions[rng.IntN(len(descriptions))]
 }
 
 // pickAssignee returns a random assignee.
 func pickAssignee(rng *rand.Rand) string {
 	assignees := []string{"Alice", "Bob", "Charlie", "Diana"}
 
-	return assignees[rng.Intn(len(assignees))]
+	return assignees[rng.IntN(len(assignees))]
 }
 
 // pickTicketID returns a random existing ID, or invalid ID sometimes.
@@ -627,8 +633,8 @@ func pickTicketID(rng *rand.Rand, existingIDs []string) string {
 	if rng.Float32() < 0.2 || len(existingIDs) == 0 {
 		invalids := []string{"", "nonexistent", "INVALID-999"}
 
-		return invalids[rng.Intn(len(invalids))]
+		return invalids[rng.IntN(len(invalids))]
 	}
 
-	return existingIDs[rng.Intn(len(existingIDs))]
+	return existingIDs[rng.IntN(len(existingIDs))]
 }

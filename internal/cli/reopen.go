@@ -10,7 +10,7 @@ import (
 )
 
 // ReopenCmd returns the reopen command.
-func ReopenCmd(cfg ticket.Config) *Command {
+func ReopenCmd(cfg *ticket.Config) *Command {
 	return &Command{
 		Flags: flag.NewFlagSet("reopen", flag.ContinueOnError),
 		Usage: "reopen <id>",
@@ -26,7 +26,7 @@ Requirements:
 	}
 }
 
-func execReopen(io *IO, cfg ticket.Config, args []string) error {
+func execReopen(io *IO, cfg *ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
@@ -89,17 +89,17 @@ func execReopen(io *IO, cfg ticket.Config, args []string) error {
 		return result, nil
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("update ticket: %w", err)
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		return parseErr
+		return fmt.Errorf("parse frontmatter: %w", parseErr)
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
-		return cacheErr
+		return fmt.Errorf("update cache: %w", cacheErr)
 	}
 
 	io.Println("Reopened", ticketID)

@@ -48,6 +48,7 @@ func (r *CLI) Run(args ...string) (string, string, int) {
 // stdin must be a string or io.Reader; panics otherwise.
 func (r *CLI) RunWithInput(stdin any, args ...string) (string, string, int) {
 	var inReader io.Reader
+
 	switch v := stdin.(type) {
 	case string:
 		inReader = strings.NewReader(v)
@@ -150,7 +151,7 @@ func AssertTicketListed(t *testing.T, content, ticketID string) {
 	t.Helper()
 
 	prefix := ticketID + " "
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		if strings.HasPrefix(line, prefix) {
 			return
 		}
@@ -165,7 +166,7 @@ func AssertTicketNotListed(t *testing.T, content, ticketID string) {
 	t.Helper()
 
 	prefix := ticketID + " "
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		if strings.HasPrefix(line, prefix) {
 			t.Errorf("ticket %q should NOT be listed\ncontent:\n%s", ticketID, content)
 

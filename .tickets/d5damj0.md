@@ -1,7 +1,8 @@
 ---
 schema_version: 1
 id: d5damj0
-status: open
+status: closed
+closed: 2026-01-10T03:42:37Z
 blocked-by: [d5dae6r]
 created: 2026-01-04T17:58:32Z
 type: feature

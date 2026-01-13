@@ -5,6 +5,7 @@
 //   - [File]: interface for open files (satisfied by [os.File])
 //   - [Real]: production implementation using [os] package
 //   - [Chaos]: testing implementation that injects random failures
+//   - [Crash]: testing implementation that simulates crash consistency
 //
 // Example usage:
 //
@@ -34,11 +35,16 @@ import (
 // including that [File.Fd] returns a valid OS file descriptor usable with
 // syscalls (for example [syscall.Flock]) until the file is closed.
 //
+// Note: [File] includes [io.Writer] even for read-only handles. Like [os.File],
+// implementations should return an error from Write when the file wasn't opened
+// for writing.
+//
 // Implementations must be safe for concurrent use by multiple goroutines.
 //
 // Example:
 //
-//	f, _ := fs.Open("data.txt")
+//	fsys := fs.NewReal()
+//	f, _ := fsys.Open("data.txt")
 //	defer f.Close()
 //
 //	// Use with bufio
@@ -64,13 +70,17 @@ type File interface {
 
 	// Sync commits the file's contents to disk. See [os.File.Sync].
 	Sync() error
+
+	// Chmod changes the mode of the file. See [os.File.Chmod].
+	Chmod(mode os.FileMode) error
 }
 
 // FS defines filesystem operations for reading, writing, and managing files.
 //
-// Two implementations are provided:
+// Implementations in this package include:
 //   - [Real]: production use, wraps [os] package
 //   - [Chaos]: testing use, injects random failures
+//   - [Crash]: testing use, simulates crash consistency
 //
 // All methods mirror their [os] package equivalents but can be intercepted
 // for testing with fault injection.

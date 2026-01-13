@@ -9,19 +9,19 @@ import (
 )
 
 // PrintConfigCmd returns the print-config command.
-func PrintConfigCmd(cfg ticket.Config) *Command {
+func PrintConfigCmd(cfg *ticket.Config) *Command {
 	return &Command{
 		Flags: flag.NewFlagSet("print-config", flag.ContinueOnError),
 		Usage: "print-config",
 		Short: "Show resolved configuration",
 		Long:  "Display the effective configuration and which files it was loaded from.",
-		Exec: func(_ context.Context, io *IO, args []string) error {
+		Exec: func(_ context.Context, io *IO, _ []string) error {
 			return execPrintConfig(io, cfg)
 		},
 	}
 }
 
-func execPrintConfig(io *IO, cfg ticket.Config) error {
+func execPrintConfig(io *IO, cfg *ticket.Config) error {
 	io.Println("effective_cwd=" + cfg.EffectiveCwd)
 	io.Println("ticket_dir=" + cfg.TicketDirAbs)
 

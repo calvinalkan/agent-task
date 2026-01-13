@@ -10,7 +10,7 @@ import (
 )
 
 // StartCmd returns the start command.
-func StartCmd(cfg ticket.Config) *Command {
+func StartCmd(cfg *ticket.Config) *Command {
 	return &Command{
 		Flags: flag.NewFlagSet("start", flag.ContinueOnError),
 		Usage: "start <id>",
@@ -26,7 +26,7 @@ Requirements:
 	}
 }
 
-func execStart(io *IO, cfg ticket.Config, args []string) error {
+func execStart(io *IO, cfg *ticket.Config, args []string) error {
 	if len(args) == 0 {
 		return ticket.ErrIDRequired
 	}
@@ -71,17 +71,17 @@ func execStart(io *IO, cfg ticket.Config, args []string) error {
 		return ticket.UpdateStatusInContent(content, ticket.StatusInProgress)
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("update ticket: %w", err)
 	}
 
 	summary, parseErr := ticket.ParseTicketFrontmatter(path)
 	if parseErr != nil {
-		return parseErr
+		return fmt.Errorf("parse frontmatter: %w", parseErr)
 	}
 
 	cacheErr := ticket.UpdateCacheAfterTicketWrite(cfg.TicketDirAbs, ticketID+".md", &summary)
 	if cacheErr != nil {
-		return cacheErr
+		return fmt.Errorf("update cache: %w", cacheErr)
 	}
 
 	io.Println("Started", ticketID)
@@ -89,7 +89,7 @@ func execStart(io *IO, cfg ticket.Config, args []string) error {
 
 	content, err := ticket.ReadTicket(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("read ticket: %w", err)
 	}
 
 	io.Printf("%s", content)

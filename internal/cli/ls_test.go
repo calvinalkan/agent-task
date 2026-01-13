@@ -13,25 +13,6 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-// createTestTicket creates a test ticket with proper format.
-func createTestTicket(t *testing.T, ticketDir, ticketID, status, title string, blockedBy []string) {
-	t.Helper()
-
-	createTestTicketFull(t, ticketDir, ticketID, status, title, "task", 2, blockedBy)
-}
-
-func backdateCacheLS(t *testing.T, ticketDir string) {
-	t.Helper()
-
-	cachePath := filepath.Join(ticketDir, ticket.CacheFileName)
-	past := time.Now().Add(-10 * time.Second)
-
-	err := os.Chtimes(cachePath, past, past)
-	if err != nil {
-		t.Fatalf("failed to backdate cache: %v", err)
-	}
-}
-
 func TestLsCommand(t *testing.T) {
 	t.Parallel()
 
@@ -56,7 +37,7 @@ func TestLsCommand(t *testing.T) {
 			name: "lists all tickets",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicket(t, ticketDir, "test-001", "open", "First ticket", nil)
+				createTestTicket(t, ticketDir, "test-001", statusOpen, "First ticket", nil)
 				createTestTicket(t, ticketDir, "test-002", "closed", "Second ticket", nil)
 			},
 			args:       []string{"ls"},
@@ -67,7 +48,7 @@ func TestLsCommand(t *testing.T) {
 			name: "filter by status open",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicket(t, ticketDir, "test-001", "open", "Open ticket", nil)
+				createTestTicket(t, ticketDir, "test-001", statusOpen, "Open ticket", nil)
 				createTestTicket(t, ticketDir, "test-002", "closed", "Closed ticket", nil)
 			},
 			args:       []string{"ls", "--status=open"},
@@ -79,7 +60,7 @@ func TestLsCommand(t *testing.T) {
 			name: "filter by status closed",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicket(t, ticketDir, "test-001", "open", "Open ticket", nil)
+				createTestTicket(t, ticketDir, "test-001", statusOpen, "Open ticket", nil)
 				createTestTicket(t, ticketDir, "test-002", "closed", "Closed ticket", nil)
 			},
 			args:       []string{"ls", "--status=closed"},
@@ -91,7 +72,7 @@ func TestLsCommand(t *testing.T) {
 			name: "filter by status in_progress",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicket(t, ticketDir, "test-001", "open", "Open ticket", nil)
+				createTestTicket(t, ticketDir, "test-001", statusOpen, "Open ticket", nil)
 				createTestTicket(t, ticketDir, "test-002", "in_progress", "In progress ticket", nil)
 			},
 			args:       []string{"ls", "--status=in_progress"},
@@ -115,9 +96,9 @@ func TestLsCommand(t *testing.T) {
 			name: "filter by priority",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "p1-001", "open", "Priority 1", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "p2-002", "open", "Priority 2", "task", 2, nil)
-				createTestTicketFull(t, ticketDir, "p3-003", "open", "Priority 3", "feature", 3, nil)
+				createTestTicketFull(t, ticketDir, "p1-001", statusOpen, "Priority 1", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "p2-002", statusOpen, "Priority 2", "task", 2, nil)
+				createTestTicketFull(t, ticketDir, "p3-003", statusOpen, "Priority 3", "feature", 3, nil)
 			},
 			args:       []string{"ls", "--priority=1"},
 			wantExit:   0,
@@ -128,9 +109,9 @@ func TestLsCommand(t *testing.T) {
 			name: "filter by type",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "bug-001", "open", "A Bug", "bug", 2, nil)
-				createTestTicketFull(t, ticketDir, "feat-002", "open", "A Feature", "feature", 2, nil)
-				createTestTicketFull(t, ticketDir, "task-003", "open", "A Task", "task", 2, nil)
+				createTestTicketFull(t, ticketDir, "bug-001", statusOpen, "A Bug", "bug", 2, nil)
+				createTestTicketFull(t, ticketDir, "feat-002", statusOpen, "A Feature", "feature", 2, nil)
+				createTestTicketFull(t, ticketDir, "task-003", statusOpen, "A Task", "task", 2, nil)
 			},
 			args:       []string{"ls", "--type=bug"},
 			wantExit:   0,
@@ -141,10 +122,10 @@ func TestLsCommand(t *testing.T) {
 			name: "filter by multiple fields",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "match-001", "open", "Match", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-002", "open", "No Match", "bug", 2, nil)
+				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-002", statusOpen, "No Match", "bug", 2, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-003", "closed", "No Match", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-004", "open", "No Match", "feature", 1, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-004", statusOpen, "No Match", "feature", 1, nil)
 			},
 			args:       []string{"ls", "--status=open", "--priority=1", "--type=bug"},
 			wantExit:   0,
@@ -155,9 +136,9 @@ func TestLsCommand(t *testing.T) {
 			name: "filter status and priority",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "match-001", "open", "Match", "task", 1, nil)
+				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "task", 1, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-002", "closed", "Wrong Status", "task", 1, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-003", "open", "Wrong Priority", "task", 2, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-003", statusOpen, "Wrong Priority", "task", 2, nil)
 			},
 			args:       []string{"ls", "--status=open", "--priority=1"},
 			wantExit:   0,
@@ -168,9 +149,9 @@ func TestLsCommand(t *testing.T) {
 			name: "filter status and type",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "match-001", "open", "Match", "bug", 2, nil)
+				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "bug", 2, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-002", "closed", "Wrong Status", "bug", 2, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-003", "open", "Wrong Type", "feature", 2, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-003", statusOpen, "Wrong Type", "feature", 2, nil)
 			},
 			args:       []string{"ls", "--status=open", "--type=bug"},
 			wantExit:   0,
@@ -181,9 +162,9 @@ func TestLsCommand(t *testing.T) {
 			name: "filter priority and type",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "match-001", "open", "Match", "feature", 2, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-002", "open", "Wrong Priority", "feature", 1, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-003", "open", "Wrong Type", "bug", 2, nil)
+				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "feature", 2, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-002", statusOpen, "Wrong Priority", "feature", 1, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-003", statusOpen, "Wrong Type", "bug", 2, nil)
 			},
 			args:       []string{"ls", "--priority=2", "--type=feature"},
 			wantExit:   0,
@@ -195,7 +176,7 @@ func TestLsCommand(t *testing.T) {
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
 				createTestTicketFull(t, ticketDir, "a-001", "closed", "Closed", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "b-002", "open", "Open", "feature", 2, nil)
+				createTestTicketFull(t, ticketDir, "b-002", statusOpen, "Open", "feature", 2, nil)
 			},
 			args:       []string{"ls", "--status=open", "--priority=1", "--type=bug"},
 			wantExit:   0,
@@ -206,9 +187,9 @@ func TestLsCommand(t *testing.T) {
 			name: "filter all match",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "a-001", "open", "Open 1", "task", 2, nil)
-				createTestTicketFull(t, ticketDir, "b-002", "open", "Open 2", "task", 2, nil)
-				createTestTicketFull(t, ticketDir, "c-003", "open", "Open 3", "task", 2, nil)
+				createTestTicketFull(t, ticketDir, "a-001", statusOpen, "Open 1", "task", 2, nil)
+				createTestTicketFull(t, ticketDir, "b-002", statusOpen, "Open 2", "task", 2, nil)
+				createTestTicketFull(t, ticketDir, "c-003", statusOpen, "Open 3", "task", 2, nil)
 			},
 			args:       []string{"ls", "--status=open"},
 			wantExit:   0,
@@ -218,10 +199,10 @@ func TestLsCommand(t *testing.T) {
 			name: "filter single ticket match",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "match-001", "open", "The One", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "The One", "bug", 1, nil)
 				createTestTicketFull(t, ticketDir, "a-002", "closed", "Nope", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "b-003", "open", "Nope", "feature", 1, nil)
-				createTestTicketFull(t, ticketDir, "c-004", "open", "Nope", "bug", 2, nil)
+				createTestTicketFull(t, ticketDir, "b-003", statusOpen, "Nope", "feature", 1, nil)
+				createTestTicketFull(t, ticketDir, "c-004", statusOpen, "Nope", "bug", 2, nil)
 			},
 			args:       []string{"ls", "--status=open", "--priority=1", "--type=bug"},
 			wantExit:   0,
@@ -255,8 +236,8 @@ func TestLsCommand(t *testing.T) {
 			name: "shows blockers in output",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicket(t, ticketDir, "blocker-001", "open", "Blocker ticket", nil)
-				createTestTicket(t, ticketDir, "test-002", "open", "Main ticket", []string{"blocker-001"})
+				createTestTicket(t, ticketDir, "blocker-001", statusOpen, "Blocker ticket", nil)
+				createTestTicket(t, ticketDir, "test-002", statusOpen, "Main ticket", []string{"blocker-001"})
 			},
 			args:       []string{"ls"},
 			wantExit:   0,
@@ -266,9 +247,9 @@ func TestLsCommand(t *testing.T) {
 			name: "multiple blockers in output",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicket(t, ticketDir, "blocker-001", "open", "Blocker 1", nil)
-				createTestTicket(t, ticketDir, "blocker-002", "open", "Blocker 2", nil)
-				createTestTicket(t, ticketDir, "test-003", "open", "Main", []string{"blocker-001", "blocker-002"})
+				createTestTicket(t, ticketDir, "blocker-001", statusOpen, "Blocker 1", nil)
+				createTestTicket(t, ticketDir, "blocker-002", statusOpen, "Blocker 2", nil)
+				createTestTicket(t, ticketDir, "test-003", statusOpen, "Main", []string{"blocker-001", "blocker-002"})
 			},
 			args:       []string{"ls"},
 			wantExit:   0,
@@ -278,7 +259,7 @@ func TestLsCommand(t *testing.T) {
 			name: "no blockers suffix when empty",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicket(t, ticketDir, "test-001", "open", "No blockers", nil)
+				createTestTicket(t, ticketDir, "test-001", statusOpen, "No blockers", nil)
 			},
 			args:      []string{"ls"},
 			wantExit:  0,
@@ -288,9 +269,9 @@ func TestLsCommand(t *testing.T) {
 			name: "sorted by ID oldest first",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicket(t, ticketDir, "z-999", "open", "Last", nil)
-				createTestTicket(t, ticketDir, "a-001", "open", "First", nil)
-				createTestTicket(t, ticketDir, "m-500", "open", "Middle", nil)
+				createTestTicket(t, ticketDir, "z-999", statusOpen, "Last", nil)
+				createTestTicket(t, ticketDir, "a-001", statusOpen, "First", nil)
+				createTestTicket(t, ticketDir, "m-500", statusOpen, "Middle", nil)
 			},
 			args:     []string{"ls"},
 			wantExit: 0,
@@ -331,9 +312,9 @@ func TestLsOutputOrder(t *testing.T) {
 
 	c := cli.NewCLI(t)
 
-	createTestTicket(t, c.TicketDir(), "aaa-001", "open", "First", nil)
-	createTestTicket(t, c.TicketDir(), "bbb-002", "open", "Second", nil)
-	createTestTicket(t, c.TicketDir(), "ccc-003", "open", "Third", nil)
+	createTestTicket(t, c.TicketDir(), "aaa-001", statusOpen, "First", nil)
+	createTestTicket(t, c.TicketDir(), "bbb-002", statusOpen, "Second", nil)
+	createTestTicket(t, c.TicketDir(), "ccc-003", statusOpen, "Third", nil)
 
 	stdout := c.MustRun("ls")
 	lines := strings.Split(stdout, "\n")
@@ -546,7 +527,7 @@ func TestLsMixedValidInvalid(t *testing.T) {
 	c := cli.NewCLI(t)
 
 	// Create one valid ticket
-	createTestTicket(t, c.TicketDir(), "valid-001", "open", "Valid ticket", nil)
+	createTestTicket(t, c.TicketDir(), "valid-001", statusOpen, "Valid ticket", nil)
 
 	// Create one invalid ticket (missing type)
 	invalidContent := "---\nschema_version: 1\nid: invalid-002\nstatus: open\npriority: 2\ncreated: 2026-01-04T00:00:00Z\n---\n# Invalid\n"
@@ -624,7 +605,7 @@ func TestLsIgnoresNonMdFiles(t *testing.T) {
 	c := cli.NewCLI(t)
 
 	// Create a valid ticket
-	createTestTicket(t, c.TicketDir(), "test-001", "open", "Valid ticket", nil)
+	createTestTicket(t, c.TicketDir(), "test-001", statusOpen, "Valid ticket", nil)
 
 	// Create non-.md files
 	err := os.WriteFile(filepath.Join(c.TicketDir(), "notes.txt"), []byte("some notes"), 0o600)
@@ -656,7 +637,7 @@ func TestLsIgnoresSubdirectories(t *testing.T) {
 	}
 
 	// Create a valid ticket in main dir
-	createTestTicket(t, c.TicketDir(), "test-001", "open", "Valid ticket", nil)
+	createTestTicket(t, c.TicketDir(), "test-001", statusOpen, "Valid ticket", nil)
 
 	// Create a ticket in subdirectory (should be ignored)
 	createTestTicket(t, subDir, "archived-001", "closed", "Archived ticket", nil)
@@ -823,7 +804,7 @@ func TestLsLimitOffset(t *testing.T) {
 
 			if len(tt.ticketIDs) > 0 {
 				for _, id := range tt.ticketIDs {
-					createTestTicket(t, c.TicketDir(), id, "open", "Ticket "+id, nil)
+					createTestTicket(t, c.TicketDir(), id, statusOpen, "Ticket "+id, nil)
 				}
 			}
 
@@ -854,10 +835,10 @@ func TestLsLimitWithStatusFilter(t *testing.T) {
 	c := cli.NewCLI(t)
 
 	// Create mixed status tickets
-	createTestTicket(t, c.TicketDir(), "a-001", "open", "Open 1", nil)
+	createTestTicket(t, c.TicketDir(), "a-001", statusOpen, "Open 1", nil)
 	createTestTicket(t, c.TicketDir(), "b-002", "closed", "Closed 1", nil)
-	createTestTicket(t, c.TicketDir(), "c-003", "open", "Open 2", nil)
-	createTestTicket(t, c.TicketDir(), "d-004", "open", "Open 3", nil)
+	createTestTicket(t, c.TicketDir(), "c-003", statusOpen, "Open 2", nil)
+	createTestTicket(t, c.TicketDir(), "d-004", statusOpen, "Open 3", nil)
 
 	stdout := c.MustRun("ls", "--status=open", "--limit=2")
 
@@ -876,9 +857,9 @@ func TestLsStatusFilterOffsetOutOfBounds(t *testing.T) {
 	c := cli.NewCLI(t)
 
 	// Create 3 open tickets
-	createTestTicket(t, c.TicketDir(), "a-001", "open", "Open 1", nil)
-	createTestTicket(t, c.TicketDir(), "b-002", "open", "Open 2", nil)
-	createTestTicket(t, c.TicketDir(), "c-003", "open", "Open 3", nil)
+	createTestTicket(t, c.TicketDir(), "a-001", statusOpen, "Open 1", nil)
+	createTestTicket(t, c.TicketDir(), "b-002", statusOpen, "Open 2", nil)
+	createTestTicket(t, c.TicketDir(), "c-003", statusOpen, "Open 3", nil)
 
 	// Filter by open (3 tickets), but offset=10 (out of bounds)
 	stderr := c.MustFail("ls", "--status=open", "--offset=10")
@@ -903,7 +884,7 @@ func TestLsColdCacheBuildsFullCache(t *testing.T) {
 
 	// Create 5 tickets
 	for _, ticketID := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
-		createTestTicket(t, c.TicketDir(), ticketID, "open", "Ticket "+ticketID, nil)
+		createTestTicket(t, c.TicketDir(), ticketID, statusOpen, "Ticket "+ticketID, nil)
 	}
 
 	// Ensure no cache exists
@@ -934,7 +915,7 @@ func TestLsWarmCacheWithLimit(t *testing.T) {
 
 	// Create 5 tickets
 	for _, ticketID := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
-		createTestTicket(t, c.TicketDir(), ticketID, "open", "Ticket "+ticketID, nil)
+		createTestTicket(t, c.TicketDir(), ticketID, statusOpen, "Ticket "+ticketID, nil)
 	}
 
 	// First run - builds cache
@@ -961,7 +942,7 @@ func TestLsWarmCacheWithOffset(t *testing.T) {
 
 	// Create 5 tickets
 	for _, ticketID := range []string{"a-001", "b-002", "c-003", "d-004", "e-005"} {
-		createTestTicket(t, c.TicketDir(), ticketID, "open", "Ticket "+ticketID, nil)
+		createTestTicket(t, c.TicketDir(), ticketID, statusOpen, "Ticket "+ticketID, nil)
 	}
 
 	// First run - builds cache (no limit to ensure all cached)
@@ -984,7 +965,7 @@ func TestLsCacheInvalidatedOnFileChange(t *testing.T) {
 	c := cli.NewCLI(t)
 
 	// Create ticket
-	createTestTicket(t, c.TicketDir(), "test-001", "open", "Original Title", nil)
+	createTestTicket(t, c.TicketDir(), "test-001", statusOpen, "Original Title", nil)
 
 	// First run - builds cache
 	stdout1 := c.MustRun("ls")
@@ -1021,9 +1002,9 @@ func TestLsCacheWithStatusFilter(t *testing.T) {
 	c := cli.NewCLI(t)
 
 	// Create mixed status tickets
-	createTestTicket(t, c.TicketDir(), "a-001", "open", "Open 1", nil)
+	createTestTicket(t, c.TicketDir(), "a-001", statusOpen, "Open 1", nil)
 	createTestTicket(t, c.TicketDir(), "b-002", "closed", "Closed 1", nil)
-	createTestTicket(t, c.TicketDir(), "c-003", "open", "Open 2", nil)
+	createTestTicket(t, c.TicketDir(), "c-003", statusOpen, "Open 2", nil)
 
 	// Run with status filter
 	stdout := c.MustRun("ls", "--status=open")
@@ -1051,9 +1032,9 @@ func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
 			args: []string{"--status=open"},
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "a-001", "open", "Open 1", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "a-001", statusOpen, "Open 1", "bug", 1, nil)
 				createTestTicketFull(t, ticketDir, "b-002", "closed", "Closed 1", "task", 2, nil)
-				createTestTicketFull(t, ticketDir, "c-003", "open", "Open 2", "feature", 3, nil)
+				createTestTicketFull(t, ticketDir, "c-003", statusOpen, "Open 2", "feature", 3, nil)
 			},
 		},
 		{
@@ -1061,8 +1042,8 @@ func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
 			args: []string{"--priority=1"},
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "a-001", "open", "P1", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "b-002", "open", "P2", "task", 2, nil)
+				createTestTicketFull(t, ticketDir, "a-001", statusOpen, "P1", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "b-002", statusOpen, "P2", "task", 2, nil)
 				createTestTicketFull(t, ticketDir, "c-003", "closed", "P1", "feature", 1, nil)
 			},
 		},
@@ -1071,9 +1052,9 @@ func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
 			args: []string{"--type=bug"},
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "a-001", "open", "Bug 1", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "b-002", "open", "Feature 1", "feature", 2, nil)
-				createTestTicketFull(t, ticketDir, "c-003", "open", "Bug 2", "bug", 3, nil)
+				createTestTicketFull(t, ticketDir, "a-001", statusOpen, "Bug 1", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "b-002", statusOpen, "Feature 1", "feature", 2, nil)
+				createTestTicketFull(t, ticketDir, "c-003", statusOpen, "Bug 2", "bug", 3, nil)
 			},
 		},
 		{
@@ -1081,11 +1062,11 @@ func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
 			args: []string{"--status=open", "--priority=1", "--type=bug"},
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "match-001", "open", "Match", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-002", "open", "Wrong Priority", "bug", 2, nil)
+				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-002", statusOpen, "Wrong Priority", "bug", 2, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-003", "closed", "Wrong Status", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-004", "open", "Wrong Type", "feature", 1, nil)
-				createTestTicketFull(t, ticketDir, "match-005", "open", "Match 2", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-004", statusOpen, "Wrong Type", "feature", 1, nil)
+				createTestTicketFull(t, ticketDir, "match-005", statusOpen, "Match 2", "bug", 1, nil)
 			},
 		},
 	} {
@@ -1119,8 +1100,8 @@ func TestLsBitmapStaleCacheHandling(t *testing.T) {
 	c := cli.NewCLI(t)
 
 	// Create initial tickets
-	createTestTicketFull(t, c.TicketDir(), "a-001", "open", "Open Bug", "bug", 1, nil)
-	createTestTicketFull(t, c.TicketDir(), "b-002", "open", "Open Feature", "feature", 2, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "Open Bug", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "b-002", statusOpen, "Open Feature", "feature", 2, nil)
 
 	// First run to build cache
 	c.MustRun("ls", "--status=open")
@@ -1143,7 +1124,7 @@ func TestLsBitmapNewFileHandling(t *testing.T) {
 	c := cli.NewCLI(t)
 
 	// Create initial ticket
-	createTestTicketFull(t, c.TicketDir(), "a-001", "open", "Initial", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "Initial", "bug", 1, nil)
 
 	// First run to build cache
 	c.MustRun("ls", "--type=bug")
@@ -1152,7 +1133,7 @@ func TestLsBitmapNewFileHandling(t *testing.T) {
 	backdateCacheLS(t, c.TicketDir())
 
 	// Add new ticket matching filter
-	createTestTicketFull(t, c.TicketDir(), "b-002", "open", "New Bug", "bug", 2, nil)
+	createTestTicketFull(t, c.TicketDir(), "b-002", statusOpen, "New Bug", "bug", 2, nil)
 
 	// Second run should find new ticket
 	stdout := c.MustRun("ls", "--type=bug")
@@ -1182,7 +1163,7 @@ func TestLsBitmapBoundary64Tickets(t *testing.T) {
 	for i := range 64 {
 		id := fmt.Sprintf("t-%03d", i)
 
-		status := "open"
+		status := statusOpen
 		if i >= 32 {
 			status = "closed"
 		}
@@ -1217,7 +1198,7 @@ func TestLsBitmapBoundary65Tickets(t *testing.T) {
 	for i := range 65 {
 		id := fmt.Sprintf("t-%03d", i)
 
-		status := "open"
+		status := statusOpen
 		if i%2 == 0 {
 			status = "closed"
 		}
@@ -1248,14 +1229,14 @@ func TestLsBitmapStalePriorityChange(t *testing.T) {
 
 	c := cli.NewCLI(t)
 
-	createTestTicketFull(t, c.TicketDir(), "a-001", "open", "P1 Bug", "bug", 1, nil)
-	createTestTicketFull(t, c.TicketDir(), "b-002", "open", "P2 Bug", "bug", 2, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "P1 Bug", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "b-002", statusOpen, "P2 Bug", "bug", 2, nil)
 
 	// Build cache
 	c.MustRun("ls", "--priority=1")
 
 	// Modify priority (dir mtime unchanged, cache not invalidated)
-	createTestTicketFull(t, c.TicketDir(), "a-001", "open", "Now P2", "bug", 2, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "Now P2", "bug", 2, nil)
 
 	// Query for P1 - cache should still include a-001 (external frontmatter edits not detected)
 	stdout := c.MustRun("ls", "--priority=1")
@@ -1267,14 +1248,14 @@ func TestLsBitmapStaleTypeChange(t *testing.T) {
 
 	c := cli.NewCLI(t)
 
-	createTestTicketFull(t, c.TicketDir(), "a-001", "open", "A Bug", "bug", 1, nil)
-	createTestTicketFull(t, c.TicketDir(), "b-002", "open", "A Feature", "feature", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "A Bug", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "b-002", statusOpen, "A Feature", "feature", 1, nil)
 
 	// Build cache
 	c.MustRun("ls", "--type=bug")
 
 	// Modify type (dir mtime unchanged, cache not invalidated)
-	createTestTicketFull(t, c.TicketDir(), "a-001", "open", "Now Feature", "feature", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "Now Feature", "feature", 1, nil)
 
 	// Query for bug - cache should still include a-001 (external frontmatter edits not detected)
 	stdout := c.MustRun("ls", "--type=bug")
@@ -1286,8 +1267,8 @@ func TestLsBitmapFileDeleted(t *testing.T) {
 
 	c := cli.NewCLI(t)
 
-	createTestTicketFull(t, c.TicketDir(), "a-001", "open", "Will Delete", "bug", 1, nil)
-	createTestTicketFull(t, c.TicketDir(), "b-002", "open", "Will Keep", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "Will Delete", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "b-002", statusOpen, "Will Keep", "bug", 1, nil)
 
 	// Build cache
 	c.MustRun("ls", "--type=bug")
@@ -1312,7 +1293,7 @@ func TestLsBitmapPaginationColdVsHot(t *testing.T) {
 	// Create 10 open tickets
 	for i := range 10 {
 		id := fmt.Sprintf("t-%03d", i)
-		createTestTicketFull(t, c.TicketDir(), id, "open", "Open", "bug", 1, nil)
+		createTestTicketFull(t, c.TicketDir(), id, statusOpen, "Open", "bug", 1, nil)
 	}
 
 	// Create 5 closed tickets
@@ -1353,8 +1334,8 @@ func TestLsBitmapStaleStatusChangedNowMatches(t *testing.T) {
 
 	c := cli.NewCLI(t)
 
-	createTestTicketFull(t, c.TicketDir(), "a-001", "open", "Open", "bug", 1, nil)
-	createTestTicketFull(t, c.TicketDir(), "b-002", "open", "Will Close", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "Open", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "b-002", statusOpen, "Will Close", "bug", 1, nil)
 
 	// Build cache with open filter
 	c.MustRun("ls", "--status=open")
@@ -1420,8 +1401,8 @@ func TestLsShowsParentInOutput(t *testing.T) {
 	stdout := c.MustRun("ls")
 
 	// Child should show parent
-	lines := strings.Split(stdout, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(stdout, "\n")
+	for line := range lines {
 		if strings.Contains(line, childID) {
 			cli.AssertContains(t, line, "(parent: "+parentID+")")
 		}
@@ -1458,13 +1439,13 @@ func TestLsRootsWithStatusFilter(t *testing.T) {
 	c.MustRun("close", closedRootID)
 	childID := c.MustRun("create", "Child of open", "--parent", openRootID)
 
-	// Roots + status=open
-	stdout := c.MustRun("ls", "--roots", "--status", "open")
+	// Filter by roots and open status
+	stdout := c.MustRun("ls", "--roots", "--status", statusOpen)
 	cli.AssertTicketListed(t, stdout, openRootID)
 	cli.AssertTicketNotListed(t, stdout, closedRootID)
 	cli.AssertTicketNotListed(t, stdout, childID)
 
-	// Roots + status=closed
+	// Filter by roots and closed status
 	stdout = c.MustRun("ls", "--roots", "--status", "closed")
 	cli.AssertTicketListed(t, stdout, closedRootID)
 	cli.AssertTicketNotListed(t, stdout, openRootID)
@@ -1574,7 +1555,7 @@ func TestLsParentWithStatusFilter(t *testing.T) {
 	c.MustRun("close", closedChildID)
 
 	// Filter by parent AND status=open
-	stdout := c.MustRun("ls", "--parent", parentID, "--status", "open")
+	stdout := c.MustRun("ls", "--parent", parentID, "--status", statusOpen)
 	cli.AssertTicketListed(t, stdout, openChildID)
 	cli.AssertTicketNotListed(t, stdout, closedChildID)
 
@@ -1623,7 +1604,7 @@ func TestLsRootsWithPriorityFilter(t *testing.T) {
 	p4RootID := c.MustRun("create", "P4 root", "-p", "4")
 	childID := c.MustRun("create", "Child", "--parent", p1RootID, "-p", "1")
 
-	// Roots + priority=1
+	// Filter by roots and priority 1
 	stdout := c.MustRun("ls", "--roots", "--priority", "1")
 	cli.AssertTicketListed(t, stdout, p1RootID)
 	cli.AssertTicketNotListed(t, stdout, p4RootID)
@@ -1702,4 +1683,23 @@ func TestLsParentWithLimitOffset(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, child1)
 	cli.AssertTicketListed(t, stdout, child2)
 	cli.AssertTicketNotListed(t, stdout, child3)
+}
+
+// createTestTicket creates a test ticket with proper format.
+func createTestTicket(t *testing.T, ticketDir, ticketID, status, title string, blockedBy []string) {
+	t.Helper()
+
+	createTestTicketFull(t, ticketDir, ticketID, status, title, "task", 2, blockedBy)
+}
+
+func backdateCacheLS(t *testing.T, ticketDir string) {
+	t.Helper()
+
+	cachePath := filepath.Join(ticketDir, ticket.CacheFileName)
+	past := time.Now().Add(-10 * time.Second)
+
+	err := os.Chtimes(cachePath, past, past)
+	if err != nil {
+		t.Fatalf("failed to backdate cache: %v", err)
+	}
 }

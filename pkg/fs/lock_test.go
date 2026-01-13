@@ -35,7 +35,8 @@ func Test_Locker_TryLock_Returns_ErrWouldBlock_When_Path_Is_Locked(t *testing.T)
 		t.Fatalf("TryLock(%q) while locked: want lock=nil, got non-nil", path)
 	}
 
-	if err := lock1.Close(); err != nil {
+	err = lock1.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 
@@ -44,7 +45,8 @@ func Test_Locker_TryLock_Returns_ErrWouldBlock_When_Path_Is_Locked(t *testing.T)
 		t.Fatalf("TryLock(%q) after release: %v", path, err)
 	}
 
-	if err := lock3.Close(); err != nil {
+	err = lock3.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 }
@@ -61,7 +63,7 @@ func Test_Locker_LockWithTimeout_Returns_DeadlineExceeded_When_Path_Is_Locked(t 
 	}
 	defer lock1.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
 	_, err = locker.LockWithTimeout(ctx, path)
@@ -103,15 +105,15 @@ func Test_Locker_LockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(t
 
 	var lock2 *Lock
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
 
 	go func() {
-		var err error
+		var lockErr error
 
-		lock2, err = locker.LockWithTimeout(ctx, path)
-		if err != nil {
-			errCh <- err
+		lock2, lockErr = locker.LockWithTimeout(ctx, path)
+		if lockErr != nil {
+			errCh <- lockErr
 
 			return
 		}
@@ -121,10 +123,10 @@ func Test_Locker_LockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(t
 
 	select {
 	case <-attempted:
-	case err := <-errCh:
+	case lockErr := <-errCh:
 		_ = lock1.Close()
 
-		t.Fatalf("LockWithTimeout(%q): %v", path, err)
+		t.Fatalf("LockWithTimeout(%q): %v", path, lockErr)
 	case <-time.After(1 * time.Second):
 		_ = lock1.Close()
 
@@ -143,7 +145,8 @@ func Test_Locker_LockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(t
 	default:
 	}
 
-	if err := lock1.Close(); err != nil {
+	err = lock1.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 
@@ -172,7 +175,7 @@ func Test_Locker_LockWithTimeout_Returns_Canceled_When_Context_Is_Canceled(t *te
 	}
 	defer lock1.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // cancel immediately
 
 	_, err = locker.LockWithTimeout(ctx, path)
@@ -215,7 +218,8 @@ func Test_Locker_RLock_Can_Lock_A_ReadOnly_File(t *testing.T) {
 	locker := NewLocker(NewReal())
 	path := filepath.Join(t.TempDir(), "lock")
 
-	if err := os.WriteFile(path, []byte("x"), 0o444); err != nil {
+	err := os.WriteFile(path, []byte("x"), 0o444)
+	if err != nil {
 		t.Fatalf("setup WriteFile(%q): %v", path, err)
 	}
 
@@ -223,7 +227,8 @@ func Test_Locker_RLock_Can_Lock_A_ReadOnly_File(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RLock(%q): %v", path, err)
 	}
-	defer lock.Close()
+
+	_ = lock.Close()
 }
 
 func Test_Locker_Lock_Blocks_Until_RLock_Is_Released(t *testing.T) {
@@ -256,11 +261,11 @@ func Test_Locker_Lock_Blocks_Until_RLock_Is_Released(t *testing.T) {
 	var w *Lock
 
 	go func() {
-		var err error
+		var lockErr error
 
-		w, err = locker.Lock(path)
-		if err != nil {
-			errCh <- err
+		w, lockErr = locker.Lock(path)
+		if lockErr != nil {
+			errCh <- lockErr
 
 			return
 		}
@@ -270,10 +275,10 @@ func Test_Locker_Lock_Blocks_Until_RLock_Is_Released(t *testing.T) {
 
 	select {
 	case <-attempted:
-	case err := <-errCh:
+	case lockErr := <-errCh:
 		_ = r.Close()
 
-		t.Fatalf("Lock(%q) while RLock held: %v", path, err)
+		t.Fatalf("Lock(%q) while RLock held: %v", path, lockErr)
 	case <-time.After(1 * time.Second):
 		_ = r.Close()
 
@@ -289,15 +294,16 @@ func Test_Locker_Lock_Blocks_Until_RLock_Is_Released(t *testing.T) {
 		_ = r.Close()
 
 		t.Fatalf("Lock(%q) acquired while RLock held: want blocked", path)
-	case err := <-errCh:
+	case lockErr := <-errCh:
 		_ = r.Close()
 
-		t.Fatalf("Lock(%q) while RLock held: %v", path, err)
+		t.Fatalf("Lock(%q) while RLock held: %v", path, lockErr)
 	case <-time.After(50 * time.Millisecond):
 		// Still blocked (expected).
 	}
 
-	if err := r.Close(); err != nil {
+	err = r.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 
@@ -344,11 +350,11 @@ func Test_Locker_RLock_Blocks_Until_Lock_Is_Released(t *testing.T) {
 	var r *Lock
 
 	go func() {
-		var err error
+		var lockErr error
 
-		r, err = locker.RLock(path)
-		if err != nil {
-			errCh <- err
+		r, lockErr = locker.RLock(path)
+		if lockErr != nil {
+			errCh <- lockErr
 
 			return
 		}
@@ -358,10 +364,10 @@ func Test_Locker_RLock_Blocks_Until_Lock_Is_Released(t *testing.T) {
 
 	select {
 	case <-attempted:
-	case err := <-errCh:
+	case lockErr := <-errCh:
 		_ = w.Close()
 
-		t.Fatalf("RLock(%q) while Lock held: %v", path, err)
+		t.Fatalf("RLock(%q) while Lock held: %v", path, lockErr)
 	case <-time.After(1 * time.Second):
 		_ = w.Close()
 
@@ -377,15 +383,16 @@ func Test_Locker_RLock_Blocks_Until_Lock_Is_Released(t *testing.T) {
 		_ = w.Close()
 
 		t.Fatalf("RLock(%q) acquired while Lock held: want blocked", path)
-	case err := <-errCh:
+	case lockErr := <-errCh:
 		_ = w.Close()
 
-		t.Fatalf("RLock(%q) while Lock held: %v", path, err)
+		t.Fatalf("RLock(%q) while Lock held: %v", path, lockErr)
 	case <-time.After(50 * time.Millisecond):
 		// Still blocked (expected).
 	}
 
-	if err := w.Close(); err != nil {
+	err = w.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 
@@ -414,7 +421,7 @@ func Test_Locker_LockWithTimeout_Returns_DeadlineExceeded_When_Path_Is_Read_Lock
 	}
 	defer r.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
 	_, err = locker.LockWithTimeout(ctx, path)
@@ -439,7 +446,7 @@ func Test_Locker_RLockWithTimeout_Returns_DeadlineExceeded_When_Path_Is_Exclusiv
 	}
 	defer w.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
 	_, err = locker.RLockWithTimeout(ctx, path)
@@ -481,15 +488,15 @@ func Test_Locker_RLockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(
 
 	var lock2 *Lock
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
 
 	go func() {
-		var err error
+		var lockErr error
 
-		lock2, err = locker.RLockWithTimeout(ctx, path)
-		if err != nil {
-			errCh <- err
+		lock2, lockErr = locker.RLockWithTimeout(ctx, path)
+		if lockErr != nil {
+			errCh <- lockErr
 
 			return
 		}
@@ -499,10 +506,10 @@ func Test_Locker_RLockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(
 
 	select {
 	case <-attempted:
-	case err := <-errCh:
+	case lockErr := <-errCh:
 		_ = lock1.Close()
 
-		t.Fatalf("RLockWithTimeout(%q): %v", path, err)
+		t.Fatalf("RLockWithTimeout(%q): %v", path, lockErr)
 	case <-time.After(1 * time.Second):
 		_ = lock1.Close()
 
@@ -521,7 +528,8 @@ func Test_Locker_RLockWithTimeout_Succeeds_When_Lock_Is_Released_Before_Timeout(
 	default:
 	}
 
-	if err := lock1.Close(); err != nil {
+	err = lock1.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 
@@ -555,7 +563,8 @@ func Test_Locker_TryRLock_Succeeds_When_Path_Is_Read_Locked(t *testing.T) {
 		t.Fatalf("TryRLock(%q) while read-locked: %v", path, err)
 	}
 
-	if err := r2.Close(); err != nil {
+	err = r2.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 }
@@ -584,7 +593,8 @@ func Test_Locker_TryRLock_Returns_ErrWouldBlock_When_Path_Is_Exclusively_Locked(
 		t.Fatalf("TryRLock(%q) while exclusively locked: want lock=nil, got non-nil", path)
 	}
 
-	if err := w.Close(); err != nil {
+	err = w.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 
@@ -593,7 +603,8 @@ func Test_Locker_TryRLock_Returns_ErrWouldBlock_When_Path_Is_Exclusively_Locked(
 		t.Fatalf("TryRLock(%q) after release: %v", path, err)
 	}
 
-	if err := r2.Close(); err != nil {
+	err = r2.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 }
@@ -607,7 +618,8 @@ func Test_Locker_Creates_Parent_Directories_For_Locks(t *testing.T) {
 	dir := filepath.Join(root, "a", "b")
 	path := filepath.Join(dir, "lock")
 
-	if _, err := os.Stat(dir); err == nil {
+	_, err := os.Stat(dir)
+	if err == nil {
 		t.Fatalf("setup: %q unexpectedly exists", dir)
 	}
 
@@ -617,7 +629,8 @@ func Test_Locker_Creates_Parent_Directories_For_Locks(t *testing.T) {
 	}
 	defer lock.Close()
 
-	if _, err := os.Stat(dir); err != nil {
+	_, err = os.Stat(dir)
+	if err != nil {
 		t.Fatalf("expected parent dir %q to exist after TryLock: %v", dir, err)
 	}
 }
@@ -642,7 +655,8 @@ func Test_Locker_Locks_Do_Not_Interfere_Across_Paths(t *testing.T) {
 		t.Fatalf("TryLock(%q) while holding %q: %v", path2, path1, err)
 	}
 
-	if err := l2.Close(); err != nil {
+	err = l2.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 }
@@ -659,7 +673,8 @@ func Test_Locker_Can_Reacquire_After_Close(t *testing.T) {
 			t.Fatalf("Lock(%q) #%d: %v", path, i, err)
 		}
 
-		if err := l.Close(); err != nil {
+		err = l.Close()
+		if err != nil {
 			t.Fatalf("Close() #%d: %v", i, err)
 		}
 
@@ -668,7 +683,8 @@ func Test_Locker_Can_Reacquire_After_Close(t *testing.T) {
 			t.Fatalf("RLock(%q) #%d: %v", path, i, err)
 		}
 
-		if err := r.Close(); err != nil {
+		err = r.Close()
+		if err != nil {
 			t.Fatalf("Close() shared #%d: %v", i, err)
 		}
 	}
@@ -686,7 +702,7 @@ func Test_Locker_RLockWithTimeout_Returns_Canceled_When_Context_Is_Canceled(t *t
 	}
 	defer lock1.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // cancel immediately
 
 	_, err = locker.RLockWithTimeout(ctx, path)
@@ -710,16 +726,20 @@ func Test_Lock_Close_Is_Idempotent(t *testing.T) {
 		t.Fatalf("TryLock(%q): %v", path, err)
 	}
 
-	if err := lock.Close(); err != nil {
+	err = lock.Close()
+	if err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
 
-	if err := lock.Close(); err != nil {
+	err = lock.Close()
+	if err != nil {
 		t.Fatalf("Close() second: %v", err)
 	}
 }
 
 func Test_Locker_TryLock_Returns_ErrWouldBlock_When_Flock_WouldBlock(t *testing.T) {
+	t.Parallel()
+
 	// Verifies we normalize kernel "would block" errors (EAGAIN/EWOULDBLOCK) to
 	// ErrWouldBlock for TryLock callers.
 	tests := []struct {
@@ -732,6 +752,8 @@ func Test_Locker_TryLock_Returns_ErrWouldBlock_When_Flock_WouldBlock(t *testing.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			locker := NewLocker(stubLockFS{
 				openFile: func(string, int, os.FileMode) (File, error) {
 					return &stubLockFile{fd: 123}, nil
@@ -747,13 +769,15 @@ func Test_Locker_TryLock_Returns_ErrWouldBlock_When_Flock_WouldBlock(t *testing.
 			if lock != nil {
 				_ = lock.Close()
 
-				t.Fatalf("TryLock(): want lock=nil, got non-nil")
+				t.Fatal("TryLock(): want lock=nil, got non-nil")
 			}
 		})
 	}
 }
 
 func Test_Locker_TryLock_Returns_Error_When_Flock_Returns_NonWouldBlock(t *testing.T) {
+	t.Parallel()
+
 	// Verifies we propagate non-wouldblock errors from flock (and add context).
 	locker := NewLocker(stubLockFS{
 		openFile: func(string, int, os.FileMode) (File, error) {
@@ -774,11 +798,13 @@ func Test_Locker_TryLock_Returns_Error_When_Flock_Returns_NonWouldBlock(t *testi
 	if lock != nil {
 		_ = lock.Close()
 
-		t.Fatalf("TryLock(): want lock=nil, got non-nil")
+		t.Fatal("TryLock(): want lock=nil, got non-nil")
 	}
 }
 
 func Test_Locker_TryLock_Returns_ErrWouldBlock_When_LockFile_Was_Replaced_During_Acquire(t *testing.T) {
+	t.Parallel()
+
 	// Verifies TryLock reports "would block" if the inode check detects the file
 	// at path changed during acquisition (because TryLock has no retry budget).
 	openInfo := &syscall.Stat_t{Dev: 1, Ino: 1}
@@ -810,6 +836,8 @@ func Test_Locker_TryLock_Returns_ErrWouldBlock_When_LockFile_Was_Replaced_During
 }
 
 func Test_Locker_TryRLock_Returns_ErrWouldBlock_When_LockFile_Was_Replaced_During_Acquire(t *testing.T) {
+	t.Parallel()
+
 	// Same as TryLock test, but for shared locks.
 	openInfo := &syscall.Stat_t{Dev: 1, Ino: 1}
 	pathInfo := &syscall.Stat_t{Dev: 1, Ino: 2} // mismatch
@@ -840,6 +868,8 @@ func Test_Locker_TryRLock_Returns_ErrWouldBlock_When_LockFile_Was_Replaced_Durin
 }
 
 func Test_Locker_LockWithTimeout_Returns_DeadlineExceeded_When_LockFile_Kept_Being_Replaced(t *testing.T) {
+	t.Parallel()
+
 	// Verifies the inode-mismatch retry loop returns DeadlineExceeded on timeout.
 	openInfo := &syscall.Stat_t{Dev: 1, Ino: 1}
 	pathInfo := &syscall.Stat_t{Dev: 1, Ino: 2} // always mismatches
@@ -859,7 +889,7 @@ func Test_Locker_LockWithTimeout_Returns_DeadlineExceeded_When_LockFile_Kept_Bei
 	})
 	locker.flock = func(int, int) error { return nil }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 
 	_, err := locker.LockWithTimeout(ctx, "lock")
@@ -869,6 +899,8 @@ func Test_Locker_LockWithTimeout_Returns_DeadlineExceeded_When_LockFile_Kept_Bei
 }
 
 func Test_Locker_RLockWithTimeout_Returns_DeadlineExceeded_When_LockFile_Kept_Being_Replaced(t *testing.T) {
+	t.Parallel()
+
 	// Same as LockWithTimeout test, but for shared locks.
 	openInfo := &syscall.Stat_t{Dev: 1, Ino: 1}
 	pathInfo := &syscall.Stat_t{Dev: 1, Ino: 2} // always mismatches
@@ -888,7 +920,7 @@ func Test_Locker_RLockWithTimeout_Returns_DeadlineExceeded_When_LockFile_Kept_Be
 	})
 	locker.flock = func(int, int) error { return nil }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 
 	_, err := locker.RLockWithTimeout(ctx, "lock")
@@ -898,6 +930,8 @@ func Test_Locker_RLockWithTimeout_Returns_DeadlineExceeded_When_LockFile_Kept_Be
 }
 
 func Test_Locker_Lock_Retries_When_LockFile_Was_Replaced_During_Acquire(t *testing.T) {
+	t.Parallel()
+
 	// Verifies Lock() doesn't return an error if the lock file is replaced while
 	// acquiring the lock: it retries until it locks the inode currently at path.
 	open1 := &syscall.Stat_t{Dev: 1, Ino: 1}
@@ -949,6 +983,8 @@ func Test_flockRetryEINTR_Retries_On_EINTR(t *testing.T) {
 	t.Parallel()
 
 	t.Run("retries and succeeds", func(t *testing.T) {
+		t.Parallel()
+
 		const eintrCount = 3
 
 		var calls int
@@ -971,6 +1007,8 @@ func Test_flockRetryEINTR_Retries_On_EINTR(t *testing.T) {
 	})
 
 	t.Run("stops on non-EINTR error", func(t *testing.T) {
+		t.Parallel()
+
 		var calls int
 
 		err := flockRetryEINTR(func(int, int) error {
@@ -994,19 +1032,19 @@ type stubLockFS struct {
 	stat     func(path string) (os.FileInfo, error)
 }
 
-func (s stubLockFS) Open(string) (File, error)       { panic("stubLockFS.Open: not implemented") }
-func (s stubLockFS) Create(string) (File, error)     { panic("stubLockFS.Create: not implemented") }
-func (s stubLockFS) ReadFile(string) ([]byte, error) { panic("stubLockFS.ReadFile: not implemented") }
-func (s stubLockFS) WriteFile(string, []byte, os.FileMode) error {
+func (stubLockFS) Open(string) (File, error)       { panic("stubLockFS.Open: not implemented") }
+func (stubLockFS) Create(string) (File, error)     { panic("stubLockFS.Create: not implemented") }
+func (stubLockFS) ReadFile(string) ([]byte, error) { panic("stubLockFS.ReadFile: not implemented") }
+func (stubLockFS) WriteFile(string, []byte, os.FileMode) error {
 	panic("stubLockFS.WriteFile: not implemented")
 }
-func (s stubLockFS) ReadDir(string) ([]os.DirEntry, error) {
+func (stubLockFS) ReadDir(string) ([]os.DirEntry, error) {
 	panic("stubLockFS.ReadDir: not implemented")
 }
-func (s stubLockFS) Exists(string) (bool, error) { panic("stubLockFS.Exists: not implemented") }
-func (s stubLockFS) Remove(string) error         { panic("stubLockFS.Remove: not implemented") }
-func (s stubLockFS) RemoveAll(string) error      { panic("stubLockFS.RemoveAll: not implemented") }
-func (s stubLockFS) Rename(string, string) error { panic("stubLockFS.Rename: not implemented") }
+func (stubLockFS) Exists(string) (bool, error) { panic("stubLockFS.Exists: not implemented") }
+func (stubLockFS) Remove(string) error         { panic("stubLockFS.Remove: not implemented") }
+func (stubLockFS) RemoveAll(string) error      { panic("stubLockFS.RemoveAll: not implemented") }
+func (stubLockFS) Rename(string, string) error { panic("stubLockFS.Rename: not implemented") }
 func (s stubLockFS) MkdirAll(path string, perm os.FileMode) error {
 	if s.mkdirAll != nil {
 		return s.mkdirAll(path, perm)
@@ -1038,7 +1076,8 @@ func (*stubLockFile) Read([]byte) (int, error)       { panic("stubLockFile.Read:
 func (*stubLockFile) Write([]byte) (int, error)      { panic("stubLockFile.Write: not implemented") }
 func (*stubLockFile) Seek(int64, int) (int64, error) { panic("stubLockFile.Seek: not implemented") }
 func (*stubLockFile) Sync() error                    { panic("stubLockFile.Sync: not implemented") }
-func (f *stubLockFile) Close() error                 { return nil }
+func (*stubLockFile) Chmod(os.FileMode) error        { panic("stubLockFile.Chmod: not implemented") }
+func (*stubLockFile) Close() error                   { return nil }
 func (f *stubLockFile) Fd() uintptr                  { return f.fd }
 func (f *stubLockFile) Stat() (os.FileInfo, error) {
 	if f.stat == nil {

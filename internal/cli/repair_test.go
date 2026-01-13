@@ -12,18 +12,6 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-func backdateCacheRepair(t *testing.T, ticketDir string) {
-	t.Helper()
-
-	cachePath := filepath.Join(ticketDir, ticket.CacheFileName)
-	past := time.Now().Add(-10 * time.Second)
-
-	err := os.Chtimes(cachePath, past, past)
-	if err != nil {
-		t.Fatalf("failed to backdate cache: %v", err)
-	}
-}
-
 func TestRepairCommand(t *testing.T) {
 	t.Parallel()
 
@@ -251,4 +239,16 @@ func TestRepairMainHelpShowsRepair(t *testing.T) {
 	}
 
 	cli.AssertContains(t, stdout, "repair")
+}
+
+func backdateCacheRepair(t *testing.T, ticketDir string) {
+	t.Helper()
+
+	cachePath := filepath.Join(ticketDir, ticket.CacheFileName)
+	past := time.Now().Add(-10 * time.Second)
+
+	err := os.Chtimes(cachePath, past, past)
+	if err != nil {
+		t.Fatalf("failed to backdate cache: %v", err)
+	}
 }
