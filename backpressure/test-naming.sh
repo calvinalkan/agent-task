@@ -32,9 +32,8 @@ get_test_funcs_from_git() {
     echo "$result" | sed '/^$/d'
 }
 
-get_test_funcs_from_file() {
-    local file="$1"
-    rg -n '^func Test' "$file" | sed "s|^|${file}:|" || true
+get_test_funcs_from_files() {
+    rg -n --with-filename '^func Test' "$@" 2>/dev/null || true
 }
 
 get_test_funcs_from_stdin() {
@@ -45,12 +44,27 @@ get_test_funcs_from_stdin() {
 # Determine input source
 if [ $# -gt 0 ]; then
     if [ "$1" = "-" ]; then
+        if [ $# -gt 1 ]; then
+            echo "Error: '-' cannot be combined with file paths." >&2
+            exit 1
+        fi
         ALL_TESTS=$(get_test_funcs_from_stdin)
-    elif [ -f "$1" ]; then
-        ALL_TESTS=$(get_test_funcs_from_file "$1")
     else
-        echo "Error: File not found: $1" >&2
-        exit 1
+        test_files=()
+        for file in "$@"; do
+            if [ ! -f "$file" ]; then
+                echo "Error: File not found: $file" >&2
+                exit 1
+            fi
+            if [[ "$file" == *_test.go ]]; then
+                test_files+=("$file")
+            fi
+        done
+        if [ ${#test_files[@]} -eq 0 ]; then
+            ALL_TESTS=""
+        else
+            ALL_TESTS=$(get_test_funcs_from_files "${test_files[@]}")
+        fi
     fi
 else
     ALL_TESTS=$(get_test_funcs_from_git)

@@ -21,9 +21,13 @@ set -eu
 
 # Determine input files
 if [ $# -gt 0 ]; then
-    files="$1"
+    files=$(printf "%s\n" "$@" | rg '_test\.go$' || true)
 else
     files=$(git ls-files '*_test.go')
+fi
+
+if [ -z "$files" ]; then
+    exit 0
 fi
 
 # Use ast-grep to get all functions with their line ranges

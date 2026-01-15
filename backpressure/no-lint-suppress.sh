@@ -32,9 +32,8 @@ get_suppressions_from_git() {
     echo "$result" | sed '/^$/d'
 }
 
-get_suppressions_from_file() {
-    local file="$1"
-    rg -n "$RG_PATTERN" "$file" | sed "s|^|${file}:|" || true
+get_suppressions_from_files() {
+    rg -n --with-filename "$RG_PATTERN" "$@" 2>/dev/null || true
 }
 
 get_suppressions_from_stdin() {
@@ -44,12 +43,19 @@ get_suppressions_from_stdin() {
 # Determine input source
 if [ $# -gt 0 ]; then
     if [ "$1" = "-" ]; then
+        if [ $# -gt 1 ]; then
+            echo "Error: '-' cannot be combined with file paths." >&2
+            exit 1
+        fi
         FOUND=$(get_suppressions_from_stdin)
-    elif [ -f "$1" ]; then
-        FOUND=$(get_suppressions_from_file "$1")
     else
-        echo "Error: File not found: $1" >&2
-        exit 1
+        for file in "$@"; do
+            if [ ! -f "$file" ]; then
+                echo "Error: File not found: $file" >&2
+                exit 1
+            fi
+        done
+        FOUND=$(get_suppressions_from_files "$@")
     fi
 else
     FOUND=$(get_suppressions_from_git)
