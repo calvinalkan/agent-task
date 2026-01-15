@@ -23,7 +23,11 @@ make check # Runs everything, use this before committing
 make build # Build the binary
 make test # Run tests with race detector
 make lint # Run all linters
-make clean    # Remove binary and lock files
+make clean # Remove binary and lock files
+
+# Running targeted test with GOLAGS
+GOFLAGS="-run=TestName" make test
+GOFLAGS="-run=TestPattern.*" make test
 ```
 
 ## Sandbox Notice

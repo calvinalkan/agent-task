@@ -50,7 +50,7 @@ When files are edited externally (by agents, editors, git operations), the SQLit
 - Agent goes down wrong path, wastes tokens, produces wrong output
 - Debugging is hard: "why did the agent do that?" → stale index, not visible
 
-**mddb's approach:** The cache is explicitly throwaway. Simple invalidation protocol (delete `.cache`). Source of truth is always the `.md` files. Stale cache? Delete it, rebuild. No complex sync logic, no drift.
+**mddb's approach:** The cache is explicitly throwaway. Simple invalidation protocol (delete `.cache`). Source of truth is always the `.mddb.md` files. Stale cache? Delete it, rebuild. No complex sync logic, no drift.
 
 ### Why Not SQLite?
 
@@ -152,7 +152,7 @@ Content here...
 
 - Everything after closing `---`
 - Opaque bytes (markdown by convention)
-- Stored in `.md` file, not cached
+- Stored in `.mddb.md` file, not cached
 
 ### Key
 
@@ -306,7 +306,7 @@ Some schema changes are safe (auto-handled), others require fixing docs first:
 | Change | Behavior |
 |--------|----------|
 | New optional field (has `.Default()`) | Use default for existing docs |
-| Removed field | Don't index it (frontmatter preserved in .md) |
+| Removed field | Don't index it (frontmatter preserved in .mddb.md) |
 | New enum value (appended) | Existing indices unchanged |
 | Bitset: removed value | Don't set that bit, others still work |
 
@@ -615,7 +615,7 @@ The transaction buffer is always checked first. Read-your-writes semantics apply
 
 `Commit`:
 - Writes buffer to `.wal`
-- Applies changes to `.md` files
+- Applies changes to `.mddb.md` files
 - Updates `.cache`
 - Truncates `.wal`
 - Releases lock
@@ -634,7 +634,7 @@ func (db *DB[I, D]) InvalidateCache() error
 
 `Rebuild`:
 - Acquires exclusive lock
-- Scans all `.md` files, parses frontmatter, builds index
+- Scans all `.mddb.md` files, parses frontmatter, builds index
 - Writes new `.cache` atomically (temp file + rename)
 - Releases lock
 - Returns `ErrFieldValue` if any document fails validation (cache unchanged)
@@ -669,7 +669,7 @@ type WatchEvent struct {
 - Uses fsnotify (or platform equivalent) under the hood
 
 `Events`:
-- Returns channel that emits when external .md changes detected
+- Returns channel that emits when external .mddb.md changes detected
 - Automatically calls `Rebuild()` before sending event (properly closes mmap, rebuilds)
 - Only detects changes when mddb is not holding the lock (external changes)
 
@@ -829,7 +829,7 @@ Update() → buffer in memory
 Delete() → buffer in memory
          ↓
 Commit() → write .wal (intent)
-         → apply to .md files
+         → apply to .mddb.md files
          → update .cache
          → truncate .wal
          → release lock
@@ -866,7 +866,7 @@ JSONL structure (one JSON object per line):
 ```
 
 - `op`: Operation type - `"create"`, `"update"`, or `"delete"`
-- `key`: Document key (filename without `.md`)
+- `key`: Document key (filename without `.mddb.md`)
 - `frontmatter`: For create: full frontmatter. For update: fields to merge (nil value = delete field)
 - `content`: For create: required. For update: null = keep existing, string = replace. Omitted for delete.
 
@@ -888,9 +888,9 @@ On `Open()`, if `.wal` exists:
 1. Acquire exclusive lock
 2. Verify checksum, parse JSONL
 3. For each line (in order):
-   - `create`: Write `.md` file with frontmatter + content
-   - `update`: Read existing `.md`, merge frontmatter (nil removes keys), replace content if provided, write `.md`
-   - `delete`: Remove `.md` file
+   - `create`: Write `.mddb.md` file with frontmatter + content
+   - `update`: Read existing `.mddb.md`, merge frontmatter (nil removes keys), replace content if provided, write `.mddb.md`
+   - `delete`: Remove `.mddb.md` file
 4. Update `.cache`
 5. Truncate `.wal`
 6. Release lock
@@ -937,7 +937,7 @@ Recovery:
 
 ```
 1. Write .wal
-2. Apply to .md files     ← sets mtime = T1
+2. Apply to .mddb.md files     ← sets mtime = T1
 3. Update .cache          ← sets mtime = T2 (where T2 >= T1)
 4. Truncate .wal
 ```
@@ -977,7 +977,7 @@ fi
 
 ### Why This Works
 
-- `.md` files are **always** the source of truth
+- `.mddb.md` files are **always** the source of truth
 - `.cache` is derived, throwaway, can be deleted anytime
 - Simple protocol: delete one file → guaranteed consistency
 - No IPC needed, works across processes
@@ -1016,9 +1016,9 @@ var (
 
 Cache errors trigger automatic rebuild, not user-facing errors:
 
-- Cache missing → rebuild from `.md` files
-- Cache corrupt → rebuild from `.md` files  
-- Schema mismatch → rebuild from `.md` files
+- Cache missing → rebuild from `.mddb.md` files
+- Cache corrupt → rebuild from `.mddb.md` files  
+- Schema mismatch → rebuild from `.mddb.md` files
 
 ### Wrapped Errors
 

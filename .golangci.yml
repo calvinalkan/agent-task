@@ -226,6 +226,8 @@ linters:
           disabled: true # duplicates unnamedResult in gocritic
         - name: flag-parameter
           disabled: true # too strict, flags are fine for internal funcs
+        - name: max-public-structs
+          disabled: true # too strict, domain packages often need multiple exported types
         - name: redundant-test-main-exit
           disabled: true # false positive: os.Exit(m.Run()) is required pattern
         - name: enforce-switch-style
@@ -272,6 +274,7 @@ linters:
           - varnamelen
           - noctx
           - errcheck # allow _ = err in tests
+          - wrapcheck # test code doesn't need to wrap errors from packages under test
           - gosec # G104 duplicates errcheck
       # Allow time.Sleep in tests
       - path: _test\.go

@@ -1,0 +1,12 @@
+{
+  "commands": {
+    "**/*.go": {
+      "name": "go-lint",
+      "run": "bash -c 'set -euo pipefail; ./backpressure/no-lint-suppress.sh {files}; ./backpressure/test-naming.sh {files}; ./backpressure/test-helper-order.sh {files}; golangci-lint run --fix {files}'"
+    }
+  },
+  "trigger": {
+    "modifications": 3,
+    "files": 2
+  }
+}
