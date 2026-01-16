@@ -10,6 +10,7 @@ type Options struct {
 
 	KeySize      int
 	IndexSize    int
+	UserVersion  uint64
 	SlotCapacity uint64
 }
 
