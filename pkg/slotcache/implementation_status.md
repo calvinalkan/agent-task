@@ -4,10 +4,10 @@
 
 ```
 pkg/slotcache/
-├── api_stub.go          # //go:build !slotcache_impl (panic stubs)
-├── cache_impl.go        # //go:build slotcache_impl (Cache methods)
-├── writer_impl.go       # //go:build slotcache_impl (Writer methods)
-├── types.go             # shared types (Options, Entry, ScanOpts, etc.)
+├── api.go               # public API: Cache/Writer interfaces, Options, Entry, etc.
+├── api_stub.go          # //go:build !slotcache_impl (Open panics)
+├── cache_impl.go        # //go:build slotcache_impl (cache struct implementation)
+├── writer_impl.go       # //go:build slotcache_impl (writer struct implementation)
 ├── errors.go            # error codes
 ├── model/
 │   └── model.go
@@ -15,6 +15,15 @@ pkg/slotcache/
 │   └── slotcachev1.md
 └── *_test.go            # //go:build slotcache_impl
 ```
+
+## Design Pattern
+
+Public interfaces with private implementations:
+
+- `Cache` and `Writer` are **interfaces** in `api.go`
+- `cache` and `writer` are **unexported structs** in `*_impl.go`
+- `Open()` returns `Cache` interface (concrete `*cache` under the hood)
+- Build tags control stub vs real implementation (avoids import cycles)
 
 ---
 
@@ -47,68 +56,68 @@ go test -tags=slotcache_impl -run Test_Slotcache_Matches_Model_When_Random_Opera
 
 ### 1a: Data Structures
 
-- [ ] `slotRecord{key, isLive, revision, index}`
-- [ ] `bufferedOp{isPut, key, revision, index}`
-- [ ] `Cache{opts, slots, liveIndex, isClosed, activeWriter}`
-- [ ] `Writer{cache, bufferedOps, isClosed}`
+- [x] `slotRecord{key, isLive, revision, index}`
+- [x] `bufferedOp{isPut, key, revision, index}`
+- [x] `cache{file, isClosed, activeWriter}` (unexported, implements Cache interface)
+- [x] `writer{cache, bufferedOps, isClosed}` (unexported, implements Writer interface)
 
 ### 1b: Cache Lifecycle
 
-- [ ] `Open(opts)` → validate, create empty
-- [ ] `Close()` → ErrBusy if writer active, set closed
-- [ ] `Len()` → count live, ErrClosed if closed
+- [x] `Open(opts)` → validate, create empty
+- [x] `Close()` → ErrBusy if writer active, set closed
+- [x] `Len()` → count live, ErrClosed if closed
 
 ### 1c: Writer Lifecycle
 
-- [ ] `BeginWrite()` → ErrBusy if exists, ErrClosed if closed
-- [ ] `Commit()` → apply ops, clear buffer, nil writer
-- [ ] `Abort()` → discard, nil writer
-- [ ] `Close()` → alias Abort
+- [x] `BeginWrite()` → ErrBusy if exists, ErrClosed if closed
+- [x] `Commit()` → apply ops, clear buffer, nil writer
+- [x] `Abort()` → discard, nil writer
+- [x] `Close()` → alias Abort
 
 ### 1d: Put
 
-- [ ] Validate key length → ErrInvalidKey
-- [ ] Validate index length → ErrInvalidIndex
-- [ ] Check capacity → ErrFull
-- [ ] Buffer operation
-- [ ] ErrClosed if closed
+- [x] Validate key length → ErrInvalidKey
+- [x] Validate index length → ErrInvalidIndex
+- [x] Check capacity → ErrFull
+- [x] Buffer operation
+- [x] ErrClosed if closed
 
 ### 1e: Delete
 
-- [ ] Validate key length → ErrInvalidKey
-- [ ] Return `existed` (check buffer then committed)
-- [ ] Buffer operation
-- [ ] ErrClosed if closed
+- [x] Validate key length → ErrInvalidKey
+- [x] Return `existed` (check buffer then committed)
+- [x] Buffer operation
+- [x] ErrClosed if closed
 
 ### 1f: Commit Logic
 
-- [ ] `finalOps()` → last op per key, preserve order
-- [ ] Put existing live → update in place
-- [ ] Put new/deleted → append slot
-- [ ] Delete live → tombstone
-- [ ] Delete missing → no-op
+- [x] `finalOps()` → last op per key, preserve order
+- [x] Put existing live → update in place
+- [x] Put new/deleted → append slot
+- [x] Delete live → tombstone
+- [x] Delete missing → no-op
 
 ### 1g: Get
 
-- [ ] Validate key → ErrInvalidKey
-- [ ] Find live slot (newest first)
-- [ ] ErrClosed if closed
+- [x] Validate key → ErrInvalidKey
+- [x] Find live slot (newest first)
+- [x] ErrClosed if closed
 
 ### 1h: Scan
 
-- [ ] Validate opts → ErrInvalidScanOpts (negative offset/limit)
-- [ ] Collect live entries
-- [ ] Apply Reverse
-- [ ] Check offset > count → ErrOffsetOutOfBounds
-- [ ] Apply Offset, Limit (0 = unlimited)
-- [ ] ErrClosed if closed
+- [x] Validate opts → ErrInvalidScanOpts (negative offset/limit)
+- [x] Collect live entries
+- [x] Apply Reverse
+- [x] Check offset > count → ErrOffsetOutOfBounds
+- [x] Apply Offset, Limit (0 = unlimited)
+- [x] ErrClosed if closed
 
 ### 1i: ScanPrefix
 
-- [ ] Validate prefix → ErrInvalidPrefix (empty, > keySize)
-- [ ] Filter by prefix
-- [ ] Apply pagination (same as Scan)
-- [ ] ErrClosed if closed
+- [x] Validate prefix → ErrInvalidPrefix (empty, > keySize)
+- [x] Filter by prefix
+- [x] Apply pagination (same as Scan)
+- [x] ErrClosed if closed
 
 ---
 
@@ -266,7 +275,7 @@ go test ./pkg/slotcache/...
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Compile | ✅ |
-| 1 | In-memory implementation | ⬜ |
+| 1 | In-memory implementation | ✅ |
 | 2 | Simple state persistence | ⬜ |
 | 3 | SLC1 file format | ⬜ |
 | 4 | Fuzz hardening | ⬜ |

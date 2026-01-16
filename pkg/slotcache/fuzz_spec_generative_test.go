@@ -42,7 +42,7 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 
 		decoder := newSpecFuzzDecoder(fuzzBytes)
 
-		var writerHandle *slotcache.Writer
+		var writerHandle slotcache.Writer
 
 		const maximumSteps = 300
 

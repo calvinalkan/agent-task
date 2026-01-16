@@ -42,13 +42,40 @@ type ScanOpts struct {
 type Seq func(yield func(Entry) bool)
 
 // Cache is the public cache handle.
-//
-// The concrete implementation lives behind the slotcache_impl build tag.
-type Cache struct {
-	_ [0]func() // prevent direct construction; use Open()
+type Cache interface {
+	// Close closes the cache handle.
+	Close() error
+
+	// Len returns the number of live entries in the cache.
+	Len() (int, error)
+
+	// Get retrieves an entry by exact key.
+	Get(key []byte) (Entry, bool, error)
+
+	// Scan iterates over all live entries.
+	Scan(opts ScanOpts) (Seq, error)
+
+	// ScanPrefix iterates over live entries matching the given prefix.
+	ScanPrefix(prefix []byte, opts ScanOpts) (Seq, error)
+
+	// BeginWrite starts a new write session.
+	BeginWrite() (Writer, error)
 }
 
 // Writer is a single-writer session returned by Cache.BeginWrite.
-type Writer struct {
-	_ [0]func() // prevent direct construction; use BeginWrite()
+type Writer interface {
+	// Put buffers a put operation for the given key.
+	Put(key []byte, revision int64, index []byte) error
+
+	// Delete buffers a delete operation for the given key.
+	Delete(key []byte) (bool, error)
+
+	// Commit applies all buffered operations atomically.
+	Commit() error
+
+	// Abort discards all buffered operations.
+	Abort() error
+
+	// Close is an alias for Abort.
+	Close() error
 }

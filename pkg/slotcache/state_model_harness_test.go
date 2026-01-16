@@ -31,8 +31,8 @@ type harness struct {
 	}
 
 	real struct {
-		cache  *slotcache.Cache
-		writer *slotcache.Writer
+		cache  slotcache.Cache
+		writer slotcache.Writer
 	}
 }
 

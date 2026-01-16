@@ -32,10 +32,8 @@ func toSlotcacheEntry(me model.Entry) slotcache.Entry {
 }
 
 func toSlotcacheEntries(entries []model.Entry) []slotcache.Entry {
-	if entries == nil {
-		return nil
-	}
-
+	// Always return non-nil slice for consistent comparison.
+	// The nil vs empty distinction has no semantic meaning.
 	out := make([]slotcache.Entry, len(entries))
 	for i, e := range entries {
 		out[i] = toSlotcacheEntry(e)
@@ -49,10 +47,17 @@ func toSlotcacheEntries(entries []model.Entry) []slotcache.Entry {
 // -----------------------------------------------------------------------------
 
 func collectSeq(seq slotcache.Seq) []slotcache.Entry {
-	return slices.Collect(iter.Seq[slotcache.Entry](seq))
+	result := slices.Collect(iter.Seq[slotcache.Entry](seq))
+	// Normalize nil to empty slice for consistent comparison.
+	// The Seq abstraction cannot distinguish nil vs empty,
+	// and this distinction has no semantic meaning in the API.
+	if result == nil {
+		return []slotcache.Entry{}
+	}
+	return result
 }
 
-func scanReal(t *testing.T, cache *slotcache.Cache, opts slotcache.ScanOpts) ([]slotcache.Entry, error) {
+func scanReal(t *testing.T, cache slotcache.Cache, opts slotcache.ScanOpts) ([]slotcache.Entry, error) {
 	t.Helper()
 
 	seq, err := cache.Scan(opts)
@@ -63,7 +68,7 @@ func scanReal(t *testing.T, cache *slotcache.Cache, opts slotcache.ScanOpts) ([]
 	return collectSeq(seq), nil
 }
 
-func scanRealPrefix(t *testing.T, cache *slotcache.Cache, prefix []byte, opts slotcache.ScanOpts) ([]slotcache.Entry, error) {
+func scanRealPrefix(t *testing.T, cache slotcache.Cache, prefix []byte, opts slotcache.ScanOpts) ([]slotcache.Entry, error) {
 	t.Helper()
 
 	seq, err := cache.ScanPrefix(prefix, opts)
