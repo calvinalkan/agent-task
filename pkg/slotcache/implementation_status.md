@@ -158,11 +158,11 @@ go test -tags=slotcache_impl -run "Test_Slotcache|Test_Metamorphic" ./pkg/slotca
 
 ### 3a: Header
 
-- [ ] Create `impl/format.go`
-- [ ] 256 bytes, little-endian
-- [ ] Magic "SLC1", version 1
-- [ ] All fields per spec offsets
-- [ ] Reserved bytes = 0
+- [x] Create `format.go` (in pkg/slotcache, not impl/)
+- [x] 256 bytes, little-endian
+- [x] Magic "SLC1", version 1
+- [x] All fields per spec offsets
+- [x] Reserved bytes = 0
 
 ### 3b: CRC32-C
 
