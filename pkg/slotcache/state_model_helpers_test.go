@@ -13,9 +13,10 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
 	"github.com/calvinalkan/agent-task/pkg/slotcache/model"
-	"github.com/google/go-cmp/cmp"
 )
 
 // -----------------------------------------------------------------------------
