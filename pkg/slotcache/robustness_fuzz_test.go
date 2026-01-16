@@ -1,4 +1,16 @@
-//go:build slotcache_impl
+// Robustness: fuzz testing with corrupt/malformed input
+//
+// Oracle: "no panics, no hangs, graceful errors"
+// Technique: coverage-guided fuzzing (go test -fuzz)
+//
+// These tests write arbitrary fuzz bytes as a cache file and attempt to
+// Open and read it. The implementation must handle malformed input gracefully
+// by returning ErrCorrupt or ErrIncompatible - never panic or hang.
+//
+// If Open succeeds, the file must pass spec_oracle validation (if the impl
+// accepts a file, it must be a valid file).
+//
+// Failures here mean: "corrupt input caused a panic, hang, or was incorrectly accepted"
 
 package slotcache_test
 
@@ -9,19 +21,10 @@ import (
 	"testing"
 
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
+	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil"
 )
 
-// FuzzSpec_OpenAndReadRobustness writes fuzz bytes as a cache file and then
-// tries to Open and read it.
-//
-// Allowed outcomes:
-// - Open returns ErrCorrupt / ErrIncompatible (or ErrBusy).
-// - Open succeeds and reads either succeed or return ErrCorrupt/ErrBusy.
-//
-// Disallowed outcomes:
-// - panic
-// - infinite hang
-// - Open succeeds but file fails the spec oracle.
+// FuzzSpec_OpenAndReadRobustness writes fuzz bytes as a cache file and tries to Open it.
 func FuzzSpec_OpenAndReadRobustness(f *testing.F) {
 	// Seed a few "interesting" shapes.
 	f.Add([]byte{})
@@ -58,7 +61,7 @@ func FuzzSpec_OpenAndReadRobustness(f *testing.F) {
 		}
 
 		// If Open succeeded, validate file against the oracle.
-		validationError := validateSlotcacheFileAgainstOptions(cacheFilePath, options)
+		validationError := testutil.ValidateFile(cacheFilePath, options)
 		if validationError != nil {
 			t.Fatalf("Open succeeded but speccheck failed: %v", validationError)
 		}
@@ -66,8 +69,8 @@ func FuzzSpec_OpenAndReadRobustness(f *testing.F) {
 		// Exercise basic reads. They must not panic.
 		_, _ = cacheHandle.Len()
 		_, _, _ = cacheHandle.Get(make([]byte, options.KeySize))
-		_, _ = cacheHandle.Scan(slotcache.ScanOpts{Reverse: false, Offset: 0, Limit: 0})
-		_, _ = cacheHandle.ScanPrefix([]byte{0x00}, slotcache.ScanOpts{Reverse: false, Offset: 0, Limit: 0})
+		_ = cacheHandle.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+		_ = cacheHandle.ScanPrefix([]byte{0x00}, slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
 
 		_ = cacheHandle.Close()
 	})

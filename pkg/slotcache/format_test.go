@@ -1,5 +1,3 @@
-//go:build slotcache_impl
-
 package slotcache
 
 import (
@@ -8,6 +6,8 @@ import (
 )
 
 func Test_ComputeSlotSize_Returns_Correct_Size_When_Given_Key_And_Index_Sizes(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		keySize   uint32
 		indexSize uint32
@@ -38,6 +38,8 @@ func Test_ComputeSlotSize_Returns_Correct_Size_When_Given_Key_And_Index_Sizes(t 
 }
 
 func Test_EncodeDecodeSlot_Roundtrips_Correctly_When_Given_Various_Inputs(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		keySize   uint32
@@ -114,6 +116,8 @@ func Test_EncodeDecodeSlot_Roundtrips_Correctly_When_Given_Various_Inputs(t *tes
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			// Encode
 			buf := encodeSlot(tt.key, tt.isLive, tt.revision, tt.index, tt.keySize, tt.indexSize)
 
@@ -124,21 +128,24 @@ func Test_EncodeDecodeSlot_Roundtrips_Correctly_When_Given_Various_Inputs(t *tes
 			}
 
 			// Decode
-			gotKey, gotIsLive, gotRevision, gotIndex := decodeSlot(buf, tt.keySize, tt.indexSize)
+			got := decodeSlot(buf, tt.keySize, tt.indexSize)
 
 			// Verify fields
-			if !bytes.Equal(gotKey, tt.key) {
-				t.Errorf("key = %v, want %v", gotKey, tt.key)
+			if !bytes.Equal(got.key, tt.key) {
+				t.Errorf("key = %v, want %v", got.key, tt.key)
 			}
-			if gotIsLive != tt.isLive {
-				t.Errorf("isLive = %v, want %v", gotIsLive, tt.isLive)
+
+			if got.isLive != tt.isLive {
+				t.Errorf("isLive = %v, want %v", got.isLive, tt.isLive)
 			}
-			if gotRevision != tt.revision {
-				t.Errorf("revision = %d, want %d", gotRevision, tt.revision)
+
+			if got.revision != tt.revision {
+				t.Errorf("revision = %d, want %d", got.revision, tt.revision)
 			}
+
 			if tt.indexSize > 0 {
-				if !bytes.Equal(gotIndex, tt.index) {
-					t.Errorf("index = %v, want %v", gotIndex, tt.index)
+				if !bytes.Equal(got.index, tt.index) {
+					t.Errorf("index = %v, want %v", got.index, tt.index)
 				}
 			}
 		})
@@ -146,6 +153,8 @@ func Test_EncodeDecodeSlot_Roundtrips_Correctly_When_Given_Various_Inputs(t *tes
 }
 
 func Test_EncodeSlot_Sets_Meta_Bit_Correctly_When_Slot_Is_Live_Or_Dead(t *testing.T) {
+	t.Parallel()
+
 	key := []byte("0123456789abcdef")
 
 	// Live slot should have bit 0 set
@@ -156,7 +165,7 @@ func Test_EncodeSlot_Sets_Meta_Bit_Correctly_When_Slot_Is_Live_Or_Dead(t *testin
 
 	// Dead slot should have meta=0
 	deadBuf := encodeSlot(key, false, 0, nil, 16, 0)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if deadBuf[i] != 0 {
 			t.Errorf("dead slot meta byte[%d] = %d, want 0", i, deadBuf[i])
 		}
@@ -164,17 +173,19 @@ func Test_EncodeSlot_Sets_Meta_Bit_Correctly_When_Slot_Is_Live_Or_Dead(t *testin
 }
 
 func Test_EncodeSlot_Aligns_Revision_To_EightBytes_When_KeySize_Varies(t *testing.T) {
-	// Test that revision is correctly aligned for various key sizes
+	t.Parallel()
+
+	// Test that revision is correctly aligned for various key sizes.
 	testCases := []struct {
 		keySize        uint32
-		expectedOffset uint32 // offset of revision from start of slot
+		expectedOffset uint32
 	}{
-		{keySize: 1, expectedOffset: 16},  // 8 + 1 + 7(pad) = 16
-		{keySize: 7, expectedOffset: 16},  // 8 + 7 + 1(pad) = 16
-		{keySize: 8, expectedOffset: 16},  // 8 + 8 + 0(pad) = 16
-		{keySize: 9, expectedOffset: 24},  // 8 + 9 + 7(pad) = 24
-		{keySize: 15, expectedOffset: 24}, // 8 + 15 + 1(pad) = 24
-		{keySize: 16, expectedOffset: 24}, // 8 + 16 + 0(pad) = 24
+		{keySize: 1, expectedOffset: 16},
+		{keySize: 7, expectedOffset: 16},
+		{keySize: 8, expectedOffset: 16},
+		{keySize: 9, expectedOffset: 24},
+		{keySize: 15, expectedOffset: 24},
+		{keySize: 16, expectedOffset: 24},
 	}
 
 	for _, tc := range testCases {
@@ -182,6 +193,7 @@ func Test_EncodeSlot_Aligns_Revision_To_EightBytes_When_KeySize_Varies(t *testin
 		for i := range key {
 			key[i] = 'X'
 		}
+
 		revision := int64(0x0102030405060708) // Distinctive pattern
 
 		buf := encodeSlot(key, true, revision, nil, tc.keySize, 0)
@@ -209,6 +221,8 @@ func Test_EncodeSlot_Aligns_Revision_To_EightBytes_When_KeySize_Varies(t *testin
 }
 
 func Test_HeaderCRC_Validates_Correctly_When_Header_Is_Fresh_Or_Corrupted(t *testing.T) {
+	t.Parallel()
+
 	h := newHeader(16, 8, 1000, 1, 0.75)
 	buf := encodeHeader(&h)
 
@@ -225,6 +239,8 @@ func Test_HeaderCRC_Validates_Correctly_When_Header_Is_Fresh_Or_Corrupted(t *tes
 }
 
 func Test_HeaderCRC_Remains_Unchanged_When_Generation_Changes(t *testing.T) {
+	t.Parallel()
+
 	h := newHeader(16, 8, 1000, 1, 0.75)
 
 	// Encode with generation=0
@@ -244,6 +260,8 @@ func Test_HeaderCRC_Remains_Unchanged_When_Generation_Changes(t *testing.T) {
 }
 
 func Test_ComputeBucketCount_Returns_Power_Of_Two_When_Given_Capacity_And_LoadFactor(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		slotCapacity uint64
 		loadFactor   float64
@@ -264,6 +282,8 @@ func Test_ComputeBucketCount_Returns_Power_Of_Two_When_Given_Capacity_And_LoadFa
 }
 
 func Test_NextPow2_Returns_Smallest_Power_Of_Two_When_Given_Input(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		input uint64
 		want  uint64
@@ -290,8 +310,11 @@ func Test_NextPow2_Returns_Smallest_Power_Of_Two_When_Given_Input(t *testing.T) 
 }
 
 func Test_HasReservedBytesSet_Returns_True_When_Reserved_Bytes_Are_Nonzero(t *testing.T) {
+	t.Parallel()
+
 	// Clean header
 	h := newHeader(16, 0, 100, 1, 0.75)
+
 	buf := encodeHeader(&h)
 	if hasReservedBytesSet(buf) {
 		t.Error("hasReservedBytesSet returned true for clean header")

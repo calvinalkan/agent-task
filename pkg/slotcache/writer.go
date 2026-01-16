@@ -1,9 +1,9 @@
-//go:build slotcache_impl
-
 package slotcache
 
 import (
+	"os"
 	"slices"
+	"sort"
 )
 
 // bufferedOp represents a buffered Put or Delete operation.
@@ -16,9 +16,11 @@ type bufferedOp struct {
 
 // writer is the concrete implementation of Writer.
 type writer struct {
-	cache       *cache
-	bufferedOps []bufferedOp
-	isClosed    bool
+	cache          *cache
+	bufferedOps    []bufferedOp
+	isClosed       bool
+	closedByCommit bool
+	lockFile       *os.File
 }
 
 // Put buffers a put operation for the given key.
@@ -36,22 +38,15 @@ func (w *writer) Put(key []byte, revision int64, index []byte) error {
 	}
 
 	if len(index) != w.cache.file.indexSize {
-		return ErrInvalidIndex
+		return ErrInvalidInput
 	}
 
-	op := bufferedOp{
+	w.bufferedOps = append(w.bufferedOps, bufferedOp{
 		isPut:    true,
 		key:      string(key),
 		revision: revision,
 		index:    string(index),
-	}
-
-	w.bufferedOps = append(w.bufferedOps, op)
-	if w.wouldExceedCapacity() {
-		w.bufferedOps = w.bufferedOps[:len(w.bufferedOps)-1]
-
-		return ErrFull
-	}
+	})
 
 	return nil
 }
@@ -72,10 +67,7 @@ func (w *writer) Delete(key []byte) (bool, error) {
 
 	keyStr := string(key)
 	wasPresent := w.isKeyPresent(keyStr)
-	w.bufferedOps = append(w.bufferedOps, bufferedOp{
-		isPut: false,
-		key:   keyStr,
-	})
+	w.bufferedOps = append(w.bufferedOps, bufferedOp{isPut: false, key: keyStr})
 
 	return wasPresent, nil
 }
@@ -89,41 +81,82 @@ func (w *writer) Commit() error {
 		return ErrClosed
 	}
 
-	for _, op := range w.finalOps() {
-		w.apply(op)
+	finalOps := w.finalOps()
+
+	if w.wouldExceedCapacity() {
+		w.closeByCommit()
+
+		return ErrFull
+	}
+
+	if w.cache.file.orderedKeys {
+		err := w.applyOrdered(finalOps)
+		if err != nil {
+			w.closeByCommit()
+
+			return err
+		}
+	} else {
+		for _, op := range finalOps {
+			w.apply(op)
+		}
 	}
 
 	// Persist to disk.
-	if err := saveState(w.cache.file.path, w.cache.file); err != nil {
+	err := saveState(w.cache.file.path, w.cache.file)
+	if err != nil {
+		w.closeByCommit()
+
 		return err
 	}
 
-	w.isClosed = true
-	w.bufferedOps = nil
-	w.cache.activeWriter = nil
+	w.closeByCommit()
 
 	return nil
 }
 
-// Abort discards all buffered operations.
-func (w *writer) Abort() error {
+// Close releases resources and discards uncommitted changes.
+//
+// Close is idempotent: calling Close multiple times (including after Commit)
+// returns nil. Always call Close, even after [Writer.Commit].
+func (w *writer) Close() error {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 
 	if w.isClosed {
-		return ErrClosed
+		// Idempotent: return nil even if closed by Commit.
+		return nil
 	}
 
 	w.isClosed = true
+	w.closedByCommit = false
 	w.bufferedOps = nil
 	w.cache.activeWriter = nil
+
+	// Release both guards (idempotent).
+	if w.cache != nil && w.cache.file != nil {
+		w.cache.file.writerActive = false
+	}
+
+	releaseWriterLock(w.lockFile)
+	w.lockFile = nil
 
 	return nil
 }
 
-// Close is an alias for Abort.
-func (w *writer) Close() error {
-	return w.Abort()
+func (w *writer) closeByCommit() {
+	w.isClosed = true
+	w.closedByCommit = true
+	w.bufferedOps = nil
+	w.cache.activeWriter = nil
+
+	// Release both guards (idempotent).
+	if w.cache != nil && w.cache.file != nil {
+		w.cache.file.writerActive = false
+	}
+
+	releaseWriterLock(w.lockFile)
+	w.lockFile = nil
 }
 
 // apply mutates committed state according to append-only rules.
@@ -149,6 +182,57 @@ func (w *writer) apply(op bufferedOp) {
 	if live {
 		w.cache.file.slots[idx].isLive = false
 	}
+}
+
+func (w *writer) applyOrdered(finalOps []bufferedOp) error {
+	var inserts []bufferedOp
+
+	for _, op := range finalOps {
+		if !op.isPut {
+			continue
+		}
+
+		if _, live := w.cache.findLiveSlot(op.key); live {
+			continue // update
+		}
+
+		inserts = append(inserts, op)
+	}
+
+	if len(inserts) > 0 && len(w.cache.file.slots) > 0 {
+		tailKey := w.cache.file.slots[len(w.cache.file.slots)-1].key
+
+		minNewKey := inserts[0].key
+		for _, op := range inserts[1:] {
+			if op.key < minNewKey {
+				minNewKey = op.key
+			}
+		}
+
+		if minNewKey < tailKey {
+			return ErrOutOfOrderInsert
+		}
+	}
+
+	sort.Slice(inserts, func(i, j int) bool {
+		return inserts[i].key < inserts[j].key
+	})
+
+	for _, op := range finalOps {
+		if op.isPut {
+			if _, live := w.cache.findLiveSlot(op.key); !live {
+				continue // insert handled later
+			}
+		}
+
+		w.apply(op)
+	}
+
+	for _, op := range inserts {
+		w.apply(op)
+	}
+
+	return nil
 }
 
 // finalOps returns the last operation per key, in original order.

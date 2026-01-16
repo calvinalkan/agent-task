@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
-	"github.com/calvinalkan/agent-task/pkg/slotcache/model"
+	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil/model"
 )
 
 func Test_ModelFile_Returns_Error_When_Options_Invalid(t *testing.T) {
@@ -153,8 +153,8 @@ func Test_ModelCache_Close_Returns_ErrBusy_When_Writer_Active(t *testing.T) {
 	closeErr := cacheHandle.Close()
 
 	require.ErrorIs(t, closeErr, slotcache.ErrBusy, "Close should fail while writer is active")
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
-	require.NoError(t, cacheHandle.Close(), "Close should succeed after abort")
+	writerSession.Close()
+	require.NoError(t, cacheHandle.Close(), "Close should succeed after close")
 }
 
 func Test_ModelCache_BeginWrite_Returns_ErrBusy_When_Writer_Active(t *testing.T) {
@@ -168,11 +168,11 @@ func Test_ModelCache_BeginWrite_Returns_ErrBusy_When_Writer_Active(t *testing.T)
 
 	_, err = cacheHandle.BeginWrite()
 	require.ErrorIs(t, err, slotcache.ErrBusy, "BeginWrite should reject concurrent writer")
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	writerSession.Close()
 
 	writerSession, err = cacheHandle.BeginWrite()
-	require.NoError(t, err, "BeginWrite should succeed after abort")
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	require.NoError(t, err, "BeginWrite should succeed after close")
+	writerSession.Close()
 }
 
 func Test_ModelCache_Returns_ErrClosed_When_Handle_Is_Closed(t *testing.T) {
@@ -181,6 +181,7 @@ func Test_ModelCache_Returns_ErrClosed_When_Handle_Is_Closed(t *testing.T) {
 	testCases := []struct {
 		name string
 		run  func(*model.CacheModel) error
+		want error
 	}{
 		{
 			name: "Len",
@@ -189,6 +190,7 @@ func Test_ModelCache_Returns_ErrClosed_When_Handle_Is_Closed(t *testing.T) {
 
 				return err
 			},
+			want: slotcache.ErrClosed,
 		},
 		{
 			name: "Get",
@@ -197,22 +199,25 @@ func Test_ModelCache_Returns_ErrClosed_When_Handle_Is_Closed(t *testing.T) {
 
 				return err
 			},
+			want: slotcache.ErrClosed,
 		},
 		{
 			name: "Scan",
 			run: func(cacheHandle *model.CacheModel) error {
-				_, err := cacheHandle.Scan(slotcache.ScanOpts{})
+				_, err := cacheHandle.Scan(slotcache.ScanOptions{})
 
 				return err
 			},
+			want: slotcache.ErrClosed,
 		},
 		{
 			name: "ScanPrefix",
 			run: func(cacheHandle *model.CacheModel) error {
-				_, err := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{})
+				_, err := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOptions{})
 
 				return err
 			},
+			want: slotcache.ErrClosed,
 		},
 		{
 			name: "BeginWrite",
@@ -221,12 +226,14 @@ func Test_ModelCache_Returns_ErrClosed_When_Handle_Is_Closed(t *testing.T) {
 
 				return err
 			},
+			want: slotcache.ErrClosed,
 		},
 		{
 			name: "CloseAgain",
 			run: func(cacheHandle *model.CacheModel) error {
 				return cacheHandle.Close()
 			},
+			want: nil, // Close is idempotent.
 		},
 	}
 
@@ -240,7 +247,13 @@ func Test_ModelCache_Returns_ErrClosed_When_Handle_Is_Closed(t *testing.T) {
 			require.NoError(t, cacheHandle.Close(), "Close should succeed")
 
 			err := testCase.run(cacheHandle)
-			require.ErrorIs(t, err, slotcache.ErrClosed, "operation should fail once cache is closed")
+			if testCase.want == nil {
+				require.NoError(t, err, "operation should succeed")
+
+				return
+			}
+
+			require.ErrorIs(t, err, testCase.want, "operation should fail once cache is closed")
 		})
 	}
 }
@@ -271,7 +284,7 @@ func Test_ModelWriter_Defers_Visibility_When_Commit_Not_Called(t *testing.T) {
 	assert.Empty(t, diff, "unexpected entry")
 }
 
-func Test_ModelWriter_Returns_ErrInvalidIndex_When_Index_Length_Wrong(t *testing.T) {
+func Test_ModelWriter_Returns_ErrInvalidInput_When_Index_Length_Wrong(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -294,9 +307,9 @@ func Test_ModelWriter_Returns_ErrInvalidIndex_When_Index_Length_Wrong(t *testing
 			require.NoError(t, err, "BeginWrite should succeed")
 
 			putErr := writerSession.Put([]byte("aa"), 1, testCase.index)
-			require.ErrorIs(t, putErr, slotcache.ErrInvalidIndex, "Put should reject invalid index length")
+			require.ErrorIs(t, putErr, slotcache.ErrInvalidInput, "Put should reject invalid index length")
 
-			require.NoError(t, writerSession.Abort(), "Abort should succeed")
+			writerSession.Close()
 		})
 	}
 }
@@ -328,12 +341,12 @@ func Test_ModelWriter_Accepts_Empty_Index_When_IndexSize_Is_Zero(t *testing.T) {
 			writerSession, err := cacheHandle.BeginWrite()
 			require.NoError(t, err, "BeginWrite should succeed")
 			require.NoError(t, writerSession.Put([]byte("aa"), 1, testCase.index), "Put should accept empty index")
-			require.NoError(t, writerSession.Abort(), "Abort should succeed")
+			writerSession.Close()
 		})
 	}
 }
 
-func Test_ModelWriter_Returns_ErrInvalidIndex_When_IndexSize_Is_Zero_And_Index_NonEmpty(t *testing.T) {
+func Test_ModelWriter_Returns_ErrInvalidInput_When_IndexSize_Is_Zero_And_Index_NonEmpty(t *testing.T) {
 	t.Parallel()
 
 	fileState, err := model.NewFile(slotcache.Options{
@@ -349,9 +362,9 @@ func Test_ModelWriter_Returns_ErrInvalidIndex_When_IndexSize_Is_Zero_And_Index_N
 	require.NoError(t, err, "BeginWrite should succeed")
 
 	putErr := writerSession.Put([]byte("aa"), 1, []byte("i"))
-	require.ErrorIs(t, putErr, slotcache.ErrInvalidIndex, "Put should reject non-empty index")
+	require.ErrorIs(t, putErr, slotcache.ErrInvalidInput, "Put should reject non-empty index")
 
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	writerSession.Close()
 }
 
 func Test_ModelWriter_Uses_Last_Operation_When_Multiple_Ops_Buffered(t *testing.T) {
@@ -474,6 +487,14 @@ func Test_ModelWriter_Returns_ErrClosed_When_Called_After_Commit(t *testing.T) {
 	require.NoError(t, writerSession.Put([]byte("aa"), 1, []byte("i1")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
+	// Close is idempotent even after Commit.
+	writerSession.Close()
+	require.True(t, writerSession.IsClosed, "writer should be closed after Close()")
+
+	// Second Close should also be a no-op (doesn't panic).
+	require.NotPanics(t, func() { writerSession.Close() }, "second Close should not panic")
+
+	// Put/Delete/Commit should return ErrClosed after Commit.
 	testCases := []struct {
 		name string
 		run  func(*model.WriterModel) error
@@ -496,18 +517,6 @@ func Test_ModelWriter_Returns_ErrClosed_When_Called_After_Commit(t *testing.T) {
 			name: "Commit",
 			run: func(writerSession *model.WriterModel) error {
 				return writerSession.Commit()
-			},
-		},
-		{
-			name: "Abort",
-			run: func(writerSession *model.WriterModel) error {
-				return writerSession.Abort()
-			},
-		},
-		{
-			name: "Close",
-			run: func(writerSession *model.WriterModel) error {
-				return writerSession.Close()
 			},
 		},
 	}
@@ -551,7 +560,7 @@ func Test_ModelWriter_Delete_Returns_Presence_When_Buffered_State_Changes(t *tes
 	require.NoError(t, err, "Delete should succeed")
 	require.True(t, present, "expected Delete to report key present after buffered Put")
 
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	writerSession.Close()
 }
 
 func Test_ModelWriter_Appends_Slot_When_Key_Reinserted(t *testing.T) {
@@ -650,12 +659,12 @@ func Test_ModelWriter_Returns_ErrFull_When_SlotCapacity_Exceeded(t *testing.T) {
 	writerSession, err = cacheHandle.BeginWrite()
 	require.NoError(t, err, "BeginWrite should succeed")
 
-	putErr := writerSession.Put([]byte("bb"), 2, []byte("i2"))
-	require.ErrorIs(t, putErr, slotcache.ErrFull, "Put should return ErrFull when capacity exceeded")
+	require.NoError(t, writerSession.Put([]byte("bb"), 2, []byte("i2")), "Put should succeed")
 
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	commitErr := writerSession.Commit()
+	require.ErrorIs(t, commitErr, slotcache.ErrFull, "Commit should return ErrFull when capacity exceeded")
 
-	entries, scanErr := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, scanErr := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, scanErr, "Scan should succeed")
 
 	wantEntries := []model.Entry{modelEntry("aa", 1, "i1")}
@@ -684,34 +693,34 @@ func Test_ModelCache_Scan_Orders_And_Paginates_When_Options_Set(t *testing.T) {
 	testCases := []struct {
 		name   string
 		prefix []byte
-		opts   slotcache.ScanOpts
+		opts   slotcache.ScanOptions
 		want   []model.Entry
 	}{
 		{
 			name: "ForwardAll",
-			opts: slotcache.ScanOpts{},
+			opts: slotcache.ScanOptions{},
 			want: []model.Entry{entryAA, entryAB, entryBA},
 		},
 		{
 			name: "ReverseAll",
-			opts: slotcache.ScanOpts{Reverse: true},
+			opts: slotcache.ScanOptions{Reverse: true},
 			want: []model.Entry{entryBA, entryAB, entryAA},
 		},
 		{
 			name:   "PrefixA",
 			prefix: []byte("a"),
-			opts:   slotcache.ScanOpts{},
+			opts:   slotcache.ScanOptions{},
 			want:   []model.Entry{entryAA, entryAB},
 		},
 		{
 			name:   "PrefixAReverse",
 			prefix: []byte("a"),
-			opts:   slotcache.ScanOpts{Reverse: true},
+			opts:   slotcache.ScanOptions{Reverse: true},
 			want:   []model.Entry{entryAB, entryAA},
 		},
 		{
 			name: "OffsetLimit",
-			opts: slotcache.ScanOpts{Offset: 1, Limit: 1},
+			opts: slotcache.ScanOptions{Offset: 1, Limit: 1},
 			want: []model.Entry{entryAB},
 		},
 	}
@@ -757,7 +766,7 @@ func Test_ModelCache_Scan_Skips_Tombstones_When_Key_Deleted(t *testing.T) {
 	require.NoError(t, err, "Delete should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	entries, scanErr := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, scanErr := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, scanErr, "Scan should succeed")
 
 	wantEntries := []model.Entry{modelEntry("aa", 1, "i1")}
@@ -765,7 +774,7 @@ func Test_ModelCache_Scan_Skips_Tombstones_When_Key_Deleted(t *testing.T) {
 	assert.Empty(t, diff, "unexpected entries")
 }
 
-func Test_ModelCache_Returns_ErrInvalidKey_When_Key_Length_Wrong(t *testing.T) {
+func Test_ModelCache_Returns_ErrInvalidInput_When_Key_Length_Wrong(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -797,7 +806,7 @@ func Test_ModelCache_Returns_ErrInvalidKey_When_Key_Length_Wrong(t *testing.T) {
 				}
 
 				defer func() {
-					_ = writerSession.Abort()
+					writerSession.Close()
 				}()
 
 				return writerSession.Put([]byte("a"), 1, []byte("i1"))
@@ -812,7 +821,7 @@ func Test_ModelCache_Returns_ErrInvalidKey_When_Key_Length_Wrong(t *testing.T) {
 				}
 
 				defer func() {
-					_ = writerSession.Abort()
+					writerSession.Close()
 				}()
 
 				_, err = writerSession.Delete([]byte("a"))
@@ -830,12 +839,12 @@ func Test_ModelCache_Returns_ErrInvalidKey_When_Key_Length_Wrong(t *testing.T) {
 			cacheHandle := model.Open(fileState)
 
 			err := testCase.run(cacheHandle)
-			require.ErrorIs(t, err, slotcache.ErrInvalidKey, "operation should reject invalid key")
+			require.ErrorIs(t, err, slotcache.ErrInvalidInput, "operation should reject invalid key")
 		})
 	}
 }
 
-func Test_ModelCache_Returns_ErrInvalidPrefix_When_Prefix_Invalid(t *testing.T) {
+func Test_ModelCache_Returns_ErrInvalidInput_When_Prefix_Invalid(t *testing.T) {
 	t.Parallel()
 
 	fileState := newTestFile(t, 2)
@@ -854,13 +863,13 @@ func Test_ModelCache_Returns_ErrInvalidPrefix_When_Prefix_Invalid(t *testing.T) 
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := cacheHandle.ScanPrefix(testCase.prefix, slotcache.ScanOpts{})
-			require.ErrorIs(t, err, slotcache.ErrInvalidPrefix, "ScanPrefix should reject invalid prefix")
+			_, err := cacheHandle.ScanPrefix(testCase.prefix, slotcache.ScanOptions{})
+			require.ErrorIs(t, err, slotcache.ErrInvalidInput, "ScanPrefix should reject invalid prefix")
 		})
 	}
 }
 
-func Test_ModelCache_Returns_ErrInvalidScanOpts_When_Options_Invalid(t *testing.T) {
+func Test_ModelCache_Returns_ErrInvalidInput_When_Options_Invalid(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -870,7 +879,7 @@ func Test_ModelCache_Returns_ErrInvalidScanOpts_When_Options_Invalid(t *testing.
 		{
 			name: "ScanNegativeOffset",
 			run: func(cacheHandle *model.CacheModel) error {
-				_, err := cacheHandle.Scan(slotcache.ScanOpts{Offset: -1})
+				_, err := cacheHandle.Scan(slotcache.ScanOptions{Offset: -1})
 
 				return err
 			},
@@ -878,7 +887,7 @@ func Test_ModelCache_Returns_ErrInvalidScanOpts_When_Options_Invalid(t *testing.
 		{
 			name: "ScanNegativeLimit",
 			run: func(cacheHandle *model.CacheModel) error {
-				_, err := cacheHandle.Scan(slotcache.ScanOpts{Limit: -1})
+				_, err := cacheHandle.Scan(slotcache.ScanOptions{Limit: -1})
 
 				return err
 			},
@@ -886,7 +895,7 @@ func Test_ModelCache_Returns_ErrInvalidScanOpts_When_Options_Invalid(t *testing.
 		{
 			name: "ScanPrefixNegativeOffset",
 			run: func(cacheHandle *model.CacheModel) error {
-				_, err := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{Offset: -1})
+				_, err := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOptions{Offset: -1})
 
 				return err
 			},
@@ -894,7 +903,7 @@ func Test_ModelCache_Returns_ErrInvalidScanOpts_When_Options_Invalid(t *testing.
 		{
 			name: "ScanPrefixNegativeLimit",
 			run: func(cacheHandle *model.CacheModel) error {
-				_, err := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{Limit: -1})
+				_, err := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOptions{Limit: -1})
 
 				return err
 			},
@@ -909,7 +918,7 @@ func Test_ModelCache_Returns_ErrInvalidScanOpts_When_Options_Invalid(t *testing.
 			cacheHandle := model.Open(fileState)
 
 			err := testCase.run(cacheHandle)
-			require.ErrorIs(t, err, slotcache.ErrInvalidScanOpts, "operation should reject invalid scan options")
+			require.ErrorIs(t, err, slotcache.ErrInvalidInput, "operation should reject invalid scan options")
 		})
 	}
 }
@@ -925,7 +934,7 @@ func Test_ModelCache_Scan_Returns_Empty_When_Offset_Exceeds_Length(t *testing.T)
 	require.NoError(t, writerSession.Put([]byte("aa"), 1, []byte("i1")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	entries, scanErr := cacheHandle.Scan(slotcache.ScanOpts{Offset: 2})
+	entries, scanErr := cacheHandle.Scan(slotcache.ScanOptions{Offset: 2})
 	require.NoError(t, scanErr, "Scan should succeed with offset beyond length")
 	assert.Empty(t, entries, "Scan should return empty when offset exceeds length")
 }
@@ -942,7 +951,7 @@ func Test_ModelCache_Scan_Returns_Empty_When_Offset_Equals_Length(t *testing.T) 
 	require.NoError(t, writerSession.Put([]byte("ab"), 2, []byte("i2")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	entries, scanErr := cacheHandle.Scan(slotcache.ScanOpts{Offset: 2})
+	entries, scanErr := cacheHandle.Scan(slotcache.ScanOptions{Offset: 2})
 	require.NoError(t, scanErr, "Scan should succeed")
 
 	var wantEntries []model.Entry
@@ -1008,7 +1017,7 @@ func Test_ModelWriter_Delete_Returns_False_When_Key_Never_Existed(t *testing.T) 
 	require.NoError(t, err, "Delete should succeed")
 	assert.False(t, present, "expected Delete to report key absent for never-inserted key")
 
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	writerSession.Close()
 }
 
 func Test_ModelWriter_Returns_ErrClosed_When_Cache_Closed_Mid_Session(t *testing.T) {
@@ -1045,7 +1054,7 @@ func Test_ModelCache_ScanPrefix_Returns_Empty_When_No_Match(t *testing.T) {
 	require.NoError(t, writerSession.Put([]byte("ab"), 2, []byte("i2")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	entries, err := cacheHandle.ScanPrefix([]byte("z"), slotcache.ScanOpts{})
+	entries, err := cacheHandle.ScanPrefix([]byte("z"), slotcache.ScanOptions{})
 	require.NoError(t, err, "ScanPrefix should succeed")
 
 	var wantEntries []model.Entry
@@ -1060,7 +1069,7 @@ func Test_ModelCache_Scan_Returns_Empty_When_Cache_Empty(t *testing.T) {
 	fileState := newTestFile(t, 2)
 	cacheHandle := model.Open(fileState)
 
-	entries, err := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, err := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, err, "Scan should succeed on empty cache")
 
 	var wantEntries []model.Entry
@@ -1079,8 +1088,8 @@ func Test_ModelWriter_Close_Discards_Buffered_Ops_When_Called_Before_Commit(t *t
 	require.NoError(t, err, "BeginWrite should succeed")
 	require.NoError(t, writerSession.Put([]byte("aa"), 1, []byte("i1")), "Put should succeed")
 
-	// Use Close() instead of Abort() - should behave identically
-	require.NoError(t, writerSession.Close(), "Close should succeed")
+	// Close() discards buffered ops.
+	writerSession.Close()
 
 	// Verify the buffered Put was discarded
 	_, found, err := cacheHandle.Get([]byte("aa"))
@@ -1090,7 +1099,7 @@ func Test_ModelWriter_Close_Discards_Buffered_Ops_When_Called_Before_Commit(t *t
 	// Verify we can start a new write session
 	writerSession, err = cacheHandle.BeginWrite()
 	require.NoError(t, err, "BeginWrite should succeed after Close")
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	writerSession.Close()
 }
 
 func Test_ModelWriter_Preserves_Revision_When_Value_Is_Negative(t *testing.T) {
@@ -1131,37 +1140,37 @@ func Test_ModelCache_ScanPrefix_Orders_And_Paginates_When_Options_Set(t *testing
 
 	testCases := []struct {
 		name string
-		opts slotcache.ScanOpts
+		opts slotcache.ScanOptions
 		want []model.Entry
 	}{
 		{
 			name: "OffsetOnly",
-			opts: slotcache.ScanOpts{Offset: 1},
+			opts: slotcache.ScanOptions{Offset: 1},
 			want: []model.Entry{entryAB, entryAC},
 		},
 		{
 			name: "LimitOnly",
-			opts: slotcache.ScanOpts{Limit: 2},
+			opts: slotcache.ScanOptions{Limit: 2},
 			want: []model.Entry{entryAA, entryAB},
 		},
 		{
 			name: "OffsetAndLimit",
-			opts: slotcache.ScanOpts{Offset: 1, Limit: 1},
+			opts: slotcache.ScanOptions{Offset: 1, Limit: 1},
 			want: []model.Entry{entryAB},
 		},
 		{
 			name: "ReverseWithOffset",
-			opts: slotcache.ScanOpts{Reverse: true, Offset: 1},
+			opts: slotcache.ScanOptions{Reverse: true, Offset: 1},
 			want: []model.Entry{entryAB, entryAA},
 		},
 		{
 			name: "ReverseWithLimit",
-			opts: slotcache.ScanOpts{Reverse: true, Limit: 2},
+			opts: slotcache.ScanOptions{Reverse: true, Limit: 2},
 			want: []model.Entry{entryAC, entryAB},
 		},
 		{
 			name: "ReverseWithOffsetAndLimit",
-			opts: slotcache.ScanOpts{Reverse: true, Offset: 1, Limit: 1},
+			opts: slotcache.ScanOptions{Reverse: true, Offset: 1, Limit: 1},
 			want: []model.Entry{entryAB},
 		},
 	}
@@ -1192,7 +1201,7 @@ func Test_ModelCache_ScanPrefix_Returns_Empty_When_Offset_Exceeds_Filtered_Lengt
 	require.NoError(t, writerSession.Put([]byte("ba"), 3, []byte("i3")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	entries, scanErr := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{Offset: 3})
+	entries, scanErr := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOptions{Offset: 3})
 	require.NoError(t, scanErr, "ScanPrefix should succeed with offset beyond filtered length")
 	assert.Empty(t, entries, "ScanPrefix should return empty when offset exceeds filtered length")
 }
@@ -1215,10 +1224,10 @@ func Test_ModelWriter_Commit_Succeeds_When_No_Buffered_Ops(t *testing.T) {
 	// Verify we can start a new write session
 	writerSession, err = cacheHandle.BeginWrite()
 	require.NoError(t, err, "BeginWrite should succeed after empty commit")
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	writerSession.Close()
 }
 
-func Test_ModelWriter_Abort_Returns_ErrClosed_When_Called_Twice(t *testing.T) {
+func Test_ModelWriter_Close_Succeeds_When_Called_Multiple_Times(t *testing.T) {
 	t.Parallel()
 
 	fileState := newTestFile(t, 2)
@@ -1227,10 +1236,10 @@ func Test_ModelWriter_Abort_Returns_ErrClosed_When_Called_Twice(t *testing.T) {
 	writerSession, err := cacheHandle.BeginWrite()
 	require.NoError(t, err, "BeginWrite should succeed")
 
-	require.NoError(t, writerSession.Abort(), "first Abort should succeed")
+	writerSession.Close()
+	require.True(t, writerSession.IsClosed, "writer should be closed after first Close()")
 
-	abortErr := writerSession.Abort()
-	require.ErrorIs(t, abortErr, slotcache.ErrClosed, "second Abort should return ErrClosed")
+	require.NotPanics(t, func() { writerSession.Close() }, "second Close should be a no-op")
 }
 
 func Test_ModelCache_Scan_Returns_All_Entries_When_Limit_Is_Zero(t *testing.T) {
@@ -1246,10 +1255,10 @@ func Test_ModelCache_Scan_Returns_All_Entries_When_Limit_Is_Zero(t *testing.T) {
 	require.NoError(t, writerSession.Put([]byte("ac"), 3, []byte("i3")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	entriesWithZeroLimit, err := cacheHandle.Scan(slotcache.ScanOpts{Limit: 0})
+	entriesWithZeroLimit, err := cacheHandle.Scan(slotcache.ScanOptions{Limit: 0})
 	require.NoError(t, err, "Scan with Limit=0 should succeed")
 
-	entriesUnlimited, err := cacheHandle.Scan(slotcache.ScanOpts{})
+	entriesUnlimited, err := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, err, "Scan without Limit should succeed")
 
 	diff := cmp.Diff(entriesUnlimited, entriesWithZeroLimit)
@@ -1276,7 +1285,7 @@ func Test_ModelCache_Scan_Returns_Only_Committed_Entries_When_Write_Session_Acti
 	require.NoError(t, writerSession.Put([]byte("ac"), 3, []byte("i3")), "Put should succeed")
 
 	// Scan should only see committed entries
-	entries, scanErr := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, scanErr := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, scanErr, "Scan should succeed during active write session")
 
 	wantEntries := []model.Entry{
@@ -1287,13 +1296,13 @@ func Test_ModelCache_Scan_Returns_Only_Committed_Entries_When_Write_Session_Acti
 	assert.Empty(t, diff, "Scan should only return committed entries")
 
 	// ScanPrefix should also only see committed entries
-	prefixEntries, prefixErr := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{})
+	prefixEntries, prefixErr := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOptions{})
 	require.NoError(t, prefixErr, "ScanPrefix should succeed during active write session")
 
 	diff = cmp.Diff(wantEntries, prefixEntries)
 	assert.Empty(t, diff, "ScanPrefix should only return committed entries")
 
-	require.NoError(t, writerSession.Abort(), "Abort should succeed")
+	writerSession.Close()
 }
 
 func Test_ModelWriter_Commits_All_Keys_When_Batch_Contains_Multiple_Keys(t *testing.T) {
@@ -1310,7 +1319,7 @@ func Test_ModelWriter_Commits_All_Keys_When_Batch_Contains_Multiple_Keys(t *test
 	require.NoError(t, writerSession.Put([]byte("cc"), 3, []byte("i3")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	entries, scanErr := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, scanErr := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, scanErr, "Scan should succeed")
 
 	wantEntries := []model.Entry{
@@ -1329,7 +1338,7 @@ func Test_ModelWriter_Commits_All_Keys_When_Batch_Contains_Multiple_Keys(t *test
 	require.NoError(t, err, "Delete should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	entries, scanErr = cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, scanErr = cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, scanErr, "Scan should succeed")
 
 	wantEntries = []model.Entry{
@@ -1409,7 +1418,7 @@ func Test_ModelCache_ScanPrefix_Returns_Entry_When_Prefix_Equals_KeySize(t *test
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
 	// Prefix of exactly KeySize should match only the exact key
-	entries, err := cacheHandle.ScanPrefix([]byte("aa"), slotcache.ScanOpts{})
+	entries, err := cacheHandle.ScanPrefix([]byte("aa"), slotcache.ScanOptions{})
 	require.NoError(t, err, "ScanPrefix with exact-length prefix should succeed")
 
 	wantEntries := []model.Entry{modelEntry("aa", 1, "i1")}
@@ -1417,7 +1426,7 @@ func Test_ModelCache_ScanPrefix_Returns_Entry_When_Prefix_Equals_KeySize(t *test
 	assert.Empty(t, diff, "exact-length prefix should match only the exact key")
 
 	// Verify non-matching exact-length prefix returns empty
-	entries, err = cacheHandle.ScanPrefix([]byte("zz"), slotcache.ScanOpts{})
+	entries, err = cacheHandle.ScanPrefix([]byte("zz"), slotcache.ScanOptions{})
 	require.NoError(t, err, "ScanPrefix should succeed")
 	assert.Empty(t, entries, "non-matching exact-length prefix should return empty")
 }
@@ -1450,7 +1459,7 @@ func Test_Open_Skips_Tombstoned_Slots_When_FileState_Has_Mixed_Slots(t *testing.
 	assert.Equal(t, int64(1), entry.Revision, "revision should match")
 
 	// Scan should skip tombstoned entries
-	entries, err := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, err := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, err, "Scan should succeed")
 
 	wantEntries := []model.Entry{
@@ -1494,12 +1503,12 @@ func Test_ModelCache_Scan_Returns_Empty_When_All_Entries_Tombstoned(t *testing.T
 	assert.False(t, fileState.Slots[1].IsLive, "second slot should be tombstoned")
 
 	// Scan should return empty
-	entries, err := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, err := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, err, "Scan should succeed")
 	assert.Empty(t, entries, "Scan should return empty when all entries tombstoned")
 
 	// ScanPrefix should also return empty
-	entries, err = cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{})
+	entries, err = cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOptions{})
 	require.NoError(t, err, "ScanPrefix should succeed")
 	assert.Empty(t, entries, "ScanPrefix should return empty when all matching entries tombstoned")
 
@@ -1523,7 +1532,7 @@ func Test_ModelCache_ScanPrefix_Returns_Empty_When_Offset_Equals_Filtered_Count(
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
 	// Prefix "a" matches 2 entries (aa, ab). Offset=2 should return empty, not error.
-	entries, err := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{Offset: 2})
+	entries, err := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOptions{Offset: 2})
 	require.NoError(t, err, "ScanPrefix should succeed when offset equals filtered count")
 
 	var wantEntries []model.Entry
@@ -1584,7 +1593,7 @@ func Test_ModelWriter_Commits_Batch_When_Only_Deletes_Buffered(t *testing.T) {
 	require.NoError(t, writerSession.Commit(), "Commit should succeed with only deletes")
 
 	// Verify only bb remains
-	entries, err := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, err := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, err, "Scan should succeed")
 
 	wantEntries := []model.Entry{modelEntry("bb", 2, "i2")}
@@ -1624,7 +1633,7 @@ func Test_ModelCache_Scan_Preserves_Order_When_Keys_Reinserted_Multiple_Times(t 
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
 	// Scan forward: order should be bb, cc, aa (aa was reinserted last)
-	entries, err := cacheHandle.Scan(slotcache.ScanOpts{})
+	entries, err := cacheHandle.Scan(slotcache.ScanOptions{})
 	require.NoError(t, err, "Scan should succeed")
 
 	wantEntries := []model.Entry{
@@ -1636,7 +1645,7 @@ func Test_ModelCache_Scan_Preserves_Order_When_Keys_Reinserted_Multiple_Times(t 
 	assert.Empty(t, diff, "reinserted key should appear at end of scan")
 
 	// Scan reverse: order should be aa, cc, bb
-	entriesReverse, err := cacheHandle.Scan(slotcache.ScanOpts{Reverse: true})
+	entriesReverse, err := cacheHandle.Scan(slotcache.ScanOptions{Reverse: true})
 	require.NoError(t, err, "Scan reverse should succeed")
 
 	wantEntriesReverse := []model.Entry{
@@ -1653,6 +1662,248 @@ func Test_ModelCache_Scan_Preserves_Order_When_Keys_Reinserted_Multiple_Times(t 
 	assert.True(t, fileState.Slots[1].IsLive, "bb slot should be live")
 	assert.True(t, fileState.Slots[2].IsLive, "cc slot should be live")
 	assert.True(t, fileState.Slots[3].IsLive, "reinserted aa slot should be live")
+}
+
+func Test_ModelCache_ScanMatch_Returns_Entries_When_ByteAligned_Prefix_Matches_With_KeyOffset(t *testing.T) {
+	t.Parallel()
+
+	opts := slotcache.Options{
+		KeySize:      4,
+		IndexSize:    0,
+		SlotCapacity: 10,
+	}
+
+	fileState, err := model.NewFile(opts)
+	require.NoError(t, err, "NewFile should succeed")
+
+	cacheHandle := model.Open(fileState)
+
+	writerSession, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	keyA := []byte{0x01, 0xAA, 0xBB, 0xCC}
+	keyB := []byte{0x02, 0xAA, 0xBB, 0xDD}
+	keyC := []byte{0x03, 0xAA, 0xCC, 0x00}
+
+	require.NoError(t, writerSession.Put(keyA, 1, nil), "Put should succeed")
+	require.NoError(t, writerSession.Put(keyB, 2, nil), "Put should succeed")
+	require.NoError(t, writerSession.Put(keyC, 3, nil), "Put should succeed")
+	require.NoError(t, writerSession.Commit(), "Commit should succeed")
+
+	spec := slotcache.Prefix{Offset: 1, Bits: 0, Bytes: []byte{0xAA, 0xBB}}
+
+	entries, err := cacheHandle.ScanMatch(spec, slotcache.ScanOptions{})
+	require.NoError(t, err, "ScanMatch should succeed")
+
+	wantEntries := []model.Entry{
+		{Key: keyA, Revision: 1, Index: []byte{}},
+		{Key: keyB, Revision: 2, Index: []byte{}},
+	}
+
+	diff := cmp.Diff(wantEntries, entries, cmpopts.EquateEmpty())
+	assert.Empty(t, diff, "unexpected entries")
+}
+
+func Test_ModelCache_ScanMatch_Returns_Entries_When_BitPrefix_Matches(t *testing.T) {
+	t.Parallel()
+
+	opts := slotcache.Options{
+		KeySize:      2,
+		IndexSize:    0,
+		SlotCapacity: 10,
+	}
+
+	fileState, err := model.NewFile(opts)
+	require.NoError(t, err, "NewFile should succeed")
+
+	cacheHandle := model.Open(fileState)
+
+	writerSession, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	key1 := []byte{0xAB, 0xC0}
+	key2 := []byte{0xAB, 0xFF}
+	key3 := []byte{0xAB, 0x80}
+	key4 := []byte{0xAA, 0xC0}
+
+	require.NoError(t, writerSession.Put(key1, 1, nil), "Put should succeed")
+	require.NoError(t, writerSession.Put(key2, 2, nil), "Put should succeed")
+	require.NoError(t, writerSession.Put(key3, 3, nil), "Put should succeed")
+	require.NoError(t, writerSession.Put(key4, 4, nil), "Put should succeed")
+	require.NoError(t, writerSession.Commit(), "Commit should succeed")
+
+	spec := slotcache.Prefix{Offset: 0, Bits: 10, Bytes: []byte{0xAB, 0xC0}}
+
+	entries, err := cacheHandle.ScanMatch(spec, slotcache.ScanOptions{})
+	require.NoError(t, err, "ScanMatch should succeed")
+
+	wantEntries := []model.Entry{
+		{Key: key1, Revision: 1, Index: []byte{}},
+		{Key: key2, Revision: 2, Index: []byte{}},
+	}
+
+	diff := cmp.Diff(wantEntries, entries, cmpopts.EquateEmpty())
+	assert.Empty(t, diff, "unexpected entries")
+}
+
+func Test_ModelCache_ScanMatch_Returns_ErrInvalidInput_When_Spec_Invalid(t *testing.T) {
+	t.Parallel()
+
+	opts := slotcache.Options{
+		KeySize:      4,
+		IndexSize:    0,
+		SlotCapacity: 1,
+	}
+
+	fileState, err := model.NewFile(opts)
+	require.NoError(t, err, "NewFile should succeed")
+
+	cacheHandle := model.Open(fileState)
+
+	testCases := []struct {
+		name string
+		spec slotcache.Prefix
+	}{
+		{name: "NegativeKeyOffset", spec: slotcache.Prefix{Offset: -1, Bits: 0, Bytes: []byte{0x00}}},
+		{name: "KeyOffsetOutOfRange", spec: slotcache.Prefix{Offset: 4, Bits: 0, Bytes: []byte{0x00}}},
+		{name: "EmptyBytesByteAligned", spec: slotcache.Prefix{Offset: 0, Bits: 0, Bytes: []byte{}}},
+		{name: "NilBytesByteAligned", spec: slotcache.Prefix{Offset: 0, Bits: 0, Bytes: nil}},
+		{name: "NegativePrefixBits", spec: slotcache.Prefix{Offset: 0, Bits: -1, Bytes: []byte{0x00}}},
+		{name: "BytesLenMismatchBitMode", spec: slotcache.Prefix{Offset: 0, Bits: 9, Bytes: []byte{0xAA}}},
+		{name: "TooLongBitMode", spec: slotcache.Prefix{Offset: 3, Bits: 16, Bytes: []byte{0xAA, 0xBB}}},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := cacheHandle.ScanMatch(testCase.spec, slotcache.ScanOptions{})
+			require.ErrorIs(t, err, slotcache.ErrInvalidInput, "ScanMatch should reject invalid spec")
+		})
+	}
+}
+
+func Test_ModelCache_ScanRange_Returns_ErrUnordered_When_OrderedKeys_Disabled(t *testing.T) {
+	t.Parallel()
+
+	opts := slotcache.Options{
+		KeySize:      2,
+		IndexSize:    0,
+		SlotCapacity: 10,
+		OrderedKeys:  false,
+	}
+
+	fileState, err := model.NewFile(opts)
+	require.NoError(t, err, "NewFile should succeed")
+
+	cacheHandle := model.Open(fileState)
+
+	_, err = cacheHandle.ScanRange(nil, nil, slotcache.ScanOptions{})
+	require.ErrorIs(t, err, slotcache.ErrUnordered, "ScanRange should require ordered mode")
+}
+
+func Test_ModelCache_ScanRange_Filters_And_Paginates_When_OrderedKeys_Enabled(t *testing.T) {
+	t.Parallel()
+
+	opts := slotcache.Options{
+		KeySize:      2,
+		IndexSize:    0,
+		SlotCapacity: 10,
+		OrderedKeys:  true,
+	}
+
+	fileState, err := model.NewFile(opts)
+	require.NoError(t, err, "NewFile should succeed")
+
+	cacheHandle := model.Open(fileState)
+
+	k1 := []byte{0x00, 0x10}
+	k2 := []byte{0x00, 0x20}
+	k3 := []byte{0x00, 0x30}
+	k4 := []byte{0x00, 0x40}
+
+	writerSession, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	// Insert in non-sorted order; ordered mode sorts new inserts at commit time.
+	require.NoError(t, writerSession.Put(k3, 3, nil), "Put should succeed")
+	require.NoError(t, writerSession.Put(k1, 1, nil), "Put should succeed")
+	require.NoError(t, writerSession.Put(k4, 4, nil), "Put should succeed")
+	require.NoError(t, writerSession.Put(k2, 2, nil), "Put should succeed")
+	require.NoError(t, writerSession.Commit(), "Commit should succeed")
+
+	// Range [k2, k4) should include k2 and k3.
+	entries, err := cacheHandle.ScanRange(k2, k4, slotcache.ScanOptions{})
+	require.NoError(t, err, "ScanRange should succeed")
+
+	wantEntries := []model.Entry{
+		{Key: k2, Revision: 2, Index: []byte{}},
+		{Key: k3, Revision: 3, Index: []byte{}},
+	}
+
+	diff := cmp.Diff(wantEntries, entries, cmpopts.EquateEmpty())
+	assert.Empty(t, diff, "unexpected entries")
+
+	// A shorter start bound is padded with zeros.
+	entries, err = cacheHandle.ScanRange([]byte{0x00}, []byte{0x00, 0x30}, slotcache.ScanOptions{})
+	require.NoError(t, err, "ScanRange should succeed")
+
+	wantEntries = []model.Entry{
+		{Key: k1, Revision: 1, Index: []byte{}},
+		{Key: k2, Revision: 2, Index: []byte{}},
+	}
+
+	diff = cmp.Diff(wantEntries, entries, cmpopts.EquateEmpty())
+	assert.Empty(t, diff, "unexpected entries")
+
+	// Reverse + pagination applies after filtering.
+	entries, err = cacheHandle.ScanRange(nil, nil, slotcache.ScanOptions{Reverse: true, Offset: 1, Limit: 2})
+	require.NoError(t, err, "ScanRange should succeed")
+
+	wantEntries = []model.Entry{
+		{Key: k3, Revision: 3, Index: []byte{}},
+		{Key: k2, Revision: 2, Index: []byte{}},
+	}
+
+	diff = cmp.Diff(wantEntries, entries, cmpopts.EquateEmpty())
+	assert.Empty(t, diff, "unexpected entries")
+}
+
+func Test_ModelCache_ScanRange_Returns_ErrInvalidInput_When_Bounds_Invalid(t *testing.T) {
+	t.Parallel()
+
+	opts := slotcache.Options{
+		KeySize:      2,
+		IndexSize:    0,
+		SlotCapacity: 10,
+		OrderedKeys:  true,
+	}
+
+	fileState, err := model.NewFile(opts)
+	require.NoError(t, err, "NewFile should succeed")
+
+	cacheHandle := model.Open(fileState)
+
+	testCases := []struct {
+		name  string
+		start []byte
+		end   []byte
+	}{
+		{name: "EmptyStart", start: []byte{}, end: nil},
+		{name: "EmptyEnd", start: nil, end: []byte{}},
+		{name: "StartTooLong", start: []byte{0x00, 0x00, 0x00}, end: nil},
+		{name: "EndTooLong", start: nil, end: []byte{0x00, 0x00, 0x00}},
+		{name: "StartGreaterThanEnd", start: []byte{0x02}, end: []byte{0x01}},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := cacheHandle.ScanRange(testCase.start, testCase.end, slotcache.ScanOptions{})
+			require.ErrorIs(t, err, slotcache.ErrInvalidInput, "ScanRange should reject invalid bounds")
+		})
+	}
 }
 
 // newTestFile creates a model.FileState with KeySize=2, IndexSize=2, and the given slot capacity.

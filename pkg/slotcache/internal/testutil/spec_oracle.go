@@ -1,6 +1,4 @@
-//go:build slotcache_impl
-
-package slotcache_test
+package testutil
 
 import (
 	"bytes"
@@ -13,11 +11,11 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
 )
 
-// validateSlotcacheFileAgainstOptions reads the file at filePath and validates
+// ValidateFile reads the file at filePath and validates
 // that it matches the slotcache v1 file-format invariants.
 //
 // This is a *test-only* oracle. It must NOT call into slotcache internals.
-func validateSlotcacheFileAgainstOptions(filePath string, options slotcache.Options) error {
+func ValidateFile(filePath string, options slotcache.Options) error {
 	fileBytes, readError := os.ReadFile(filePath)
 	if readError != nil {
 		return fmt.Errorf("speccheck: read file: %w", readError)
@@ -54,6 +52,10 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 	}
 
 	keySize := binary.LittleEndian.Uint32(headerBytes[0x00C:0x010])
+	if keySize < 1 {
+		return fmt.Errorf("speccheck: key_size must be >= 1: got %d", keySize)
+	}
+
 	indexSize := binary.LittleEndian.Uint32(headerBytes[0x010:0x014])
 	slotSize := binary.LittleEndian.Uint32(headerBytes[0x014:0x018])
 
@@ -63,11 +65,26 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 	}
 
 	flags := binary.LittleEndian.Uint32(headerBytes[0x01C:0x020])
-	if flags != 0 {
-		return fmt.Errorf("speccheck: flags must be 0 in v1: got %d", flags)
+
+	const flagOrderedKeys uint32 = 1 << 0
+	if flags&^flagOrderedKeys != 0 {
+		return fmt.Errorf("speccheck: unknown flags set: 0x%X", flags)
 	}
 
+	isOrdered := (flags & flagOrderedKeys) != 0
+
 	slotCapacity := binary.LittleEndian.Uint64(headerBytes[0x020:0x028])
+
+	const maxSlotCapacity uint64 = 0xFFFFFFFFFFFFFFFE
+
+	if slotCapacity < 1 {
+		return fmt.Errorf("speccheck: slot_capacity must be >= 1: got %d", slotCapacity)
+	}
+
+	if slotCapacity > maxSlotCapacity {
+		return fmt.Errorf("speccheck: slot_capacity exceeds max: got %d max %d", slotCapacity, maxSlotCapacity)
+	}
+
 	slotHighwater := binary.LittleEndian.Uint64(headerBytes[0x028:0x030])
 	liveCount := binary.LittleEndian.Uint64(headerBytes[0x030:0x038])
 	userVersion := binary.LittleEndian.Uint64(headerBytes[0x038:0x040])
@@ -146,7 +163,7 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 	// Derived layout checks
 	// ---------------------------------------------------------------------
 
-	expectedSlotSize := uint32(derivedSlotSizeBytes(int(keySize), int(indexSize)))
+	expectedSlotSize := derivedSlotSizeBytes(keySize, indexSize)
 	if slotSize != expectedSlotSize {
 		return fmt.Errorf("speccheck: slot_size mismatch: computed=%d stored=%d", expectedSlotSize, slotSize)
 	}
@@ -163,12 +180,20 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 		return fmt.Errorf("speccheck: live_count out of range: %d > %d", liveCount, slotHighwater)
 	}
 
-	if bucketCount == 0 || bits.OnesCount64(bucketCount) != 1 {
-		return fmt.Errorf("speccheck: bucket_count must be a power of two > 0: got %d", bucketCount)
+	if bucketCount < 2 || bits.OnesCount64(bucketCount) != 1 {
+		return fmt.Errorf("speccheck: bucket_count must be a power of two >= 2: got %d", bucketCount)
 	}
 
-	if bucketUsed+bucketTombstones > bucketCount {
-		return fmt.Errorf("speccheck: bucket_used + bucket_tombstones out of range: used=%d tomb=%d count=%d", bucketUsed, bucketTombstones, bucketCount)
+	if bucketUsed > bucketCount {
+		return fmt.Errorf("speccheck: bucket_used out of range: %d > %d", bucketUsed, bucketCount)
+	}
+
+	if bucketTombstones > bucketCount {
+		return fmt.Errorf("speccheck: bucket_tombstones out of range: %d > %d", bucketTombstones, bucketCount)
+	}
+
+	if bucketUsed+bucketTombstones >= bucketCount {
+		return fmt.Errorf("speccheck: bucket_used + bucket_tombstones must be < bucket_count: used=%d tomb=%d count=%d", bucketUsed, bucketTombstones, bucketCount)
 	}
 
 	if bucketUsed != liveCount {
@@ -190,14 +215,41 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 	// ---------------------------------------------------------------------
 
 	slotSizeBytes := uint64(slotSize)
+	keySizeBytes := uint64(keySize)
+	indexSizeBytes := uint64(indexSize)
+	keyPaddingBytes := uint64((8 - (keySize % 8)) % 8)
+
+	slotPayloadSize := uint64(8) + keySizeBytes + keyPaddingBytes + 8 + indexSizeBytes
+	if slotPayloadSize > slotSizeBytes {
+		return fmt.Errorf("speccheck: slot_size too small for layout: payload=%d slot_size=%d", slotPayloadSize, slotSizeBytes)
+	}
+
+	slotTrailingPaddingBytes := slotSizeBytes - slotPayloadSize
 
 	liveSlotKeysBySlotID := make(map[uint64][]byte)
 	seenLiveKeys := make(map[string]bool)
 
-	var countedLiveSlots uint64
+	var (
+		countedLiveSlots uint64
+		prevOrderedKey   []byte
+	)
 
 	for slotID := range slotHighwater {
 		slotOffset := slotsOffset + slotID*slotSizeBytes
+		slotEnd := slotOffset + slotSizeBytes
+
+		if slotEnd > uint64(len(fileBytes)) {
+			return fmt.Errorf("speccheck: slot %d extends beyond file length", slotID)
+		}
+
+		if slotTrailingPaddingBytes > 0 {
+			paddingStart := slotOffset + slotPayloadSize
+			for padIndex := paddingStart; padIndex < slotEnd; padIndex++ {
+				if fileBytes[padIndex] != 0 {
+					return fmt.Errorf("speccheck: slot %d padding byte at 0x%X must be 0", slotID, padIndex)
+				}
+			}
+		}
 
 		meta := binary.LittleEndian.Uint64(fileBytes[slotOffset : slotOffset+8])
 
@@ -207,19 +259,42 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 		}
 
 		isUsed := (meta & 1) == 1
+
+		var keyBytes []byte
+
+		if isOrdered {
+			keyBytesStart := slotOffset + 8
+			keyBytesEnd := keyBytesStart + uint64(keySize)
+
+			if keyBytesEnd > uint64(len(fileBytes)) {
+				return fmt.Errorf("speccheck: slot %d key bytes out of range", slotID)
+			}
+
+			keyBytes = make([]byte, keySize)
+			copy(keyBytes, fileBytes[keyBytesStart:keyBytesEnd])
+
+			if prevOrderedKey != nil && bytes.Compare(keyBytes, prevOrderedKey) < 0 {
+				return fmt.Errorf("speccheck: ordered mode violated at slot %d: key %x < prev %x", slotID, keyBytes, prevOrderedKey)
+			}
+
+			prevOrderedKey = keyBytes
+		}
+
 		if !isUsed {
 			continue
 		}
 
-		keyBytesStart := slotOffset + 8
-		keyBytesEnd := keyBytesStart + uint64(keySize)
+		if !isOrdered {
+			keyBytesStart := slotOffset + 8
+			keyBytesEnd := keyBytesStart + uint64(keySize)
 
-		if keyBytesEnd > uint64(len(fileBytes)) {
-			return fmt.Errorf("speccheck: slot %d key bytes out of range", slotID)
+			if keyBytesEnd > uint64(len(fileBytes)) {
+				return fmt.Errorf("speccheck: slot %d key bytes out of range", slotID)
+			}
+
+			keyBytes = make([]byte, keySize)
+			copy(keyBytes, fileBytes[keyBytesStart:keyBytesEnd])
 		}
-
-		keyBytes := make([]byte, keySize)
-		copy(keyBytes, fileBytes[keyBytesStart:keyBytesEnd])
 
 		keyString := string(keyBytes)
 		if seenLiveKeys[keyString] {
@@ -233,6 +308,21 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 
 	if countedLiveSlots != liveCount {
 		return fmt.Errorf("speccheck: live_count mismatch: header=%d counted_in_slots=%d", liveCount, countedLiveSlots)
+	}
+
+	// Slots beyond slot_highwater must be unallocated.
+	for slotID := slotHighwater; slotID < slotCapacity; slotID++ {
+		slotOffset := slotsOffset + slotID*slotSizeBytes
+
+		slotEnd := slotOffset + slotSizeBytes
+		if slotEnd > uint64(len(fileBytes)) {
+			return fmt.Errorf("speccheck: slot %d extends beyond file length", slotID)
+		}
+
+		meta := binary.LittleEndian.Uint64(fileBytes[slotOffset : slotOffset+8])
+		if meta != 0 {
+			return fmt.Errorf("speccheck: slot %d beyond highwater has meta set: meta=0x%016X", slotID, meta)
+		}
 	}
 
 	// ---------------------------------------------------------------------
@@ -336,17 +426,17 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 	return nil
 }
 
-func derivedSlotSizeBytes(keySize int, indexSize int) int {
+func derivedSlotSizeBytes(keySize uint32, indexSize uint32) uint32 {
 	// Compute slot size per spec: meta(8) + key + key_pad + revision(8) + index, aligned to 8.
 	// key_pad ensures revision is 8-byte aligned.
 	keyPaddingBytes := (8 - (keySize % 8)) % 8
 
 	rawSize := 8 + keySize + keyPaddingBytes + 8 + indexSize
 
-	return alignTo8(rawSize)
+	return alignTo8U32(rawSize)
 }
 
-func alignTo8(byteCount int) int {
+func alignTo8U32(byteCount uint32) uint32 {
 	remainder := byteCount % 8
 	if remainder == 0 {
 		return byteCount

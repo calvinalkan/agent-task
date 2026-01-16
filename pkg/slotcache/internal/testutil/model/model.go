@@ -1,13 +1,20 @@
 // Package model provides a deliberately simple, in-memory state model of
 // slotcache's publicly observable behavior.
 //
+// This is NOT a reference implementation of the spec. It does not implement
+// the file format, hashing, or any on-disk details. Instead, it models the
+// observable API behavior (Get, Put, Delete, Scan, etc.) to serve as a test
+// oracle for property-based testing: the real implementation's behavior is
+// compared against this model to detect discrepancies.
+//
 // The model is intentionally easy to audit: it favors clarity over performance
-// and does not attempt to mirror the on-disk format in every detail.
+// and uses naive data structures (maps, linear scans) that are obviously correct.
 package model
 
 import (
+	"bytes"
 	"slices"
-	"strings"
+	"sort"
 
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
 )
@@ -35,6 +42,8 @@ type FileState struct {
 	KeySize      int
 	IndexSize    int
 	SlotCapacity uint64
+	UserVersion  uint64
+	OrderedKeys  bool
 	Slots        []SlotRecord
 }
 
@@ -56,9 +65,10 @@ type BufferedOperation struct {
 // WriterModel buffers operations until Commit makes them visible.
 // BufferedOps are ordered; only the final op per key is applied at Commit.
 type WriterModel struct {
-	Cache       *CacheModel
-	IsClosed    bool
-	BufferedOps []BufferedOperation
+	Cache          *CacheModel
+	IsClosed       bool
+	ClosedByCommit bool
+	BufferedOps    []BufferedOperation
 }
 
 // NewFile validates options and returns an empty file state.
@@ -71,6 +81,8 @@ func NewFile(opts slotcache.Options) (*FileState, error) {
 		KeySize:      opts.KeySize,
 		IndexSize:    opts.IndexSize,
 		SlotCapacity: opts.SlotCapacity,
+		UserVersion:  opts.UserVersion,
+		OrderedKeys:  opts.OrderedKeys,
 	}, nil
 }
 
@@ -92,6 +104,8 @@ func (file *FileState) Clone() *FileState {
 		KeySize:      file.KeySize,
 		IndexSize:    file.IndexSize,
 		SlotCapacity: file.SlotCapacity,
+		UserVersion:  file.UserVersion,
+		OrderedKeys:  file.OrderedKeys,
 		Slots:        slots,
 	}
 }
@@ -104,7 +118,7 @@ func Open(file *FileState) *CacheModel {
 // Close closes the cache handle unless a writer is still active.
 func (cache *CacheModel) Close() error {
 	if cache.IsClosed {
-		return slotcache.ErrClosed
+		return nil
 	}
 
 	if cache.ActiveWrite != nil && !cache.ActiveWrite.IsClosed {
@@ -153,22 +167,55 @@ func (cache *CacheModel) Get(key []byte) (Entry, bool, error) {
 }
 
 // Scan returns all live entries in slot order.
-func (cache *CacheModel) Scan(opts slotcache.ScanOpts) ([]Entry, error) {
-	return cache.collect("", opts)
+func (cache *CacheModel) Scan(opts slotcache.ScanOptions) ([]Entry, error) {
+	return cache.collect(opts, func(_ []byte) bool { return true })
 }
 
-// ScanPrefix returns live entries whose keys share the provided prefix.
-func (cache *CacheModel) ScanPrefix(prefix []byte, opts slotcache.ScanOpts) ([]Entry, error) {
+// ScanPrefix returns live entries whose keys share the provided byte prefix.
+func (cache *CacheModel) ScanPrefix(prefix []byte, opts slotcache.ScanOptions) ([]Entry, error) {
+	return cache.ScanMatch(slotcache.Prefix{Offset: 0, Bits: 0, Bytes: prefix}, opts)
+}
+
+// ScanMatch returns live entries whose keys match the provided prefix spec.
+func (cache *CacheModel) ScanMatch(prefix slotcache.Prefix, opts slotcache.ScanOptions) ([]Entry, error) {
 	if cache.IsClosed {
 		return nil, slotcache.ErrClosed
 	}
 
-	err := cache.validatePrefix(prefix)
+	err := cache.validatePrefixSpec(prefix)
 	if err != nil {
 		return nil, err
 	}
 
-	return cache.collect(string(prefix), opts)
+	return cache.collect(opts, func(key []byte) bool { return keyMatchesPrefix(key, prefix) })
+}
+
+// ScanRange iterates over live entries in the half-open key range start <= key < end.
+func (cache *CacheModel) ScanRange(start, end []byte, opts slotcache.ScanOptions) ([]Entry, error) {
+	if cache.IsClosed {
+		return nil, slotcache.ErrClosed
+	}
+
+	if !cache.File.OrderedKeys {
+		return nil, slotcache.ErrUnordered
+	}
+
+	startPadded, endPadded, err := cache.normalizeRangeBounds(start, end)
+	if err != nil {
+		return nil, err
+	}
+
+	return cache.collect(opts, func(key []byte) bool {
+		if startPadded != nil && bytes.Compare(key, startPadded) < 0 {
+			return false
+		}
+
+		if endPadded != nil && bytes.Compare(key, endPadded) >= 0 {
+			return false
+		}
+
+		return true
+	})
 }
 
 // BeginWrite starts a new write session. Only one writer may be active.
@@ -188,19 +235,85 @@ func (cache *CacheModel) BeginWrite() (*WriterModel, error) {
 }
 
 func (cache *CacheModel) validateKey(key []byte) error {
-	if key == nil || len(key) != cache.File.KeySize {
-		return slotcache.ErrInvalidKey
+	if len(key) != cache.File.KeySize {
+		return slotcache.ErrInvalidInput
 	}
 
 	return nil
 }
 
-func (cache *CacheModel) validatePrefix(prefix []byte) error {
-	if len(prefix) == 0 || len(prefix) > cache.File.KeySize {
-		return slotcache.ErrInvalidPrefix
+func (cache *CacheModel) validatePrefixSpec(spec slotcache.Prefix) error {
+	if spec.Offset < 0 || spec.Offset >= cache.File.KeySize {
+		return slotcache.ErrInvalidInput
+	}
+
+	if spec.Bits < 0 {
+		return slotcache.ErrInvalidInput
+	}
+
+	if spec.Bits == 0 {
+		if len(spec.Bytes) == 0 {
+			return slotcache.ErrInvalidInput
+		}
+
+		if spec.Offset+len(spec.Bytes) > cache.File.KeySize {
+			return slotcache.ErrInvalidInput
+		}
+
+		return nil
+	}
+
+	needBytes := (spec.Bits + 7) / 8
+	if needBytes == 0 {
+		return slotcache.ErrInvalidInput
+	}
+
+	if len(spec.Bytes) != needBytes {
+		return slotcache.ErrInvalidInput
+	}
+
+	if spec.Offset+needBytes > cache.File.KeySize {
+		return slotcache.ErrInvalidInput
 	}
 
 	return nil
+}
+
+func (cache *CacheModel) normalizeRangeBounds(start, end []byte) ([]byte, []byte, error) {
+	startPadded, err := cache.normalizeRangeBound(start)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	endPadded, err := cache.normalizeRangeBound(end)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if startPadded != nil && endPadded != nil && bytes.Compare(startPadded, endPadded) > 0 {
+		return nil, nil, slotcache.ErrInvalidInput
+	}
+
+	return startPadded, endPadded, nil
+}
+
+func (cache *CacheModel) normalizeRangeBound(bound []byte) ([]byte, error) {
+	if bound == nil {
+		return nil, nil
+	}
+
+	if len(bound) == 0 || len(bound) > cache.File.KeySize {
+		return nil, slotcache.ErrInvalidInput
+	}
+
+	if len(bound) == cache.File.KeySize {
+		return append([]byte(nil), bound...), nil
+	}
+
+	padded := make([]byte, cache.File.KeySize)
+	copy(padded, bound)
+
+	return padded, nil
 }
 
 // findLiveSlot scans from newest to oldest to respect reinsertion semantics.
@@ -215,21 +328,49 @@ func (cache *CacheModel) findLiveSlot(key string) (int, bool) {
 	return 0, false
 }
 
-func (cache *CacheModel) collect(prefix string, opts slotcache.ScanOpts) ([]Entry, error) {
+func (cache *CacheModel) collect(opts slotcache.ScanOptions, match func(key []byte) bool) ([]Entry, error) {
 	if cache.IsClosed {
 		return nil, slotcache.ErrClosed
 	}
 
 	if opts.Offset < 0 || opts.Limit < 0 {
-		return nil, slotcache.ErrInvalidScanOpts
+		return nil, slotcache.ErrInvalidInput
 	}
 
 	var entries []Entry
 
 	for _, slot := range cache.File.Slots {
-		if slot.IsLive && (prefix == "" || strings.HasPrefix(slot.KeyString, prefix)) {
-			entries = append(entries, entryFrom(slot))
+		if !slot.IsLive {
+			continue
 		}
+
+		keyBytes := []byte(slot.KeyString)
+		if !match(keyBytes) {
+			continue
+		}
+
+		indexBytes := []byte(slot.IndexString)
+
+		if opts.Filter != nil {
+			borrowed := slotcache.Entry{
+				Key:      keyBytes,
+				Revision: slot.Revision,
+				Index:    indexBytes,
+			}
+
+			if !opts.Filter(borrowed) {
+				continue
+			}
+
+			keyBytes = []byte(slot.KeyString)
+			indexBytes = []byte(slot.IndexString)
+		}
+
+		entries = append(entries, Entry{
+			Key:      keyBytes,
+			Revision: slot.Revision,
+			Index:    indexBytes,
+		})
 	}
 
 	if opts.Reverse {
@@ -254,25 +395,23 @@ func entryFrom(slot SlotRecord) Entry {
 	}
 }
 
-// Close is an alias for Abort.
-func (writer *WriterModel) Close() error {
-	return writer.Abort()
-}
-
-// Abort discards buffered operations without changing committed state.
-func (writer *WriterModel) Abort() error {
+// Close releases resources and discards uncommitted changes.
+//
+// Close is idempotent: calling Close multiple times (including after Commit)
+// returns nil. Always call Close, even after [WriterModel.Commit].
+func (writer *WriterModel) Close() {
 	if writer.IsClosed {
-		return slotcache.ErrClosed
+		// Idempotent: no-op if already closed.
+		return
 	}
 
 	writer.IsClosed = true
+	writer.ClosedByCommit = false
 	writer.BufferedOps = nil
 	writer.Cache.ActiveWrite = nil
-
-	return nil
 }
 
-// Put buffers a Put operation and enforces slot capacity at enqueue time.
+// Put buffers a Put operation.
 func (writer *WriterModel) Put(key []byte, revision int64, index []byte) error {
 	if writer.IsClosed || writer.Cache.IsClosed {
 		return slotcache.ErrClosed
@@ -284,22 +423,15 @@ func (writer *WriterModel) Put(key []byte, revision int64, index []byte) error {
 	}
 
 	if len(index) != writer.Cache.File.IndexSize {
-		return slotcache.ErrInvalidIndex
+		return slotcache.ErrInvalidInput
 	}
 
-	op := BufferedOperation{
+	writer.BufferedOps = append(writer.BufferedOps, BufferedOperation{
 		IsPut:       true,
 		KeyString:   string(key),
 		Revision:    revision,
 		IndexString: string(index),
-	}
-
-	writer.BufferedOps = append(writer.BufferedOps, op)
-	if writer.wouldExceedCapacity() {
-		writer.BufferedOps = writer.BufferedOps[:len(writer.BufferedOps)-1]
-
-		return slotcache.ErrFull
-	}
+	})
 
 	return nil
 }
@@ -331,17 +463,89 @@ func (writer *WriterModel) Commit() error {
 		return slotcache.ErrClosed
 	}
 
+	finalOps := writer.finalOps()
 	if writer.wouldExceedCapacity() {
-		panic("broken model: Put should have rejected operation that exceeds slot capacity")
+		writer.closeByCommit()
+
+		return slotcache.ErrFull
 	}
 
-	for _, op := range writer.finalOps() {
+	if writer.Cache.File.OrderedKeys {
+		err := writer.applyOrdered(finalOps)
+		if err != nil {
+			writer.closeByCommit()
+
+			return err
+		}
+
+		writer.closeByCommit()
+
+		return nil
+	}
+
+	for _, op := range finalOps {
 		writer.apply(op)
 	}
 
+	writer.closeByCommit()
+
+	return nil
+}
+
+func (writer *WriterModel) closeByCommit() {
 	writer.IsClosed = true
+	writer.ClosedByCommit = true
 	writer.BufferedOps = nil
 	writer.Cache.ActiveWrite = nil
+}
+
+func (writer *WriterModel) applyOrdered(finalOps []BufferedOperation) error {
+	var inserts []BufferedOperation
+
+	for _, op := range finalOps {
+		if !op.IsPut {
+			continue
+		}
+
+		if _, live := writer.Cache.findLiveSlot(op.KeyString); live {
+			continue // update
+		}
+
+		inserts = append(inserts, op)
+	}
+
+	if len(inserts) > 0 && len(writer.Cache.File.Slots) > 0 {
+		tailKey := writer.Cache.File.Slots[len(writer.Cache.File.Slots)-1].KeyString
+
+		minNewKey := inserts[0].KeyString
+		for _, op := range inserts[1:] {
+			if op.KeyString < minNewKey {
+				minNewKey = op.KeyString
+			}
+		}
+
+		if minNewKey < tailKey {
+			return slotcache.ErrOutOfOrderInsert
+		}
+	}
+
+	sort.Slice(inserts, func(i, j int) bool {
+		return inserts[i].KeyString < inserts[j].KeyString
+	})
+
+	for _, op := range finalOps {
+		if op.IsPut {
+			if _, live := writer.Cache.findLiveSlot(op.KeyString); !live {
+				continue // insert handled later
+			}
+		}
+
+		writer.apply(op)
+	}
+
+	for _, op := range inserts {
+		writer.apply(op)
+	}
 
 	return nil
 }
@@ -438,4 +642,35 @@ func (writer *WriterModel) isKeyPresent(key string) bool {
 	_, live := writer.Cache.findLiveSlot(key)
 
 	return live
+}
+
+func keyMatchesPrefix(key []byte, spec slotcache.Prefix) bool {
+	if spec.Bits == 0 {
+		segment := key[spec.Offset : spec.Offset+len(spec.Bytes)]
+
+		return bytes.Equal(segment, spec.Bytes)
+	}
+
+	needBytes := (spec.Bits + 7) / 8
+	segment := key[spec.Offset : spec.Offset+needBytes]
+
+	fullBytes := needBytes
+	if rem := spec.Bits % 8; rem != 0 {
+		fullBytes = needBytes - 1
+	}
+
+	if fullBytes > 0 {
+		if !bytes.Equal(segment[:fullBytes], spec.Bytes[:fullBytes]) {
+			return false
+		}
+	}
+
+	remBits := spec.Bits % 8
+	if remBits == 0 {
+		return true
+	}
+
+	mask := byte(0xFF) << (8 - remBits)
+
+	return (segment[needBytes-1] & mask) == (spec.Bytes[needBytes-1] & mask)
 }

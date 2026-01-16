@@ -1,5 +1,3 @@
-//go:build slotcache_impl
-
 package slotcache
 
 import (
@@ -9,9 +7,6 @@ import (
 
 // SLC1 file format constants.
 const (
-	// Magic bytes at the start of every SLC1 file.
-	slc1Magic = "SLC1"
-
 	// File format version.
 	slc1Version = 1
 
@@ -20,13 +15,6 @@ const (
 
 	// Hash algorithm identifier (FNV-1a 64-bit).
 	slc1HashAlgFNV1a64 = 1
-
-	// Bucket sentinel values.
-	bucketEmpty     = 0
-	bucketTombstone = 0xFFFFFFFFFFFFFFFF
-
-	// Maximum slot capacity (bucket sentinel constraint).
-	maxSlotCapacity = 0xFFFFFFFFFFFFFFFE
 )
 
 // Header field offsets (bytes from file start).
@@ -81,70 +69,39 @@ type slc1Header struct {
 
 // encodeHeader serializes the header to a 256-byte slice.
 // The CRC is computed and stored in the output.
-func encodeHeader(h *slc1Header) []byte {
+func encodeHeader(header *slc1Header) []byte {
 	buf := make([]byte, slc1HeaderSize)
 
 	// Magic and fixed fields.
-	copy(buf[offMagic:], h.Magic[:])
-	binary.LittleEndian.PutUint32(buf[offVersion:], h.Version)
-	binary.LittleEndian.PutUint32(buf[offHeaderSize:], h.HeaderSize)
-	binary.LittleEndian.PutUint32(buf[offKeySize:], h.KeySize)
-	binary.LittleEndian.PutUint32(buf[offIndexSize:], h.IndexSize)
-	binary.LittleEndian.PutUint32(buf[offSlotSize:], h.SlotSize)
-	binary.LittleEndian.PutUint32(buf[offHashAlg:], h.HashAlg)
-	binary.LittleEndian.PutUint32(buf[offFlags:], h.Flags)
+	copy(buf[offMagic:], header.Magic[:])
+	binary.LittleEndian.PutUint32(buf[offVersion:], header.Version)
+	binary.LittleEndian.PutUint32(buf[offHeaderSize:], header.HeaderSize)
+	binary.LittleEndian.PutUint32(buf[offKeySize:], header.KeySize)
+	binary.LittleEndian.PutUint32(buf[offIndexSize:], header.IndexSize)
+	binary.LittleEndian.PutUint32(buf[offSlotSize:], header.SlotSize)
+	binary.LittleEndian.PutUint32(buf[offHashAlg:], header.HashAlg)
+	binary.LittleEndian.PutUint32(buf[offFlags:], header.Flags)
 
 	// 64-bit fields.
-	binary.LittleEndian.PutUint64(buf[offSlotCapacity:], h.SlotCapacity)
-	binary.LittleEndian.PutUint64(buf[offSlotHighwater:], h.SlotHighwater)
-	binary.LittleEndian.PutUint64(buf[offLiveCount:], h.LiveCount)
-	binary.LittleEndian.PutUint64(buf[offUserVersion:], h.UserVersion)
-	binary.LittleEndian.PutUint64(buf[offGeneration:], h.Generation)
-	binary.LittleEndian.PutUint64(buf[offBucketCount:], h.BucketCount)
-	binary.LittleEndian.PutUint64(buf[offBucketUsed:], h.BucketUsed)
-	binary.LittleEndian.PutUint64(buf[offBucketTombstones:], h.BucketTombstones)
-	binary.LittleEndian.PutUint64(buf[offSlotsOffset:], h.SlotsOffset)
-	binary.LittleEndian.PutUint64(buf[offBucketsOffset:], h.BucketsOffset)
+	binary.LittleEndian.PutUint64(buf[offSlotCapacity:], header.SlotCapacity)
+	binary.LittleEndian.PutUint64(buf[offSlotHighwater:], header.SlotHighwater)
+	binary.LittleEndian.PutUint64(buf[offLiveCount:], header.LiveCount)
+	binary.LittleEndian.PutUint64(buf[offUserVersion:], header.UserVersion)
+	binary.LittleEndian.PutUint64(buf[offGeneration:], header.Generation)
+	binary.LittleEndian.PutUint64(buf[offBucketCount:], header.BucketCount)
+	binary.LittleEndian.PutUint64(buf[offBucketUsed:], header.BucketUsed)
+	binary.LittleEndian.PutUint64(buf[offBucketTombstones:], header.BucketTombstones)
+	binary.LittleEndian.PutUint64(buf[offSlotsOffset:], header.SlotsOffset)
+	binary.LittleEndian.PutUint64(buf[offBucketsOffset:], header.BucketsOffset)
 
 	// Reserved fields are zero (already zero in the slice).
-	binary.LittleEndian.PutUint32(buf[offReservedU32:], h.ReservedU32)
+	binary.LittleEndian.PutUint32(buf[offReservedU32:], header.ReservedU32)
 
 	// Compute CRC with generation and crc fields zeroed.
 	crc := computeHeaderCRC(buf)
 	binary.LittleEndian.PutUint32(buf[offHeaderCRC32C:], crc)
 
 	return buf
-}
-
-// decodeHeader deserializes a 256-byte slice into a header struct.
-// Returns the header without validating CRC (caller should validate separately).
-func decodeHeader(buf []byte) slc1Header {
-	var h slc1Header
-
-	copy(h.Magic[:], buf[offMagic:offMagic+4])
-	h.Version = binary.LittleEndian.Uint32(buf[offVersion:])
-	h.HeaderSize = binary.LittleEndian.Uint32(buf[offHeaderSize:])
-	h.KeySize = binary.LittleEndian.Uint32(buf[offKeySize:])
-	h.IndexSize = binary.LittleEndian.Uint32(buf[offIndexSize:])
-	h.SlotSize = binary.LittleEndian.Uint32(buf[offSlotSize:])
-	h.HashAlg = binary.LittleEndian.Uint32(buf[offHashAlg:])
-	h.Flags = binary.LittleEndian.Uint32(buf[offFlags:])
-
-	h.SlotCapacity = binary.LittleEndian.Uint64(buf[offSlotCapacity:])
-	h.SlotHighwater = binary.LittleEndian.Uint64(buf[offSlotHighwater:])
-	h.LiveCount = binary.LittleEndian.Uint64(buf[offLiveCount:])
-	h.UserVersion = binary.LittleEndian.Uint64(buf[offUserVersion:])
-	h.Generation = binary.LittleEndian.Uint64(buf[offGeneration:])
-	h.BucketCount = binary.LittleEndian.Uint64(buf[offBucketCount:])
-	h.BucketUsed = binary.LittleEndian.Uint64(buf[offBucketUsed:])
-	h.BucketTombstones = binary.LittleEndian.Uint64(buf[offBucketTombstones:])
-	h.SlotsOffset = binary.LittleEndian.Uint64(buf[offSlotsOffset:])
-	h.BucketsOffset = binary.LittleEndian.Uint64(buf[offBucketsOffset:])
-
-	h.HeaderCRC32C = binary.LittleEndian.Uint32(buf[offHeaderCRC32C:])
-	h.ReservedU32 = binary.LittleEndian.Uint32(buf[offReservedU32:])
-
-	return h
 }
 
 // computeHeaderCRC calculates the CRC32-C checksum of the header buffer
@@ -171,6 +128,7 @@ func computeHeaderCRC(buf []byte) uint32 {
 func validateHeaderCRC(buf []byte) bool {
 	storedCRC := binary.LittleEndian.Uint32(buf[offHeaderCRC32C:])
 	computedCRC := computeHeaderCRC(buf)
+
 	return storedCRC == computedCRC
 }
 
@@ -181,15 +139,17 @@ func hasReservedBytesSet(buf []byte) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
 // computeSlotSize calculates the slot size per spec:
 // slot_size = align8( meta(8) + key_size + key_pad + revision(8) + index_size )
-// where key_pad = (8 - (key_size % 8)) % 8
+// where key_pad = (8 - (key_size % 8)) % 8.
 func computeSlotSize(keySize, indexSize uint32) uint32 {
 	keyPad := (8 - (keySize % 8)) % 8
 	unaligned := 8 + keySize + keyPad + 8 + indexSize // meta + key + pad + revision + index
+
 	return align8(unaligned)
 }
 
@@ -206,28 +166,27 @@ func computeBucketCount(slotCapacity uint64, loadFactor float64) uint64 {
 		return 2 // minimum valid bucket count
 	}
 
-	// ceil(slotCapacity / loadFactor)
-	needed := uint64(float64(slotCapacity)/loadFactor + 0.999999999)
-	if needed < 2 {
-		needed = 2
-	}
+	// Calculate ceiling of capacity divided by load factor.
+	needed := max(uint64(float64(slotCapacity)/loadFactor+0.999999999), 2)
 
 	return nextPow2(needed)
 }
 
-// nextPow2 returns the smallest power of two >= x.
-func nextPow2(x uint64) uint64 {
-	if x == 0 {
+// nextPow2 returns the smallest power of two >= value.
+func nextPow2(value uint64) uint64 {
+	if value == 0 {
 		return 1
 	}
-	x--
-	x |= x >> 1
-	x |= x >> 2
-	x |= x >> 4
-	x |= x >> 8
-	x |= x >> 16
-	x |= x >> 32
-	return x + 1
+
+	value--
+	value |= value >> 1
+	value |= value >> 2
+	value |= value >> 4
+	value |= value >> 8
+	value |= value >> 16
+	value |= value >> 32
+
+	return value + 1
 }
 
 // Slot meta bit flags.
@@ -253,18 +212,19 @@ func encodeSlot(key []byte, isLive bool, revision int64, index []byte, keySize, 
 	if isLive {
 		meta = slotMetaUsed
 	}
+
 	binary.LittleEndian.PutUint64(buf[0:8], meta)
 
 	// Key (keySize bytes starting at offset 8).
 	copy(buf[8:8+keySize], key)
 
 	// Key padding is implicit (already zero in the slice).
-	// key_pad = (8 - (keySize % 8)) % 8
+	// Pad to align revision to 8 bytes.
 	keyPad := (8 - (keySize % 8)) % 8
 
 	// Revision (8 bytes, little-endian, at offset 8 + keySize + keyPad).
 	revisionOffset := 8 + keySize + keyPad
-	binary.LittleEndian.PutUint64(buf[revisionOffset:revisionOffset+8], uint64(revision))
+	putInt64LE(buf[revisionOffset:revisionOffset+8], revision)
 
 	// Index (indexSize bytes starting after revision).
 	indexOffset := revisionOffset + 8
@@ -275,32 +235,45 @@ func encodeSlot(key []byte, isLive bool, revision int64, index []byte, keySize, 
 	return buf
 }
 
+// decodedSlot holds the deserialized fields of a slot.
+type decodedSlot struct {
+	key      []byte
+	isLive   bool
+	revision int64
+	index    []byte
+}
+
 // decodeSlot deserializes a fixed-size byte slice into slot fields.
-// Returns key, isLive, revision, index.
-func decodeSlot(buf []byte, keySize, indexSize uint32) (key []byte, isLive bool, revision int64, index []byte) {
+func decodeSlot(buf []byte, keySize, indexSize uint32) decodedSlot {
 	// Meta: bit 0 = USED.
 	meta := binary.LittleEndian.Uint64(buf[0:8])
-	isLive = (meta & slotMetaUsed) != 0
 
 	// Key (keySize bytes starting at offset 8).
-	key = make([]byte, keySize)
+	key := make([]byte, keySize)
 	copy(key, buf[8:8+keySize])
 
-	// key_pad = (8 - (keySize % 8)) % 8
+	// Pad to align revision to 8 bytes.
 	keyPad := (8 - (keySize % 8)) % 8
 
 	// Revision (8 bytes at offset 8 + keySize + keyPad).
 	revisionOffset := 8 + keySize + keyPad
-	revision = int64(binary.LittleEndian.Uint64(buf[revisionOffset : revisionOffset+8]))
+	revision := getInt64LE(buf[revisionOffset : revisionOffset+8])
 
 	// Index (indexSize bytes starting after revision).
 	indexOffset := revisionOffset + 8
+
+	var index []byte
 	if indexSize > 0 {
 		index = make([]byte, indexSize)
 		copy(index, buf[indexOffset:indexOffset+indexSize])
 	}
 
-	return key, isLive, revision, index
+	return decodedSlot{
+		key:      key,
+		isLive:   (meta & slotMetaUsed) != 0,
+		revision: revision,
+		index:    index,
+	}
 }
 
 // newHeader creates a header for a new cache file with the given options.
@@ -332,4 +305,38 @@ func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, load
 		HeaderCRC32C:     0, // computed during encode
 		ReservedU32:      0,
 	}
+}
+
+// putInt64LE writes an int64 to buf in little-endian byte order.
+// This avoids int64->uint64 conversion that binary.LittleEndian.PutUint64 requires.
+func putInt64LE(buf []byte, value int64) {
+	// Bounds check hint: if buf[7] is valid, buf[0..6] are too.
+	// Lets the compiler eliminate redundant bounds checks below.
+	_ = buf[7]
+
+	buf[0] = byte(value)
+	buf[1] = byte(value >> 8)
+	buf[2] = byte(value >> 16)
+	buf[3] = byte(value >> 24)
+	buf[4] = byte(value >> 32)
+	buf[5] = byte(value >> 40)
+	buf[6] = byte(value >> 48)
+	buf[7] = byte(value >> 56)
+}
+
+// getInt64LE reads an int64 from buf in little-endian byte order.
+// This avoids uint64->int64 conversion that binary.LittleEndian.Uint64 returns.
+func getInt64LE(buf []byte) int64 {
+	// Bounds check hint: if buf[7] is valid, buf[0..6] are too.
+	// Lets the compiler eliminate redundant bounds checks below.
+	_ = buf[7]
+
+	return int64(buf[0]) |
+		int64(buf[1])<<8 |
+		int64(buf[2])<<16 |
+		int64(buf[3])<<24 |
+		int64(buf[4])<<32 |
+		int64(buf[5])<<40 |
+		int64(buf[6])<<48 |
+		int64(buf[7])<<56
 }

@@ -19,6 +19,9 @@ coverage.out
 *.swo
 *~
 
+# Nix
+result
+
 # OS
 .DS_Store
 .nvimlog

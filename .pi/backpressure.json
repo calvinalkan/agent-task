@@ -1,0 +1,11 @@
+{
+	"trigger": { "modifications": 3, "files": 2 },
+	"rules": [
+		{
+			"glob": "**/*.go",
+			"commands": [
+				{ "name": "go-lint", "run": ["./.pi/go_auto_backpressure.sh"] }
+			]
+		}
+	]
+}

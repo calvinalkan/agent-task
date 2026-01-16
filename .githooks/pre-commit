@@ -2,6 +2,6 @@
 
 set -e
 
-if agent-sandbox check -q; then
+if agent-sandbox --check; then
     make check
 fi

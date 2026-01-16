@@ -22,6 +22,7 @@ linters:
   #                     # errors are API - some are just descriptive messages for
   #                     # programming bugs or internal invariant violations that
   #                     # callers should never errors.Is() check
+  # - varnamelen        # styling: LLMs like short vars
 
   # ============================================================================
   # Enabled linters
@@ -118,7 +119,6 @@ linters:
     - unused
     - usestdlibvars
     - usetesting
-    - varnamelen
     - wastedassign
     - whitespace
     - wrapcheck
@@ -198,10 +198,6 @@ linters:
 
     nakedret:
       max-func-lines: 0
-    varnamelen:
-      min-name-length: 2
-      ignore-names:
-        - i
     gocritic:
       enable-all: true
       disabled-checks:
@@ -271,7 +267,6 @@ linters:
       - path: _test\.go
         linters:
           - dupl
-          - varnamelen
           - noctx
           - errcheck # allow _ = err in tests
           - wrapcheck # test code doesn't need to wrap errors from packages under test
@@ -334,6 +329,28 @@ linters:
       - path: pkg/fs/
         linters:
           - ireturn
+      # Test harness returns polymorphic Operation/OperationResult types
+      - path: pkg/slotcache/internal/testutil/
+        linters:
+          - ireturn
+      # Cache API returns interfaces by design (Cache, Writer)
+      - path: pkg/slotcache/slotcache\.go
+        linters:
+          - ireturn
+          # Harness compares model vs real errors directly; wrapping would obscure mismatches
+          - wrapcheck
+          # Model methods match real interface signatures but some never fail
+          - unparam
+      # White-box test for internal format functions
+      - path: pkg/slotcache/format_test\.go
+        linters:
+          - testpackage
+      # Allow math/rand/v2 for deterministic seeded testing in slotcache
+      - path: pkg/slotcache/behavior_.*_test\.go
+        text: "math/rand"
+        linters:
+          - depguard
+
       # Test Op factory returns interface by design
       - path: fuzz_model_test\.go
         linters:
