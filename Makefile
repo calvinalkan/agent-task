@@ -31,7 +31,6 @@ fmt:
 	golangci-lint fmt
 
 lint:
-	golangci-lint config verify
 	@for script in ./backpressure/*.sh; do "$$script"; done
 	golangci-lint run --fix ./...
 

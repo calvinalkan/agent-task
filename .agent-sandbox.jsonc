@@ -1,3 +1,5 @@
 {
-  "readonly": ["Makefile", "backpressure", ".githooks"]
+  "filesystem": {
+    "ro": ["Makefile", "backpressure", ".githooks"]
+  }
 }
