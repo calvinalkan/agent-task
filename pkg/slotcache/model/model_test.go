@@ -914,7 +914,7 @@ func Test_ModelCache_Returns_ErrInvalidScanOpts_When_Options_Invalid(t *testing.
 	}
 }
 
-func Test_ModelCache_Returns_ErrOffsetOutOfBounds_When_Offset_Too_Large(t *testing.T) {
+func Test_ModelCache_Scan_Returns_Empty_When_Offset_Exceeds_Length(t *testing.T) {
 	t.Parallel()
 
 	fileState := newTestFile(t, 2)
@@ -925,8 +925,9 @@ func Test_ModelCache_Returns_ErrOffsetOutOfBounds_When_Offset_Too_Large(t *testi
 	require.NoError(t, writerSession.Put([]byte("aa"), 1, []byte("i1")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	_, scanErr := cacheHandle.Scan(slotcache.ScanOpts{Offset: 2})
-	require.ErrorIs(t, scanErr, slotcache.ErrOffsetOutOfBounds, "Scan should reject out-of-bounds offset")
+	entries, scanErr := cacheHandle.Scan(slotcache.ScanOpts{Offset: 2})
+	require.NoError(t, scanErr, "Scan should succeed with offset beyond length")
+	assert.Empty(t, entries, "Scan should return empty when offset exceeds length")
 }
 
 func Test_ModelCache_Scan_Returns_Empty_When_Offset_Equals_Length(t *testing.T) {
@@ -1178,7 +1179,7 @@ func Test_ModelCache_ScanPrefix_Orders_And_Paginates_When_Options_Set(t *testing
 	}
 }
 
-func Test_ModelCache_ScanPrefix_Returns_ErrOffsetOutOfBounds_When_Offset_Too_Large(t *testing.T) {
+func Test_ModelCache_ScanPrefix_Returns_Empty_When_Offset_Exceeds_Filtered_Length(t *testing.T) {
 	t.Parallel()
 
 	fileState := newTestFile(t, 4)
@@ -1191,8 +1192,9 @@ func Test_ModelCache_ScanPrefix_Returns_ErrOffsetOutOfBounds_When_Offset_Too_Lar
 	require.NoError(t, writerSession.Put([]byte("ba"), 3, []byte("i3")), "Put should succeed")
 	require.NoError(t, writerSession.Commit(), "Commit should succeed")
 
-	_, scanErr := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{Offset: 3})
-	require.ErrorIs(t, scanErr, slotcache.ErrOffsetOutOfBounds, "ScanPrefix should reject out-of-bounds offset")
+	entries, scanErr := cacheHandle.ScanPrefix([]byte("a"), slotcache.ScanOpts{Offset: 3})
+	require.NoError(t, scanErr, "ScanPrefix should succeed with offset beyond filtered length")
+	assert.Empty(t, entries, "ScanPrefix should return empty when offset exceeds filtered length")
 }
 
 func Test_ModelWriter_Commit_Succeeds_When_No_Buffered_Ops(t *testing.T) {

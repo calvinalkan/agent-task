@@ -236,11 +236,10 @@ func (cache *CacheModel) collect(prefix string, opts slotcache.ScanOpts) ([]Entr
 		slices.Reverse(entries)
 	}
 
-	if opts.Offset > len(entries) {
-		return nil, slotcache.ErrOffsetOutOfBounds
-	}
-
 	start := opts.Offset
+	if start > len(entries) {
+		start = len(entries)
+	}
 
 	end := len(entries)
 	if opts.Limit > 0 && start+opts.Limit < end {

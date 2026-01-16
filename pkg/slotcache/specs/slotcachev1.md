@@ -650,7 +650,6 @@ Operational:
 - `ErrInvalidInput`
 - `ErrInvalidKey`
 - `ErrInvalidPrefix`
-- `ErrOffsetOutOfBounds`
 - `ErrWriteback` (msync failure; typed error includes Published flag)
 - `ErrFull`
 - `ErrClosed`
