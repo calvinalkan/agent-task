@@ -57,14 +57,20 @@ func Test_Metamorphic_LastWriteWins_BufferReduction(t *testing.T) {
 
 			rng := rand.New(rand.NewSource(seed))
 
+			// Generate deterministic random bytes for building base state.
+			baseBytes := make([]byte, 4096)
+			rng.Read(baseBytes)
+
 			// 1) Build a non-trivial committed base state.
 			h := newHarness(t, options)
 			defer func() { _ = h.real.cache.Close() }()
 
+			decoder := newFuzzOperationDecoder(baseBytes, options)
+
 			var keys [][]byte
 			baseOps := 100
-			for i := 0; i < baseOps; i++ {
-				op := randOp(rng, h, keys)
+			for i := 0; i < baseOps && decoder.hasMoreBytes(); i++ {
+				op := decoder.nextOperation(h, keys)
 
 				mRes := applyModel(h, op)
 				rRes := applyReal(h, op)

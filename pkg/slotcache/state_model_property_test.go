@@ -13,11 +13,11 @@ import (
 
 // This file contains the core *state-model property test*.
 //
-// It is deterministic (seeded) and uses the shared state-model harness.
+// It is deterministic (seeded) and uses the fuzz operation decoder.
 func Test_Slotcache_Matches_Model_Property(t *testing.T) {
 	// Keep this deterministic for easy reproduction: seed N is the subtest name.
 	seedCount := 50
-	operationsPerSeed := 200
+	bytesPerSeed := 8192 // Enough for ~200 operations
 
 	for seedIndex := 0; seedIndex < seedCount; seedIndex++ {
 		seed := int64(seedIndex + 1)
@@ -29,6 +29,10 @@ func Test_Slotcache_Matches_Model_Property(t *testing.T) {
 			cachePath := filepath.Join(temporaryDirectory, "test.slc")
 
 			randomNumberGenerator := rand.New(rand.NewSource(seed))
+
+			// Generate deterministic random bytes for this seed.
+			fuzzBytes := make([]byte, bytesPerSeed)
+			randomNumberGenerator.Read(fuzzBytes)
 
 			options := slotcache.Options{
 				Path:         cachePath,
@@ -42,10 +46,12 @@ func Test_Slotcache_Matches_Model_Property(t *testing.T) {
 				_ = testHarness.real.cache.Close()
 			}()
 
+			decoder := newFuzzOperationDecoder(fuzzBytes, options)
+
 			var previouslySeenKeys [][]byte
 
-			for operationIndex := 0; operationIndex < operationsPerSeed; operationIndex++ {
-				operationValue := randOp(randomNumberGenerator, testHarness, previouslySeenKeys)
+			for decoder.hasMoreBytes() {
+				operationValue := decoder.nextOperation(testHarness, previouslySeenKeys)
 
 				modelResult := applyModel(testHarness, operationValue)
 				realResult := applyReal(testHarness, operationValue)
