@@ -4,16 +4,11 @@
 
 ```
 pkg/slotcache/
-├── api_stub.go          # //go:build !slotcache_impl
-├── api_impl.go          # //go:build slotcache_impl (proxies to impl/)
-├── types.go
-├── errors.go
-├── impl/                # //go:build slotcache_impl
-│   ├── cache.go
-│   ├── writer.go
-│   ├── file.go          # Phase 2+
-│   ├── format.go        # Phase 3+
-│   └── hash.go          # Phase 3+
+├── api_stub.go          # //go:build !slotcache_impl (panic stubs)
+├── cache_impl.go        # //go:build slotcache_impl (Cache methods)
+├── writer_impl.go       # //go:build slotcache_impl (Writer methods)
+├── types.go             # shared types (Options, Entry, ScanOpts, etc.)
+├── errors.go            # error codes
 ├── model/
 │   └── model.go
 ├── specs/
@@ -32,11 +27,10 @@ go test -tags=slotcache_impl ./pkg/slotcache/...
 # Must compile (tests will fail)
 ```
 
-- [ ] Create `impl/cache.go` with `Cache` struct
-- [ ] Create `impl/writer.go` with `Writer` struct
-- [ ] Create `api_impl.go` proxying to `impl/`
-- [ ] All methods panic or return stub error
-- [ ] Compiles
+- [x] Create `cache_impl.go` with Cache methods
+- [x] Create `writer_impl.go` with Writer methods
+- [x] All methods panic or return stub error
+- [x] Compiles
 
 ---
 
@@ -44,6 +38,7 @@ go test -tags=slotcache_impl ./pkg/slotcache/...
 
 Implement a fully working cache using only in-memory state. No file I/O yet.
 The model already defines correct semantics—match its behavior exactly.
+Reopen must work (via fake persistence or real persistence).
 
 ```bash
 go test -tags=slotcache_impl -run Test_Slotcache_Matches_Model_Property ./pkg/slotcache/...
@@ -177,7 +172,7 @@ go test -tags=slotcache_impl -run "Test_Slotcache|Test_Metamorphic" ./pkg/slotca
 
 - [ ] Create `impl/hash.go`
 - [ ] FNV-1a 64-bit (offset=14695981039346656037, prime=1099511628211)
-- [ ] `bucketCount = nextPow2(ceil(slotCapacity / 0.75))`
+- [ ] `bucketCount = nextPow2(ceil(slotCapacity / HashLoadFactor))`
 - [ ] Bucket: hash64(u64) + slot_plus1(u64)
 - [ ] EMPTY=0, TOMBSTONE=0xFFFFFFFFFFFFFFFF, FULL=slot_id+1
 - [ ] Linear probe: `(i + 1) & (bucketCount - 1)`
@@ -209,17 +204,19 @@ go test -tags=slotcache_impl -run "Test_Slotcache|Test_Metamorphic" ./pkg/slotca
 ## Phase 4: Fuzz Hardening
 
 Run fuzz tests to discover edge cases and bugs. Fix all failures.
+Note: FuzzSpec_* tests require SLC1 format (Phase 3) and are gated until then.
 
 ```bash
 go test -tags=slotcache_impl -fuzz=FuzzBehavior_ModelVsReal -fuzztime=60s ./pkg/slotcache/...
+# After Phase 3:
 go test -tags=slotcache_impl -fuzz=FuzzSpec_GenerativeUsage -fuzztime=60s ./pkg/slotcache/...
 go test -tags=slotcache_impl -fuzz=FuzzSpec_OpenAndReadRobustness -fuzztime=60s ./pkg/slotcache/...
 # No failures
 ```
 
 - [ ] Run FuzzBehavior_ModelVsReal 60s
-- [ ] Run FuzzSpec_GenerativeUsage 60s
-- [ ] Run FuzzSpec_OpenAndReadRobustness 60s
+- [ ] Run FuzzSpec_GenerativeUsage 60s (requires SLC1)
+- [ ] Run FuzzSpec_OpenAndReadRobustness 60s (requires SLC1)
 - [ ] Fix all failures
 - [ ] No panics
 - [ ] No infinite loops
@@ -268,7 +265,7 @@ go test -tags=slotcache_impl ./pkg/slotcache/...
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 0 | Compile | ⬜ |
+| 0 | Compile | ✅ |
 | 1 | In-memory implementation | ⬜ |
 | 2 | Simple state persistence | ⬜ |
 | 3 | SLC1 file format | ⬜ |

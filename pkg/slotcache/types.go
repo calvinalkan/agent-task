@@ -44,7 +44,11 @@ type Seq func(yield func(Entry) bool)
 // Cache is the public cache handle.
 //
 // The concrete implementation lives behind the slotcache_impl build tag.
-type Cache struct{}
+type Cache struct {
+	_ [0]func() // prevent direct construction; use Open()
+}
 
 // Writer is a single-writer session returned by Cache.BeginWrite.
-type Writer struct{}
+type Writer struct {
+	_ [0]func() // prevent direct construction; use BeginWrite()
+}
