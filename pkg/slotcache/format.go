@@ -230,6 +230,79 @@ func nextPow2(x uint64) uint64 {
 	return x + 1
 }
 
+// Slot meta bit flags.
+const (
+	// slotMetaUsed indicates a live (non-deleted) slot.
+	slotMetaUsed uint64 = 1 << 0
+)
+
+// encodeSlot serializes a slot record to a fixed-size byte slice.
+// The slot layout per spec:
+//   - meta (8 bytes, uint64)
+//   - key (keySize bytes)
+//   - key_pad (padding to align revision to 8 bytes)
+//   - revision (8 bytes, int64)
+//   - index (indexSize bytes)
+//   - padding (to slotSize)
+func encodeSlot(key []byte, isLive bool, revision int64, index []byte, keySize, indexSize uint32) []byte {
+	slotSize := computeSlotSize(keySize, indexSize)
+	buf := make([]byte, slotSize)
+
+	// Meta: bit 0 = USED.
+	var meta uint64
+	if isLive {
+		meta = slotMetaUsed
+	}
+	binary.LittleEndian.PutUint64(buf[0:8], meta)
+
+	// Key (keySize bytes starting at offset 8).
+	copy(buf[8:8+keySize], key)
+
+	// Key padding is implicit (already zero in the slice).
+	// key_pad = (8 - (keySize % 8)) % 8
+	keyPad := (8 - (keySize % 8)) % 8
+
+	// Revision (8 bytes, little-endian, at offset 8 + keySize + keyPad).
+	revisionOffset := 8 + keySize + keyPad
+	binary.LittleEndian.PutUint64(buf[revisionOffset:revisionOffset+8], uint64(revision))
+
+	// Index (indexSize bytes starting after revision).
+	indexOffset := revisionOffset + 8
+	copy(buf[indexOffset:indexOffset+indexSize], index)
+
+	// Remaining padding is implicit (already zero in the slice).
+
+	return buf
+}
+
+// decodeSlot deserializes a fixed-size byte slice into slot fields.
+// Returns key, isLive, revision, index.
+func decodeSlot(buf []byte, keySize, indexSize uint32) (key []byte, isLive bool, revision int64, index []byte) {
+	// Meta: bit 0 = USED.
+	meta := binary.LittleEndian.Uint64(buf[0:8])
+	isLive = (meta & slotMetaUsed) != 0
+
+	// Key (keySize bytes starting at offset 8).
+	key = make([]byte, keySize)
+	copy(key, buf[8:8+keySize])
+
+	// key_pad = (8 - (keySize % 8)) % 8
+	keyPad := (8 - (keySize % 8)) % 8
+
+	// Revision (8 bytes at offset 8 + keySize + keyPad).
+	revisionOffset := 8 + keySize + keyPad
+	revision = int64(binary.LittleEndian.Uint64(buf[revisionOffset : revisionOffset+8]))
+
+	// Index (indexSize bytes starting after revision).
+	indexOffset := revisionOffset + 8
+	if indexSize > 0 {
+		index = make([]byte, indexSize)
+		copy(index, buf[indexOffset:indexOffset+indexSize])
+	}
+
+	return key, isLive, revision, index
+}
+
 // newHeader creates a header for a new cache file with the given options.
 func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, loadFactor float64) slc1Header {
 	slotSize := computeSlotSize(keySize, indexSize)

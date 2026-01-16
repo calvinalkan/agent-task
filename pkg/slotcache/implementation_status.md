@@ -172,10 +172,10 @@ go test -tags=slotcache_impl -run "Test_Slotcache|Test_Metamorphic" ./pkg/slotca
 
 ### 3c: Slot Layout
 
-- [ ] `keyPad = (8 - (keySize % 8)) % 8`
-- [ ] `slotSize = align8(8 + keySize + keyPad + 8 + indexSize)`
-- [ ] meta(u64) + key + pad + revision(i64) + index + pad
-- [ ] meta bit 0 = USED
+- [x] `keyPad = (8 - (keySize % 8)) % 8`
+- [x] `slotSize = align8(8 + keySize + keyPad + 8 + indexSize)`
+- [x] meta(u64) + key + pad + revision(i64) + index + pad
+- [x] meta bit 0 = USED
 
 ### 3d: Hash Table
 
