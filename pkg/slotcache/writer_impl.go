@@ -93,6 +93,11 @@ func (w *writer) Commit() error {
 		w.apply(op)
 	}
 
+	// Persist to disk.
+	if err := saveState(w.cache.file.path, w.cache.file); err != nil {
+		return err
+	}
+
 	w.isClosed = true
 	w.bufferedOps = nil
 	w.cache.activeWriter = nil

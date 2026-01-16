@@ -3,6 +3,9 @@
 package slotcache
 
 import (
+	"encoding/gob"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -22,8 +25,25 @@ type slotRecord struct {
 	index    string
 }
 
+// persistedSlot is the gob-serializable version of slotRecord.
+type persistedSlot struct {
+	Key      string
+	IsLive   bool
+	Revision int64
+	Index    string
+}
+
+// persistedState is the gob-serializable representation of the cache file.
+type persistedState struct {
+	KeySize      int
+	IndexSize    int
+	SlotCapacity uint64
+	Slots        []persistedSlot
+}
+
 // fileState holds the persisted state (shared across handles for the same path).
 type fileState struct {
+	path         string
 	keySize      int
 	indexSize    int
 	slotCapacity uint64
@@ -44,17 +64,107 @@ var globalMu sync.Mutex
 // fileRegistry maps paths to their file states (simulates file persistence).
 var fileRegistry sync.Map
 
+// saveState persists the file state to disk using gob encoding.
+func saveState(path string, state *fileState) error {
+	// Create parent directories if needed.
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+
+	// Write to a temp file first, then rename for atomicity.
+	tmpPath := path + ".tmp"
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	// Convert to persisted format.
+	ps := persistedState{
+		KeySize:      state.keySize,
+		IndexSize:    state.indexSize,
+		SlotCapacity: state.slotCapacity,
+		Slots:        make([]persistedSlot, len(state.slots)),
+	}
+
+	for i, slot := range state.slots {
+		ps.Slots[i] = persistedSlot{
+			Key:      slot.key,
+			IsLive:   slot.isLive,
+			Revision: slot.revision,
+			Index:    slot.index,
+		}
+	}
+
+	enc := gob.NewEncoder(f)
+
+	if err := enc.Encode(ps); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+
+		return err
+	}
+
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+
+		return err
+	}
+
+	// Atomic rename.
+	return os.Rename(tmpPath, path)
+}
+
+// loadState reads the file state from disk.
+func loadState(path string) (*fileState, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = f.Close() }()
+
+	var ps persistedState
+
+	dec := gob.NewDecoder(f)
+	if err := dec.Decode(&ps); err != nil {
+		return nil, err
+	}
+
+	state := &fileState{
+		path:         path,
+		keySize:      ps.KeySize,
+		indexSize:    ps.IndexSize,
+		slotCapacity: ps.SlotCapacity,
+		slots:        make([]slotRecord, len(ps.Slots)),
+	}
+
+	for i, slot := range ps.Slots {
+		state.slots[i] = slotRecord{
+			key:      slot.Key,
+			isLive:   slot.IsLive,
+			revision: slot.Revision,
+			index:    slot.Index,
+		}
+	}
+
+	return state, nil
+}
+
 // getOrCreateFile returns the file state for a path, creating it if necessary.
 // Must be called with globalMu held.
 func getOrCreateFile(opts Options) (*fileState, error) {
-	// Try to load existing
+	// Try in-memory registry first (for open handles).
 	if val, ok := fileRegistry.Load(opts.Path); ok {
 		existing, ok := val.(*fileState)
 		if !ok {
 			return nil, ErrCorrupt
 		}
 
-		// Validate compatibility
+		// Validate compatibility.
 		if existing.keySize != opts.KeySize ||
 			existing.indexSize != opts.IndexSize ||
 			existing.slotCapacity != opts.SlotCapacity {
@@ -64,12 +174,39 @@ func getOrCreateFile(opts Options) (*fileState, error) {
 		return existing, nil
 	}
 
-	// Create new
+	// Try loading from disk.
+	if _, err := os.Stat(opts.Path); err == nil {
+		state, err := loadState(opts.Path)
+		if err != nil {
+			return nil, ErrCorrupt
+		}
+
+		// Validate compatibility.
+		if state.keySize != opts.KeySize ||
+			state.indexSize != opts.IndexSize ||
+			state.slotCapacity != opts.SlotCapacity {
+			return nil, ErrIncompatible
+		}
+
+		state.path = opts.Path
+		fileRegistry.Store(opts.Path, state)
+
+		return state, nil
+	}
+
+	// Create new.
 	state := &fileState{
+		path:         opts.Path,
 		keySize:      opts.KeySize,
 		indexSize:    opts.IndexSize,
 		slotCapacity: opts.SlotCapacity,
 	}
+
+	// Persist to disk.
+	if err := saveState(opts.Path, state); err != nil {
+		return nil, err
+	}
+
 	fileRegistry.Store(opts.Path, state)
 
 	return state, nil
@@ -265,11 +402,10 @@ func (c *cache) collect(prefix string, opts ScanOpts) (Seq, error) {
 		slices.Reverse(entries)
 	}
 
-	if opts.Offset > len(entries) {
-		return nil, ErrOffsetOutOfBounds
-	}
-
 	start := opts.Offset
+	if start > len(entries) {
+		start = len(entries)
+	}
 
 	end := len(entries)
 	if opts.Limit > 0 && start+opts.Limit < end {

@@ -133,16 +133,16 @@ go test -tags=slotcache_impl -run "Test_Slotcache_Matches_Model_When_Random_Oper
 
 ### 2a: Serialization
 
-- [ ] Create `impl/file.go`
-- [ ] `saveState(path, state) error`
-- [ ] `loadState(path) (state, error)`
-- [ ] Use gob or JSON
+- [x] ~~Create `impl/file.go`~~ (in cache_impl.go)
+- [x] `saveState(path, state) error`
+- [x] `loadState(path) (state, error)`
+- [x] Use gob or JSON
 
 ### 2b: Integration
 
-- [ ] `Open()` → load if exists, else empty
-- [ ] `Commit()` → save after applying ops
-- [ ] Verify KeySize/IndexSize/SlotCapacity → ErrIncompatible
+- [x] `Open()` → load if exists, else empty
+- [x] `Commit()` → save after applying ops
+- [x] Verify KeySize/IndexSize/SlotCapacity → ErrIncompatible
 
 ---
 
@@ -276,7 +276,7 @@ go test ./pkg/slotcache/...
 |-------|-------------|--------|
 | 0 | Compile | ✅ |
 | 1 | In-memory implementation | ✅ |
-| 2 | Simple state persistence | ⬜ |
+| 2 | Simple state persistence | ✅ |
 | 3 | SLC1 file format | ⬜ |
 | 4 | Fuzz hardening | ⬜ |
 | 5 | mmap + seqlock | ⬜ |
