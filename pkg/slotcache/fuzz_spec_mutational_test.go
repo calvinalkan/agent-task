@@ -21,7 +21,7 @@ import (
 // Disallowed outcomes:
 // - panic
 // - infinite hang
-// - Open succeeds but file fails the spec oracle
+// - Open succeeds but file fails the spec oracle.
 func FuzzSpec_OpenAndReadRobustness(f *testing.F) {
 	// Seed a few "interesting" shapes.
 	f.Add([]byte{})
@@ -58,7 +58,8 @@ func FuzzSpec_OpenAndReadRobustness(f *testing.F) {
 		}
 
 		// If Open succeeded, validate file against the oracle.
-		if validationError := validateSlotcacheFileAgainstOptions(cacheFilePath, options); validationError != nil {
+		validationError := validateSlotcacheFileAgainstOptions(cacheFilePath, options)
+		if validationError != nil {
 			t.Fatalf("Open succeeded but speccheck failed: %v", validationError)
 		}
 

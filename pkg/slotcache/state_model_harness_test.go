@@ -66,10 +66,12 @@ func applyModel(testHarness *harness, operationValue operation) operationResult 
 	switch concreteOperation := operationValue.(type) {
 	case opLen:
 		length, lengthError := testHarness.model.cache.Len()
+
 		return resLen{Length: length, Error: lengthError}
 
 	case opGet:
 		modelEntry, exists, getError := testHarness.model.cache.Get(concreteOperation.Key)
+
 		return resGet{Entry: toSlotcacheEntry(modelEntry), Exists: exists, Error: getError}
 
 	case opScan:
@@ -77,6 +79,7 @@ func applyModel(testHarness *harness, operationValue operation) operationResult 
 		if scanError != nil {
 			return resScan{Entries: nil, Error: scanError}
 		}
+
 		return resScan{Entries: toSlotcacheEntries(modelEntries), Error: nil}
 
 	case opScanPrefix:
@@ -84,6 +87,7 @@ func applyModel(testHarness *harness, operationValue operation) operationResult 
 		if scanError != nil {
 			return resScan{Entries: nil, Error: scanError}
 		}
+
 		return resScan{Entries: toSlotcacheEntries(modelEntries), Error: nil}
 
 	case opBeginWrite:
@@ -91,40 +95,50 @@ func applyModel(testHarness *harness, operationValue operation) operationResult 
 		if beginError == nil {
 			testHarness.model.writer = writerHandle
 		}
+
 		return resErr{Error: beginError}
 
 	case opPut:
 		if testHarness.model.writer == nil {
 			panic("test harness bug: Writer.Put without an active model writer")
 		}
+
 		putError := testHarness.model.writer.Put(concreteOperation.Key, concreteOperation.Revision, concreteOperation.Index)
+
 		return resErr{Error: putError}
 
 	case opDelete:
 		if testHarness.model.writer == nil {
 			panic("test harness bug: Writer.Delete without an active model writer")
 		}
+
 		existed, deleteError := testHarness.model.writer.Delete(concreteOperation.Key)
+
 		return resDel{Existed: existed, Error: deleteError}
 
 	case opCommit:
 		if testHarness.model.writer == nil {
 			panic("test harness bug: Writer.Commit without an active model writer")
 		}
+
 		commitError := testHarness.model.writer.Commit()
 		testHarness.model.writer = nil
+
 		return resErr{Error: commitError}
 
 	case opAbort:
 		if testHarness.model.writer == nil {
 			panic("test harness bug: Writer.Abort without an active model writer")
 		}
+
 		abortError := testHarness.model.writer.Abort()
 		testHarness.model.writer = nil
+
 		return resErr{Error: abortError}
 
 	case opClose:
 		closeError := testHarness.model.cache.Close()
+
 		return resErr{Error: closeError}
 
 	case opReopen:
@@ -137,6 +151,7 @@ func applyModel(testHarness *harness, operationValue operation) operationResult 
 		// Whether close succeeded or it was already closed, we can create a new handle.
 		testHarness.model.cache = model.Open(testHarness.model.file)
 		testHarness.model.writer = nil
+
 		return resReopen{CloseError: closeError, OpenError: nil}
 
 	default:
@@ -148,10 +163,12 @@ func applyReal(testHarness *harness, operationValue operation) operationResult {
 	switch concreteOperation := operationValue.(type) {
 	case opLen:
 		length, lengthError := testHarness.real.cache.Len()
+
 		return resLen{Length: length, Error: lengthError}
 
 	case opGet:
 		entry, exists, getError := testHarness.real.cache.Get(concreteOperation.Key)
+
 		return resGet{Entry: entry, Exists: exists, Error: getError}
 
 	case opScan:
@@ -159,6 +176,7 @@ func applyReal(testHarness *harness, operationValue operation) operationResult {
 		if scanError != nil {
 			return resScan{Entries: nil, Error: scanError}
 		}
+
 		return resScan{Entries: collectSeq(sequence), Error: nil}
 
 	case opScanPrefix:
@@ -166,6 +184,7 @@ func applyReal(testHarness *harness, operationValue operation) operationResult {
 		if scanError != nil {
 			return resScan{Entries: nil, Error: scanError}
 		}
+
 		return resScan{Entries: collectSeq(sequence), Error: nil}
 
 	case opBeginWrite:
@@ -173,40 +192,50 @@ func applyReal(testHarness *harness, operationValue operation) operationResult {
 		if beginError == nil {
 			testHarness.real.writer = writerHandle
 		}
+
 		return resErr{Error: beginError}
 
 	case opPut:
 		if testHarness.real.writer == nil {
 			panic("test harness bug: Writer.Put without an active real writer")
 		}
+
 		putError := testHarness.real.writer.Put(concreteOperation.Key, concreteOperation.Revision, concreteOperation.Index)
+
 		return resErr{Error: putError}
 
 	case opDelete:
 		if testHarness.real.writer == nil {
 			panic("test harness bug: Writer.Delete without an active real writer")
 		}
+
 		existed, deleteError := testHarness.real.writer.Delete(concreteOperation.Key)
+
 		return resDel{Existed: existed, Error: deleteError}
 
 	case opCommit:
 		if testHarness.real.writer == nil {
 			panic("test harness bug: Writer.Commit without an active real writer")
 		}
+
 		commitError := testHarness.real.writer.Commit()
 		testHarness.real.writer = nil
+
 		return resErr{Error: commitError}
 
 	case opAbort:
 		if testHarness.real.writer == nil {
 			panic("test harness bug: Writer.Abort without an active real writer")
 		}
+
 		abortError := testHarness.real.writer.Abort()
 		testHarness.real.writer = nil
+
 		return resErr{Error: abortError}
 
 	case opClose:
 		closeError := testHarness.real.cache.Close()
+
 		return resErr{Error: closeError}
 
 	case opReopen:
@@ -248,6 +277,7 @@ func assertMatch(t *testing.T, operationValue operation, modelResult operationRe
 		if !errorsMatch(modelTyped.Error, realTyped.Error) {
 			t.Fatalf("%s: error mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.Error, realTyped.Error)
 		}
+
 		if modelTyped.Length != realTyped.Length {
 			t.Fatalf("%s: length mismatch\nmodel=%d\nreal=%d", operationValue.String(), modelTyped.Length, realTyped.Length)
 		}
@@ -257,9 +287,11 @@ func assertMatch(t *testing.T, operationValue operation, modelResult operationRe
 		if !errorsMatch(modelTyped.Error, realTyped.Error) {
 			t.Fatalf("%s: error mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.Error, realTyped.Error)
 		}
+
 		if modelTyped.Exists != realTyped.Exists {
 			t.Fatalf("%s: exists mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.Exists, realTyped.Exists)
 		}
+
 		if diff := cmp.Diff(modelTyped.Entry, realTyped.Entry); diff != "" {
 			t.Fatalf("%s: entry mismatch (-model +real):\n%s", operationValue.String(), diff)
 		}
@@ -269,6 +301,7 @@ func assertMatch(t *testing.T, operationValue operation, modelResult operationRe
 		if !errorsMatch(modelTyped.Error, realTyped.Error) {
 			t.Fatalf("%s: error mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.Error, realTyped.Error)
 		}
+
 		if modelTyped.Existed != realTyped.Existed {
 			t.Fatalf("%s: existed mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.Existed, realTyped.Existed)
 		}
@@ -278,6 +311,7 @@ func assertMatch(t *testing.T, operationValue operation, modelResult operationRe
 		if !errorsMatch(modelTyped.Error, realTyped.Error) {
 			t.Fatalf("%s: error mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.Error, realTyped.Error)
 		}
+
 		if diff := cmp.Diff(modelTyped.Entries, realTyped.Entries); diff != "" {
 			t.Fatalf("%s: entries mismatch (-model +real):\n%s", operationValue.String(), diff)
 		}
@@ -287,6 +321,7 @@ func assertMatch(t *testing.T, operationValue operation, modelResult operationRe
 		if !errorsMatch(modelTyped.CloseError, realTyped.CloseError) {
 			t.Fatalf("%s: close error mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.CloseError, realTyped.CloseError)
 		}
+
 		if !errorsMatch(modelTyped.OpenError, realTyped.OpenError) {
 			t.Fatalf("%s: open error mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.OpenError, realTyped.OpenError)
 		}

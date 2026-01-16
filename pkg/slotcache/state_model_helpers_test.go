@@ -35,10 +35,12 @@ func toSlotcacheEntries(entries []model.Entry) []slotcache.Entry {
 	if entries == nil {
 		return nil
 	}
+
 	out := make([]slotcache.Entry, len(entries))
 	for i, e := range entries {
 		out[i] = toSlotcacheEntry(e)
 	}
+
 	return out
 }
 
@@ -52,37 +54,45 @@ func collectSeq(seq slotcache.Seq) []slotcache.Entry {
 
 func scanReal(t *testing.T, cache *slotcache.Cache, opts slotcache.ScanOpts) ([]slotcache.Entry, error) {
 	t.Helper()
+
 	seq, err := cache.Scan(opts)
 	if err != nil {
 		return nil, err
 	}
+
 	return collectSeq(seq), nil
 }
 
 func scanRealPrefix(t *testing.T, cache *slotcache.Cache, prefix []byte, opts slotcache.ScanOpts) ([]slotcache.Entry, error) {
 	t.Helper()
+
 	seq, err := cache.ScanPrefix(prefix, opts)
 	if err != nil {
 		return nil, err
 	}
+
 	return collectSeq(seq), nil
 }
 
 func scanModel(t *testing.T, cache *model.CacheModel, opts slotcache.ScanOpts) ([]slotcache.Entry, error) {
 	t.Helper()
+
 	entries, err := cache.Scan(opts)
 	if err != nil {
 		return nil, err
 	}
+
 	return toSlotcacheEntries(entries), nil
 }
 
 func scanModelPrefix(t *testing.T, cache *model.CacheModel, prefix []byte, opts slotcache.ScanOpts) ([]slotcache.Entry, error) {
 	t.Helper()
+
 	entries, err := cache.ScanPrefix(prefix, opts)
 	if err != nil {
 		return nil, err
 	}
+
 	return toSlotcacheEntries(entries), nil
 }
 
@@ -96,9 +106,11 @@ func errorsMatch(mErr, rErr error) bool {
 	if mErr == nil && rErr == nil {
 		return true
 	}
+
 	if mErr == nil || rErr == nil {
 		return false
 	}
+
 	return errors.Is(mErr, rErr) || errors.Is(rErr, mErr)
 }
 
@@ -117,11 +129,13 @@ func entriesAreReverse(fwd, rev []slotcache.Entry) bool {
 	if len(fwd) != len(rev) {
 		return false
 	}
+
 	for i := range fwd {
 		if !entriesEqual(fwd[i], rev[len(fwd)-1-i]) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -137,7 +151,7 @@ func entriesAreReverse(fwd, rev []slotcache.Entry) bool {
 // - Reverse scan must match
 // - Forward/reverse must be exact reverses of each other
 // - Get() for each observed key must match
-// - Prefix scans for each observed key's first byte must match
+// - Prefix scans for each observed key's first byte must match.
 func compareObservableState(t *testing.T, h *harness) {
 	t.Helper()
 
@@ -148,9 +162,11 @@ func compareObservableState(t *testing.T, h *harness) {
 	if !errorsMatch(mLenErr, rLenErr) {
 		t.Fatalf("Len() error mismatch\nmodel=%v\nreal=%v", mLenErr, rLenErr)
 	}
+
 	if mLenErr != nil {
 		return // Both closed: no more observable state to compare.
 	}
+
 	if mLen != rLen {
 		t.Fatalf("Len() value mismatch\nmodel=%d\nreal=%d", mLen, rLen)
 	}
@@ -165,6 +181,7 @@ func compareObservableState(t *testing.T, h *harness) {
 	if !errorsMatch(mFwdErr, rFwdErr) {
 		t.Fatalf("Scan(forward) error mismatch\nmodel=%v\nreal=%v", mFwdErr, rFwdErr)
 	}
+
 	if diff := cmp.Diff(mFwd, rFwd); diff != "" {
 		t.Fatalf("Scan(forward) entries mismatch (-model +real):\n%s", diff)
 	}
@@ -173,6 +190,7 @@ func compareObservableState(t *testing.T, h *harness) {
 	if mLen != len(mFwd) {
 		t.Fatalf("model: Len()=%d but Scan(forward) returned %d entries", mLen, len(mFwd))
 	}
+
 	if rLen != len(rFwd) {
 		t.Fatalf("real: Len()=%d but Scan(forward) returned %d entries", rLen, len(rFwd))
 	}
@@ -184,6 +202,7 @@ func compareObservableState(t *testing.T, h *harness) {
 	if !errorsMatch(mRevErr, rRevErr) {
 		t.Fatalf("Scan(reverse) error mismatch\nmodel=%v\nreal=%v", mRevErr, rRevErr)
 	}
+
 	if diff := cmp.Diff(mRev, rRev); diff != "" {
 		t.Fatalf("Scan(reverse) entries mismatch (-model +real):\n%s", diff)
 	}
@@ -192,6 +211,7 @@ func compareObservableState(t *testing.T, h *harness) {
 	if !entriesAreReverse(mFwd, mRev) {
 		t.Fatalf("model: reverse scan is not the exact reverse of forward scan")
 	}
+
 	if !entriesAreReverse(rFwd, rRev) {
 		t.Fatalf("real: reverse scan is not the exact reverse of forward scan")
 	}
@@ -210,6 +230,7 @@ func compareObservableState(t *testing.T, h *harness) {
 		if !errorsMatch(mPageErr, rPageErr) {
 			t.Fatalf("Scan(%+v) error mismatch\nmodel=%v\nreal=%v", opts, mPageErr, rPageErr)
 		}
+
 		if diff := cmp.Diff(mPage, rPage); diff != "" {
 			t.Fatalf("Scan(%+v) entries mismatch (-model +real):\n%s", opts, diff)
 		}
@@ -220,6 +241,7 @@ func compareObservableState(t *testing.T, h *harness) {
 	for _, e := range mFwd {
 		keys[string(e.Key)] = e.Key
 	}
+
 	for _, e := range rFwd {
 		keys[string(e.Key)] = e.Key
 	}
@@ -229,6 +251,7 @@ func compareObservableState(t *testing.T, h *harness) {
 	for k := range keys {
 		sorted = append(sorted, k)
 	}
+
 	sort.Strings(sorted)
 
 	for _, k := range sorted {
@@ -240,9 +263,11 @@ func compareObservableState(t *testing.T, h *harness) {
 		if !errorsMatch(mErr, rErr) {
 			t.Fatalf("Get(%x) error mismatch\nmodel=%v\nreal=%v", key, mErr, rErr)
 		}
+
 		if mOk != rOk {
 			t.Fatalf("Get(%x) exists mismatch\nmodel=%v\nreal=%v", key, mOk, rOk)
 		}
+
 		if diff := cmp.Diff(toSlotcacheEntry(mEntry), rEntry); diff != "" {
 			t.Fatalf("Get(%x) entry mismatch (-model +real):\n%s", key, diff)
 		}
@@ -253,6 +278,7 @@ func compareObservableState(t *testing.T, h *harness) {
 		if len(e.Key) < 1 {
 			continue
 		}
+
 		prefix := e.Key[:1]
 
 		mPfx, mPfxErr := scanModelPrefix(t, h.model.cache, prefix, fwdOpts)
@@ -261,6 +287,7 @@ func compareObservableState(t *testing.T, h *harness) {
 		if !errorsMatch(mPfxErr, rPfxErr) {
 			t.Fatalf("ScanPrefix(%x) error mismatch\nmodel=%v\nreal=%v", prefix, mPfxErr, rPfxErr)
 		}
+
 		if diff := cmp.Diff(mPfx, rPfx); diff != "" {
 			t.Fatalf("ScanPrefix(%x) entries mismatch (-model +real):\n%s", prefix, diff)
 		}

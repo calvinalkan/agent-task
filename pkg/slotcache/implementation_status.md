@@ -13,7 +13,7 @@ pkg/slotcache/
 │   └── model.go
 ├── specs/
 │   └── slotcachev1.md
-└── *_test.go
+└── *_test.go            # //go:build slotcache_impl
 ```
 
 ---
@@ -24,7 +24,7 @@ Make the implementation compile. All methods can panic or return stub errors.
 
 ```bash
 go test -tags=slotcache_impl ./pkg/slotcache/...
-# Must compile (tests will fail)
+# Must compile
 ```
 
 - [x] Create `cache_impl.go` with Cache methods
@@ -41,7 +41,7 @@ The model already defines correct semantics—match its behavior exactly.
 Reopen must work (via fake persistence or real persistence).
 
 ```bash
-go test -tags=slotcache_impl -run Test_Slotcache_Matches_Model_Property ./pkg/slotcache/...
+go test -tags=slotcache_impl -run Test_Slotcache_Matches_Model_When_Random_Operations_Applied ./pkg/slotcache/...
 # PASS
 ```
 
@@ -118,7 +118,7 @@ Persist state using simple serialization (gob/JSON). No SLC1 format yet.
 This validates reopen semantics without file format complexity.
 
 ```bash
-go test -tags=slotcache_impl -run "Test_Slotcache_Matches_Model_Property|Test_Metamorphic" ./pkg/slotcache/...
+go test -tags=slotcache_impl -run "Test_Slotcache_Matches_Model_When_Random_Operations_Applied|Test_Metamorphic" ./pkg/slotcache/...
 # PASS
 ```
 
@@ -230,7 +230,7 @@ Replace file I/O with mmap. Implement proper seqlock generation protocol
 for lock-free readers. Add writeback modes and file locking.
 
 ```bash
-go test -tags=slotcache_impl ./pkg/slotcache/...
+go test ./pkg/slotcache/...
 # PASS
 ```
 

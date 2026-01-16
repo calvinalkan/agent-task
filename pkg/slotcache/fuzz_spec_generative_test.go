@@ -35,6 +35,7 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 		if openError != nil {
 			t.Fatalf("Open failed unexpectedly: %v", openError)
 		}
+
 		defer func() {
 			_ = cacheHandle.Close()
 		}()
@@ -54,11 +55,13 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 				_ = cacheHandle.Close()
 
 				var reopenError error
+
 				cacheHandle, reopenError = slotcache.Open(options)
 				if reopenError != nil {
 					// If reopen fails, the fuzzer will minimize. Treat as a bug.
 					t.Fatalf("reopen failed: %v", reopenError)
 				}
+
 				writerHandle = nil
 
 				continue
@@ -71,6 +74,7 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 				switch actionByte % 5 {
 				case 0:
 					var beginError error
+
 					writerHandle, beginError = cacheHandle.BeginWrite()
 					_ = beginError // if ErrBusy/ErrClosed, that's fine
 
@@ -110,7 +114,8 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 
 				if commitError == nil {
 					// Validate the file format of the published cache.
-					if validationError := validateSlotcacheFileAgainstOptions(cacheFilePath, options); validationError != nil {
+					validationError := validateSlotcacheFileAgainstOptions(cacheFilePath, options)
+					if validationError != nil {
 						t.Fatalf("speccheck failed after commit: %v", validationError)
 					}
 				}
@@ -166,6 +171,7 @@ func (decoder *specFuzzDecoder) nextRevision() int64 {
 	// Read 8 bytes LE if available; otherwise 0.
 	if decoder.cursor+8 > len(decoder.rawBytes) {
 		decoder.cursor = len(decoder.rawBytes)
+
 		return 0
 	}
 
@@ -178,7 +184,7 @@ func (decoder *specFuzzDecoder) nextRevision() int64 {
 func (decoder *specFuzzDecoder) nextKeyBytes(keySize int) []byte {
 	keyBytes := make([]byte, keySize)
 
-	for i := 0; i < keySize; i++ {
+	for i := range keySize {
 		keyBytes[i] = decoder.nextByte()
 	}
 
@@ -188,7 +194,7 @@ func (decoder *specFuzzDecoder) nextKeyBytes(keySize int) []byte {
 func (decoder *specFuzzDecoder) nextIndexBytes(indexSize int) []byte {
 	indexBytes := make([]byte, indexSize)
 
-	for i := 0; i < indexSize; i++ {
+	for i := range indexSize {
 		indexBytes[i] = decoder.nextByte()
 	}
 
@@ -201,7 +207,7 @@ func (decoder *specFuzzDecoder) nextPrefixBytes(keySize int) []byte {
 
 	prefixBytes := make([]byte, length)
 
-	for i := 0; i < length; i++ {
+	for i := range length {
 		prefixBytes[i] = decoder.nextByte()
 	}
 

@@ -263,6 +263,7 @@ func FuzzBehavior_ModelVsReal(f *testing.F) {
 		}
 
 		testHarness := newHarness(t, options)
+
 		defer func() {
 			_ = testHarness.real.cache.Close()
 		}()
@@ -320,6 +321,7 @@ func (decoder *fuzzOperationDecoder) nextByte() byte {
 
 	value := decoder.rawBytes[decoder.cursor]
 	decoder.cursor++
+
 	return value
 }
 
@@ -330,9 +332,10 @@ func (decoder *fuzzOperationDecoder) nextBool() bool {
 func (decoder *fuzzOperationDecoder) nextInt64() int64 {
 	// Little-endian, 8 bytes; if we run out, missing bytes are treated as 0.
 	var raw [8]byte
-	for index := 0; index < len(raw); index++ {
+	for index := range raw {
 		raw[index] = decoder.nextByte()
 	}
+
 	return int64(binary.LittleEndian.Uint64(raw[:]))
 }
 
@@ -344,7 +347,7 @@ func (decoder *fuzzOperationDecoder) nextBytes(length int) []byte {
 	}
 
 	output := make([]byte, length)
-	for index := 0; index < length; index++ {
+	for index := range length {
 		output[index] = decoder.nextByte()
 	}
 
@@ -432,7 +435,6 @@ func (decoder *fuzzOperationDecoder) nextKey(keySize int, previouslySeenKeys [][
 	// - 15% invalid (nil or wrong length)
 	// - 60% reuse an existing key
 	// - otherwise generate a new key
-
 	mode := decoder.nextByte()
 
 	// ~15%
@@ -454,6 +456,7 @@ func (decoder *fuzzOperationDecoder) nextKey(keySize int, previouslySeenKeys [][
 	if len(previouslySeenKeys) > 0 && mode < 192 {
 		selectedIndex := int(decoder.nextByte()) % len(previouslySeenKeys)
 		selectedKey := previouslySeenKeys[selectedIndex]
+
 		return append([]byte(nil), selectedKey...)
 	}
 
@@ -504,10 +507,12 @@ func (decoder *fuzzOperationDecoder) nextPrefix(keySize int, previouslySeenKeys 
 		selectedKey := previouslySeenKeys[selectedIndex]
 
 		prefixLength := 1 + (int(decoder.nextByte()) % keySize) // 1..keySize
+
 		return append([]byte(nil), selectedKey[:prefixLength]...)
 	}
 
 	prefixLength := 1 + (int(decoder.nextByte()) % keySize)
+
 	return decoder.nextBytes(prefixLength)
 }
 
@@ -520,6 +525,7 @@ func (decoder *fuzzOperationDecoder) nextScanOpts() slotcache.ScanOpts {
 		if decoder.nextBool() {
 			return slotcache.ScanOpts{Reverse: false, Offset: -1, Limit: 0}
 		}
+
 		return slotcache.ScanOpts{Reverse: false, Offset: 0, Limit: -1}
 	}
 

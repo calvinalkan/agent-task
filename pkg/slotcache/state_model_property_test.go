@@ -14,12 +14,12 @@ import (
 // This file contains the core *state-model property test*.
 //
 // It is deterministic (seeded) and uses the fuzz operation decoder.
-func Test_Slotcache_Matches_Model_Property(t *testing.T) {
+func Test_Slotcache_Matches_Model_When_Random_Operations_Applied(t *testing.T) {
 	// Keep this deterministic for easy reproduction: seed N is the subtest name.
 	seedCount := 50
 	bytesPerSeed := 8192 // Enough for ~200 operations
 
-	for seedIndex := 0; seedIndex < seedCount; seedIndex++ {
+	for seedIndex := range seedCount {
 		seed := int64(seedIndex + 1)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -42,6 +42,7 @@ func Test_Slotcache_Matches_Model_Property(t *testing.T) {
 			}
 
 			testHarness := newHarness(t, options)
+
 			defer func() {
 				_ = testHarness.real.cache.Close()
 			}()

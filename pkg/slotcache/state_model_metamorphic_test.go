@@ -10,11 +10,13 @@ package slotcache_test
 // output.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -32,11 +34,11 @@ import (
 // If you take a writer session's operation buffer and reduce it to only the
 // last operation per key (preserving order), committing the reduced buffer
 // must produce the same committed state as committing the original buffer.
-func Test_Metamorphic_LastWriteWins_BufferReduction(t *testing.T) {
+func Test_Metamorphic_LastWriteWins_When_Buffer_Reduced(t *testing.T) {
 	seedCount := 25
 	opsPerSeed := 50
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(1000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -63,11 +65,13 @@ func Test_Metamorphic_LastWriteWins_BufferReduction(t *testing.T) {
 
 			// 1) Build a non-trivial committed base state.
 			h := newHarness(t, options)
+
 			defer func() { _ = h.real.cache.Close() }()
 
 			decoder := newFuzzOperationDecoder(baseBytes, options)
 
 			var keys [][]byte
+
 			baseOps := 100
 			for i := 0; i < baseOps && decoder.hasMoreBytes(); i++ {
 				op := decoder.nextOperation(h, keys)
@@ -93,13 +97,15 @@ func Test_Metamorphic_LastWriteWins_BufferReduction(t *testing.T) {
 				_ = h.model.writer.Abort()
 				h.model.writer = nil
 			}
+
 			if h.real.writer != nil {
 				_ = h.real.writer.Abort()
 				h.real.writer = nil
 			}
 
 			// Close the base real handle so the on-disk file is stable for copying.
-			if err := h.real.cache.Close(); err != nil {
+			err := h.real.cache.Close()
+			if err != nil {
 				if !errors.Is(err, slotcache.ErrClosed) {
 					t.Fatalf("unexpected error closing base real cache: %v", err)
 				}
@@ -134,6 +140,7 @@ func Test_Metamorphic_LastWriteWins_BufferReduction(t *testing.T) {
 			if diff := cmp.Diff(mOrig, mRed); diff != "" {
 				t.Fatalf("model: reduced writer buffer changed committed state (-original +reduced):\n%s\n\noriginal ops:\n%s\n\nreduced ops:\n%s", diff, fmtOps(origOps), fmtOps(redOps))
 			}
+
 			if diff := cmp.Diff(rOrig, rRed); diff != "" {
 				t.Fatalf("real: reduced writer buffer changed committed state (-original +reduced):\n%s\n\noriginal ops:\n%s\n\nreduced ops:\n%s", diff, fmtOps(origOps), fmtOps(redOps))
 			}
@@ -142,6 +149,7 @@ func Test_Metamorphic_LastWriteWins_BufferReduction(t *testing.T) {
 			if diff := cmp.Diff(mOrig, rOrig); diff != "" {
 				t.Fatalf("model vs real mismatch (original sequence) (-model +real):\n%s\n\nops:\n%s", diff, fmtOps(origOps))
 			}
+
 			if diff := cmp.Diff(mRed, rRed); diff != "" {
 				t.Fatalf("model vs real mismatch (reduced sequence) (-model +real):\n%s\n\nops:\n%s", diff, fmtOps(redOps))
 			}
@@ -162,7 +170,7 @@ func Test_Metamorphic_LastWriteWins_BufferReduction(t *testing.T) {
 func Test_Metamorphic_Produces_Same_State_When_Update_Order_Differs(t *testing.T) {
 	seedCount := 20
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(2000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -183,7 +191,7 @@ func Test_Metamorphic_Produces_Same_State_When_Update_Order_Differs(t *testing.T
 			keyB := randValidKey(rng, options.KeySize, nil)
 
 			// Ensure keys are distinct.
-			for string(keyA) == string(keyB) {
+			for bytes.Equal(keyA, keyB) {
 				keyB = randValidKey(rng, options.KeySize, nil)
 			}
 
@@ -249,7 +257,7 @@ func Test_Metamorphic_Produces_Same_State_When_Update_Order_Differs(t *testing.T
 func Test_Metamorphic_Preserves_State_When_Writer_Aborts_With_Operations(t *testing.T) {
 	seedCount := 20
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(3000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -267,15 +275,18 @@ func Test_Metamorphic_Preserves_State_When_Writer_Aborts_With_Operations(t *test
 
 			// Build a base state with some data.
 			var keys [][]byte
+
 			baseModelFile, _ := model.NewFile(options)
 			baseModelCache := model.Open(baseModelFile)
 			baseWriter, _ := baseModelCache.BeginWrite()
-			for keyIndex := 0; keyIndex < 10; keyIndex++ {
+
+			for keyIndex := range 10 {
 				key := randValidKey(rng, options.KeySize, keys)
 				idx := randValidIdx(rng, options.IndexSize)
 				_ = baseWriter.Put(key, int64(keyIndex), idx)
 				keys = append(keys, key)
 			}
+
 			_ = baseWriter.Commit()
 
 			// Snapshot the base state.
@@ -289,7 +300,8 @@ func Test_Metamorphic_Preserves_State_When_Writer_Aborts_With_Operations(t *test
 			// Execute BeginWrite; Put/Delete...; Abort on first fork.
 			cacheWithOps := model.Open(modelFileWithOps)
 			writerWithOps, _ := cacheWithOps.BeginWrite()
-			for opIndex := 0; opIndex < 20; opIndex++ {
+
+			for opIndex := range 20 {
 				if rng.Intn(2) == 0 {
 					key := randValidKey(rng, options.KeySize, keys)
 					idx := randValidIdx(rng, options.IndexSize)
@@ -299,6 +311,7 @@ func Test_Metamorphic_Preserves_State_When_Writer_Aborts_With_Operations(t *test
 					_, _ = writerWithOps.Delete(key)
 				}
 			}
+
 			_ = writerWithOps.Abort()
 			entriesAfterOpsAbort, _ := cacheWithOps.Scan(slotcache.ScanOpts{})
 			_ = cacheWithOps.Close()
@@ -317,6 +330,7 @@ func Test_Metamorphic_Preserves_State_When_Writer_Aborts_With_Operations(t *test
 			if diff := cmp.Diff(baseSlotcacheEntries, slotcacheEntriesAfterOpsAbort); diff != "" {
 				t.Fatalf("abort with ops changed state (-base +afterOpsAbort):\n%s", diff)
 			}
+
 			if diff := cmp.Diff(baseSlotcacheEntries, slotcacheEntriesAfterEmptyAbort); diff != "" {
 				t.Fatalf("empty abort changed state (-base +afterEmptyAbort):\n%s", diff)
 			}
@@ -364,9 +378,10 @@ func Test_Metamorphic_Eliminates_Allocation_When_Put_Then_Delete_Same_Key(t *tes
 
 		// In a single writer session: Put(newKey); Delete(newKey).
 		keyNew := randValidKey(rng, options.KeySize, nil)
-		for string(keyNew) == string(keyA) {
+		for bytes.Equal(keyNew, keyA) {
 			keyNew = randValidKey(rng, options.KeySize, nil)
 		}
+
 		indexNew := randValidIdx(rng, options.IndexSize)
 
 		writer2, _ := cache.BeginWrite()
@@ -382,16 +397,19 @@ func Test_Metamorphic_Eliminates_Allocation_When_Put_Then_Delete_Same_Key(t *tes
 
 		// We should be able to insert another key without hitting capacity.
 		keyB := randValidKey(rng, options.KeySize, nil)
-		for string(keyB) == string(keyA) || string(keyB) == string(keyNew) {
+		for bytes.Equal(keyB, keyA) || bytes.Equal(keyB, keyNew) {
 			keyB = randValidKey(rng, options.KeySize, nil)
 		}
+
 		indexB := randValidIdx(rng, options.IndexSize)
 
 		writer3, _ := cache.BeginWrite()
+
 		err := writer3.Put(keyB, 3, indexB)
 		if err != nil {
 			t.Fatalf("unexpected ErrFull after Put-Delete elimination: %v", err)
 		}
+
 		_ = writer3.Commit()
 
 		// Now we should have 2 slots.
@@ -401,16 +419,19 @@ func Test_Metamorphic_Eliminates_Allocation_When_Put_Then_Delete_Same_Key(t *tes
 
 		// A third Put should fail with ErrFull.
 		keyC := randValidKey(rng, options.KeySize, nil)
-		for string(keyC) == string(keyA) || string(keyC) == string(keyB) {
+		for bytes.Equal(keyC, keyA) || bytes.Equal(keyC, keyB) {
 			keyC = randValidKey(rng, options.KeySize, nil)
 		}
+
 		indexC := randValidIdx(rng, options.IndexSize)
 
 		writer4, _ := cache.BeginWrite()
+
 		errC := writer4.Put(keyC, 4, indexC)
 		if !errors.Is(errC, slotcache.ErrFull) {
 			t.Fatalf("expected ErrFull for third key, got %v", errC)
 		}
+
 		_ = writer4.Abort()
 
 		_ = cache.Close()
@@ -439,7 +460,7 @@ func Test_Metamorphic_Eliminates_Allocation_When_Put_Then_Delete_Same_Key(t *tes
 func Test_Metamorphic_Get_Matches_Scan_When_Querying_Same_Key(t *testing.T) {
 	seedCount := 20
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(5000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -459,9 +480,10 @@ func Test_Metamorphic_Get_Matches_Scan_When_Querying_Same_Key(t *testing.T) {
 			cache := model.Open(modelFile)
 
 			var keys [][]byte
+
 			n := 30 + rng.Intn(30)
 
-			for i := 0; i < n; i++ {
+			for i := range n {
 				writer, _ := cache.BeginWrite()
 
 				if rng.Intn(100) < 80 {
@@ -512,7 +534,8 @@ func Test_Metamorphic_Get_Matches_Scan_When_Querying_Same_Key(t *testing.T) {
 						t.Fatalf("Get/Scan revision mismatch for key %x: Get=%d, Scan=%d",
 							key, getEntry.Revision, scanEntry.Revision)
 					}
-					if string(getEntry.Index) != string(scanEntry.Index) {
+
+					if !bytes.Equal(getEntry.Index, scanEntry.Index) {
 						t.Fatalf("Get/Scan index mismatch for key %x: Get=%x, Scan=%x",
 							key, getEntry.Index, scanEntry.Index)
 					}
@@ -520,7 +543,7 @@ func Test_Metamorphic_Get_Matches_Scan_When_Querying_Same_Key(t *testing.T) {
 			}
 
 			// Also test some keys that were never inserted.
-			for testIndex := 0; testIndex < 10; testIndex++ {
+			for range 10 {
 				randomKey := make([]byte, options.KeySize)
 				_, _ = rng.Read(randomKey)
 
@@ -565,7 +588,7 @@ func Test_Metamorphic_Get_Matches_Scan_When_Querying_Same_Key(t *testing.T) {
 func Test_Metamorphic_ScanPrefix_Matches_Filtered_Scan_When_Using_Same_Prefix(t *testing.T) {
 	seedCount := 20
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(6000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -597,7 +620,7 @@ func Test_Metamorphic_ScanPrefix_Matches_Filtered_Scan_When_Using_Same_Prefix(t 
 			for _, prefix := range prefixGroups {
 				// Insert 3-5 entries per prefix group.
 				entriesInGroup := 3 + rng.Intn(3)
-				for entryIndex := 0; entryIndex < entriesInGroup; entryIndex++ {
+				for range entriesInGroup {
 					key := make([]byte, options.KeySize)
 					copy(key, prefix)
 					// Fill the rest with random bytes.
@@ -644,9 +667,10 @@ func Test_Metamorphic_ScanPrefix_Matches_Filtered_Scan_When_Using_Same_Prefix(t 
 
 				// Manually filter full scan.
 				var want []model.Entry
+
 				for _, entry := range all {
 					if len(entry.Key) >= len(prefix) {
-						if string(entry.Key[:len(prefix)]) == string(prefix) {
+						if bytes.Equal(entry.Key[:len(prefix)], prefix) {
 							want = append(want, entry)
 						}
 					}
@@ -686,7 +710,7 @@ func Test_Metamorphic_ScanPrefix_Matches_Filtered_Scan_When_Using_Same_Prefix(t 
 func Test_Metamorphic_Paginated_Scan_Matches_Slice_When_Using_Offset_And_Limit(t *testing.T) {
 	seedCount := 20
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(7000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -706,7 +730,7 @@ func Test_Metamorphic_Paginated_Scan_Matches_Slice_When_Using_Offset_And_Limit(t
 			cache := model.Open(modelFile)
 
 			n := 15 + rng.Intn(20) // 15-34 entries
-			for entryIndex := 0; entryIndex < n; entryIndex++ {
+			for entryIndex := range n {
 				writer, _ := cache.BeginWrite()
 				key := randValidKey(rng, options.KeySize, nil)
 				idx := randValidIdx(rng, options.IndexSize)
@@ -736,7 +760,7 @@ func Test_Metamorphic_Paginated_Scan_Matches_Slice_When_Using_Offset_And_Limit(t
 			}
 
 			// Add some random test cases.
-			for randomIndex := 0; randomIndex < 10; randomIndex++ {
+			for range 10 {
 				testCases = append(testCases, struct {
 					offset  int
 					limit   int
@@ -768,19 +792,13 @@ func Test_Metamorphic_Paginated_Scan_Matches_Slice_When_Using_Offset_And_Limit(t
 					fullEntries = fullForward
 				}
 
-				start := testCase.offset
-				if start > len(fullEntries) {
-					start = len(fullEntries)
-				}
+				start := min(testCase.offset, len(fullEntries))
 
 				var end int
 				if testCase.limit == 0 {
 					end = len(fullEntries)
 				} else {
-					end = start + testCase.limit
-					if end > len(fullEntries) {
-						end = len(fullEntries)
-					}
+					end = min(start+testCase.limit, len(fullEntries))
 				}
 
 				want := fullEntries[start:end]
@@ -820,7 +838,7 @@ func Test_Metamorphic_Paginated_Scan_Matches_Slice_When_Using_Offset_And_Limit(t
 func Test_Metamorphic_Pages_Concatenate_Correctly_When_Fetched_Sequentially(t *testing.T) {
 	seedCount := 20
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(8000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -840,7 +858,7 @@ func Test_Metamorphic_Pages_Concatenate_Correctly_When_Fetched_Sequentially(t *t
 			cache := model.Open(modelFile)
 
 			n := 20 + rng.Intn(20) // 20-39 entries
-			for entryIndex := 0; entryIndex < n; entryIndex++ {
+			for entryIndex := range n {
 				writer, _ := cache.BeginWrite()
 				key := randValidKey(rng, options.KeySize, nil)
 				idx := randValidIdx(rng, options.IndexSize)
@@ -849,7 +867,7 @@ func Test_Metamorphic_Pages_Concatenate_Correctly_When_Fetched_Sequentially(t *t
 			}
 
 			// Test concatenation for various page sizes.
-			for attempt := 0; attempt < 15; attempt++ {
+			for range 15 {
 				pageSize1 := 1 + rng.Intn(10)
 				pageSize2 := 1 + rng.Intn(10)
 				reverse := rng.Intn(2) == 0
@@ -924,7 +942,7 @@ func Test_Metamorphic_Pages_Concatenate_Correctly_When_Fetched_Sequentially(t *t
 func Test_Metamorphic_Delete_Returns_Correct_Existed_When_Key_State_Varies(t *testing.T) {
 	seedCount := 20
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(9000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -944,12 +962,14 @@ func Test_Metamorphic_Delete_Returns_Correct_Existed_When_Key_State_Varies(t *te
 			cache := model.Open(modelFile)
 
 			var keys [][]byte
-			for entryIndex := 0; entryIndex < 10; entryIndex++ {
+
+			for entryIndex := range 10 {
 				writer, _ := cache.BeginWrite()
 				key := randValidKey(rng, options.KeySize, nil)
 				idx := randValidIdx(rng, options.IndexSize)
 				_ = writer.Put(key, int64(entryIndex), idx)
 				_ = writer.Commit()
+
 				keys = append(keys, key)
 			}
 
@@ -966,19 +986,22 @@ func Test_Metamorphic_Delete_Returns_Correct_Existed_When_Key_State_Varies(t *te
 				forkedCache := model.Open(forkedFile)
 
 				writer, _ := forkedCache.BeginWrite()
+
 				existed, err := writer.Delete(key)
 				if err != nil {
 					t.Fatalf("Delete(%x) failed: %v", key, err)
 				}
+
 				if !existed {
 					t.Fatalf("Delete(%x) returned existed=false but key exists in committed state", key)
 				}
+
 				_ = writer.Abort()
 				_ = forkedCache.Close()
 			}
 
 			// Law 2: Delete of non-existing key returns false.
-			for testIndex := 0; testIndex < 5; testIndex++ {
+			for range 5 {
 				key := make([]byte, options.KeySize)
 				_, _ = rng.Read(key)
 
@@ -989,13 +1012,16 @@ func Test_Metamorphic_Delete_Returns_Correct_Existed_When_Key_State_Varies(t *te
 				}
 
 				writer, _ := cache.BeginWrite()
+
 				existed, err := writer.Delete(key)
 				if err != nil {
 					t.Fatalf("Delete(%x) failed: %v", key, err)
 				}
+
 				if existed {
 					t.Fatalf("Delete(%x) returned existed=true but key does not exist", key)
 				}
+
 				_ = writer.Abort()
 			}
 
@@ -1032,10 +1058,12 @@ func Test_Metamorphic_Delete_Returns_Correct_Existed_When_Key_State_Varies(t *te
 				writer, _ := cache.BeginWrite()
 				idx := randValidIdx(rng, options.IndexSize)
 				_ = writer.Put(newKey, 999, idx)
+
 				existed, _ := writer.Delete(newKey)
 				if !existed {
 					t.Fatalf("Delete after Put in same session returned existed=false")
 				}
+
 				_ = writer.Abort()
 			}
 
@@ -1067,7 +1095,7 @@ func Test_Metamorphic_Delete_Returns_Correct_Existed_When_Key_State_Varies(t *te
 func Test_Metamorphic_State_Persists_When_Cache_Is_Reopened(t *testing.T) {
 	seedCount := 15
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(10000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -1090,15 +1118,17 @@ func Test_Metamorphic_State_Persists_When_Cache_Is_Reopened(t *testing.T) {
 			}
 
 			var allKeys [][]byte
+
 			n := 20 + rng.Intn(30)
 
-			for i := 0; i < n; i++ {
+			for i := range n {
 				writer, _ := cache1.BeginWrite()
 
 				if rng.Intn(100) < 75 {
 					// 75%: Put
 					key := randValidKey(rng, options.KeySize, allKeys)
 					idx := randValidIdx(rng, options.IndexSize)
+
 					err := writer.Put(key, int64(i), idx)
 					if err == nil {
 						allKeys = append(allKeys, key)
@@ -1119,6 +1149,7 @@ func Test_Metamorphic_State_Persists_When_Cache_Is_Reopened(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Scan before close failed: %v", err)
 			}
+
 			beforeSlice := collectSeq(before)
 
 			// Close.
@@ -1132,6 +1163,7 @@ func Test_Metamorphic_State_Persists_When_Cache_Is_Reopened(t *testing.T) {
 			if reerr != nil {
 				t.Fatalf("reopen failed: %v", reerr)
 			}
+
 			defer func() { _ = cache2.Close() }()
 
 			// Snapshot state after reopen.
@@ -1139,6 +1171,7 @@ func Test_Metamorphic_State_Persists_When_Cache_Is_Reopened(t *testing.T) {
 			if err2 != nil {
 				t.Fatalf("Scan after reopen failed: %v", err2)
 			}
+
 			afterSlice := collectSeq(after)
 
 			// Compare.
@@ -1170,7 +1203,7 @@ func Test_Metamorphic_State_Persists_When_Cache_Is_Reopened(t *testing.T) {
 func Test_Metamorphic_Len_Equals_Scan_Count_When_Entries_Exist(t *testing.T) {
 	seedCount := 20
 
-	for i := 0; i < seedCount; i++ {
+	for i := range seedCount {
 		seed := int64(11000 + i)
 
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -1193,12 +1226,12 @@ func Test_Metamorphic_Len_Equals_Scan_Count_When_Entries_Exist(t *testing.T) {
 			// Perform operations and check invariant after each commit.
 			n := 50 + rng.Intn(50)
 
-			for i := 0; i < n; i++ {
+			for i := range n {
 				writer, _ := cache.BeginWrite()
 
 				// Mix of puts and deletes.
 				nOps := 1 + rng.Intn(5)
-				for opIndex := 0; opIndex < nOps; opIndex++ {
+				for opIndex := range nOps {
 					if rng.Intn(100) < 70 {
 						key := randValidKey(rng, options.KeySize, allKeys)
 						idx := randValidIdx(rng, options.IndexSize)
@@ -1255,10 +1288,9 @@ func copyFile(t *testing.T, src string, dst string) {
 func genWriterOps(rng *rand.Rand, options slotcache.Options, keys [][]byte, n int) []writerOp {
 	// We intentionally generate only *valid* keys and indices here.
 	// This keeps the metamorphic relation simple: both sequences should succeed.
-
 	var operations []writerOp
 
-	for i := 0; i < n; i++ {
+	for range n {
 		isPut := rng.Intn(100) < 70
 
 		key := randValidKey(rng, options.KeySize, keys)
@@ -1271,6 +1303,7 @@ func genWriterOps(rng *rand.Rand, options slotcache.Options, keys [][]byte, n in
 				Revision: int64(rng.Intn(1000)),
 				Index:    idx,
 			})
+
 			continue
 		}
 
@@ -1287,17 +1320,20 @@ func randValidKey(rng *rand.Rand, keySize int, keys [][]byte) []byte {
 	// 70%: choose an existing key if available.
 	if len(keys) > 0 && rng.Intn(100) < 70 {
 		key := keys[rng.Intn(len(keys))]
+
 		return append([]byte(nil), key...)
 	}
 
 	key := make([]byte, keySize)
 	_, _ = rng.Read(key)
+
 	return key
 }
 
 func randValidIdx(rng *rand.Rand, indexSize int) []byte {
 	idx := make([]byte, indexSize)
 	_, _ = rng.Read(idx)
+
 	return idx
 }
 
@@ -1312,10 +1348,12 @@ func reduceOps(ops []writerOp) []writerOp {
 
 	// Collect only the final operations in their original order.
 	var reduced []writerOp
+
 	for i, operation := range ops {
 		if lastIdx[string(operation.Key)] != i {
 			continue
 		}
+
 		reduced = append(reduced, operation)
 	}
 
@@ -1326,6 +1364,7 @@ func execModel(t *testing.T, file *model.FileState, operations []writerOp) []slo
 	t.Helper()
 
 	cache := model.Open(file)
+
 	defer func() { _ = cache.Close() }()
 
 	w, err := cache.BeginWrite()
@@ -1339,6 +1378,7 @@ func execModel(t *testing.T, file *model.FileState, operations []writerOp) []slo
 			if err != nil {
 				t.Fatalf("model.Writer.Put failed unexpectedly: %v\nops:\n%s", err, fmtOps(operations))
 			}
+
 			continue
 		}
 
@@ -1368,6 +1408,7 @@ func execReal(t *testing.T, options slotcache.Options, operations []writerOp) []
 	if err != nil {
 		t.Fatalf("slotcache.Open failed unexpectedly: %v", err)
 	}
+
 	defer func() { _ = cache.Close() }()
 
 	w, err := cache.BeginWrite()
@@ -1381,6 +1422,7 @@ func execReal(t *testing.T, options slotcache.Options, operations []writerOp) []
 			if err != nil {
 				t.Fatalf("real.Writer.Put failed unexpectedly: %v\nops:\n%s", err, fmtOps(operations))
 			}
+
 			continue
 		}
 
@@ -1405,9 +1447,14 @@ func execReal(t *testing.T, options slotcache.Options, operations []writerOp) []
 
 func fmtOps(operations []writerOp) string {
 	output := ""
+
+	var outputSb1408 strings.Builder
 	for i, operation := range operations {
-		output += fmt.Sprintf("%3d: %s\n", i, operation.String())
+		outputSb1408.WriteString(fmt.Sprintf("%3d: %s\n", i, operation.String()))
 	}
+
+	output += outputSb1408.String()
+
 	return output
 }
 
@@ -1423,5 +1470,6 @@ func (operation writerOp) String() string {
 	if operation.IsPut {
 		return fmt.Sprintf("Put(%x, revision=%d, index=%x)", operation.Key, operation.Revision, operation.Index)
 	}
+
 	return fmt.Sprintf("Delete(%x)", operation.Key)
 }
