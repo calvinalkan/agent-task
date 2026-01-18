@@ -29,7 +29,7 @@
 
 ### P1 — Spec completeness (durability + crash semantics)
 
-- [ ] Implement `WritebackMode`:
+- [x] Implement `WritebackMode` ✅ (2026-01-18):
   - `WritebackNone`: no `msync`
   - `WritebackSync`: `msync` barriers per spec (header odd → data → header even)
   - ensure `msync` ranges are page-aligned (macOS requirement)
@@ -53,5 +53,7 @@
 
 - [x] `make test` passes (includes the fuzz regression `FuzzSpec_GenerativeUsage/*`).
 - [x] `make lint` passes.
-- [ ] `go test ./pkg/slotcache -fuzz=FuzzSpec_GenerativeUsage -fuzztime=30s` runs without failures.
-- [ ] `go test ./pkg/slotcache -fuzz=FuzzSpec_OpenAndReadRobustness -fuzztime=30s` runs without panics/hangs.
+- [x] `go test ./pkg/slotcache -fuzz=FuzzSpec_GenerativeUsage -fuzztime=30s` runs without failures. ✅ (2026-01-18)
+- [x] `go test ./pkg/slotcache -fuzz=FuzzSpec_OpenAndReadRobustness -fuzztime=30s` runs without panics/hangs. ✅ (2026-01-18)
+- [x] `go test ./pkg/slotcache -fuzz=FuzzBehavior_ModelVsReal -fuzztime=30s` runs without failures. ✅ (2026-01-18)
+- [x] `go test ./pkg/slotcache -fuzz=FuzzBehavior_ModelVsReal_OrderedKeys -fuzztime=30s` runs without failures. ✅ (2026-01-18)

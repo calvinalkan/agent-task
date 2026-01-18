@@ -9,6 +9,8 @@ require (
 	github.com/tailscale/hujson v0.0.0-20250605163823-992244df8c5a
 )
 
+require golang.org/x/sys v0.40.0 // indirect
+
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

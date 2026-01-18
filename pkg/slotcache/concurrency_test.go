@@ -284,3 +284,140 @@ func Test_BeginWrite_Returns_ErrBusy_When_Another_Process_Holds_Writer(t *testin
 		t.Fatalf("subprocess failed: %v", runErr)
 	}
 }
+
+func Test_WritebackSync_Commits_Successfully_When_Mode_Is_Enabled(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == osWindows {
+		t.Skip("requires Unix syscalls")
+	}
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "writeback_sync.slc")
+
+	// Create cache with WritebackSync mode
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		SlotCapacity: 64,
+		Writeback:    slotcache.WritebackSync,
+	}
+
+	cache, err := slotcache.Open(opts)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	defer func() { _ = cache.Close() }()
+
+	// Write some data
+	writer, err := cache.BeginWrite()
+	if err != nil {
+		t.Fatalf("BeginWrite: %v", err)
+	}
+
+	key := []byte("testkey1")
+	index := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+
+	putErr := writer.Put(key, 12345, index)
+	if putErr != nil {
+		_ = writer.Close()
+
+		t.Fatalf("Put: %v", putErr)
+	}
+
+	// Commit should trigger msync barriers
+	commitErr := writer.Commit()
+	if commitErr != nil {
+		// ErrWriteback is acceptable if msync fails, but commit should complete
+		if !errors.Is(commitErr, slotcache.ErrWriteback) {
+			_ = writer.Close()
+
+			t.Fatalf("Commit: %v", commitErr)
+		}
+	}
+
+	_ = writer.Close()
+
+	// Verify data is readable
+	entry, found, getErr := cache.Get(key)
+	if getErr != nil {
+		t.Fatalf("Get: %v", getErr)
+	}
+
+	if !found {
+		t.Fatal("Get: expected to find key after commit")
+	}
+
+	if entry.Revision != 12345 {
+		t.Errorf("Get: revision = %d, want 12345", entry.Revision)
+	}
+}
+
+func Test_WritebackNone_Commits_Without_Msync_When_Mode_Is_Default(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == osWindows {
+		t.Skip("requires Unix syscalls")
+	}
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "writeback_none.slc")
+
+	// Create cache with default (WritebackNone) mode
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		SlotCapacity: 64,
+		// Writeback not set = WritebackNone
+	}
+
+	cache, err := slotcache.Open(opts)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	defer func() { _ = cache.Close() }()
+
+	// Write some data
+	writer, err := cache.BeginWrite()
+	if err != nil {
+		t.Fatalf("BeginWrite: %v", err)
+	}
+
+	key := []byte("testkey2")
+	index := []byte{0xCA, 0xFE, 0xBA, 0xBE}
+
+	putErr := writer.Put(key, 67890, index)
+	if putErr != nil {
+		_ = writer.Close()
+
+		t.Fatalf("Put: %v", putErr)
+	}
+
+	// Commit should NOT return ErrWriteback (no msync is called)
+	commitErr := writer.Commit()
+	if commitErr != nil {
+		_ = writer.Close()
+
+		t.Fatalf("Commit with WritebackNone should never return error, got: %v", commitErr)
+	}
+
+	_ = writer.Close()
+
+	// Verify data is readable
+	entry, found, getErr := cache.Get(key)
+	if getErr != nil {
+		t.Fatalf("Get: %v", getErr)
+	}
+
+	if !found {
+		t.Fatal("Get: expected to find key after commit")
+	}
+
+	if entry.Revision != 67890 {
+		t.Errorf("Get: revision = %d, want 67890", entry.Revision)
+	}
+}

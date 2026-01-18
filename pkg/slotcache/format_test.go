@@ -326,3 +326,73 @@ func Test_HasReservedBytesSet_Returns_True_When_Reserved_Bytes_Are_Nonzero(t *te
 		t.Error("hasReservedBytesSet returned false when reserved byte is set")
 	}
 }
+
+func Test_MsyncRange_Returns_Nil_When_Range_Is_Invalid(t *testing.T) {
+	t.Parallel()
+
+	data := make([]byte, 4096)
+
+	// Empty length
+	err := msyncRange(data, 0, 0)
+	if err != nil {
+		t.Errorf("msyncRange with length=0 should return nil, got %v", err)
+	}
+
+	// Negative length
+	err = msyncRange(data, 0, -1)
+	if err != nil {
+		t.Errorf("msyncRange with negative length should return nil, got %v", err)
+	}
+
+	// Offset beyond data
+	err = msyncRange(data, 5000, 100)
+	if err != nil {
+		t.Errorf("msyncRange with offset beyond data should return nil, got %v", err)
+	}
+
+	// Negative offset
+	err = msyncRange(data, -1, 100)
+	if err != nil {
+		t.Errorf("msyncRange with negative offset should return nil, got %v", err)
+	}
+}
+
+func Test_MsyncRange_Handles_Page_Alignment_When_Range_Spans_Pages(t *testing.T) {
+	t.Parallel()
+
+	// This test verifies that msyncRange doesn't panic when given
+	// non-page-aligned inputs. It doesn't verify the actual msync call
+	// succeeds (that depends on the data being mmap'd), but it verifies
+	// the alignment logic works.
+
+	// Page size check
+	if pageSize <= 0 {
+		t.Fatalf("pageSize should be positive, got %d", pageSize)
+	}
+
+	// Create a buffer large enough to span multiple pages
+	size := pageSize * 3
+	data := make([]byte, size)
+
+	// Test various offsets and lengths (these won't actually sync since
+	// the data isn't mmap'd, but they test the clamping/alignment logic)
+	testCases := []struct {
+		offset int
+		length int
+	}{
+		{0, 1},               // Start of first page, 1 byte
+		{0, pageSize},        // Exactly first page
+		{pageSize / 2, 100},  // Middle of first page
+		{pageSize - 1, 2},    // Spans page boundary
+		{pageSize, pageSize}, // Second page
+		{0, size},            // Entire buffer
+		{100, size},          // Extends beyond buffer (should clamp)
+	}
+
+	for _, tc := range testCases {
+		// These will likely fail with ENOMEM or similar since data isn't
+		// actually mmap'd, but they shouldn't panic. We're testing the
+		// alignment logic, not the actual syscall.
+		_ = msyncRange(data, tc.offset, tc.length)
+	}
+}

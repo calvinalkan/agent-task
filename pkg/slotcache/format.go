@@ -2,7 +2,10 @@ package slotcache
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
+
+	"golang.org/x/sys/unix"
 )
 
 // SLC1 file format constants.
@@ -408,4 +411,41 @@ func getInt64LE(buf []byte) int64 {
 		int64(buf[5])<<40 |
 		int64(buf[6])<<48 |
 		int64(buf[7])<<56
+}
+
+// pageSize is the system page size, used for aligning msync ranges.
+// macOS requires page-aligned ranges for msync.
+var pageSize = unix.Getpagesize()
+
+// msyncRange performs a synchronous msync on the given byte range.
+// The range is automatically page-aligned to satisfy macOS requirements.
+// Returns nil if the range is empty or invalid.
+func msyncRange(data []byte, offset, length int) error {
+	if length <= 0 || offset < 0 || offset >= len(data) {
+		return nil
+	}
+
+	// Clamp to data bounds.
+	if offset+length > len(data) {
+		length = len(data) - offset
+	}
+
+	// Page-align: round offset down, round end up.
+	alignedStart := (offset / pageSize) * pageSize
+	end := offset + length
+	alignedEnd := min(
+		// Clamp alignedEnd to data bounds.
+		((end+pageSize-1)/pageSize)*pageSize, len(data))
+
+	alignedLen := alignedEnd - alignedStart
+	if alignedLen <= 0 {
+		return nil
+	}
+
+	err := unix.Msync(data[alignedStart:alignedStart+alignedLen], unix.MS_SYNC)
+	if err != nil {
+		return fmt.Errorf("msync: %w", err)
+	}
+
+	return nil
 }

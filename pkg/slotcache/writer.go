@@ -145,13 +145,29 @@ func (w *writer) Commit() error {
 		}
 	}
 
+	// Track msync failures for WritebackSync mode.
+	var msyncFailed bool
+
+	syncMode := w.cache.writeback == WritebackSync
+
 	// Now apply changes under the registry lock.
 	w.cache.registry.mu.Lock()
 
-	// Publish odd generation.
+	// Step 1: Publish odd generation.
 	oldGen := w.cache.readGeneration()
 	newOddGen := oldGen + 1
 	binary.LittleEndian.PutUint64(w.cache.data[offGeneration:], newOddGen)
+
+	// Step 2 (WritebackSync): msync header to ensure odd generation is on disk
+	// before data modifications.
+	if syncMode {
+		err := msyncRange(w.cache.data, 0, slc1HeaderSize)
+		if err != nil {
+			msyncFailed = true
+		}
+	}
+
+	// Step 3: Apply buffered ops to slots, buckets, and header counters.
 
 	// Apply updates.
 	for _, op := range updates {
@@ -189,17 +205,41 @@ func (w *writer) Commit() error {
 	// bucket_used must equal live_count.
 	binary.LittleEndian.PutUint64(w.cache.data[offBucketUsed:], newLiveCount)
 
-	// Recompute header CRC.
+	// Step 4: Recompute header CRC.
 	crc := computeHeaderCRC(w.cache.data[:slc1HeaderSize])
 	binary.LittleEndian.PutUint32(w.cache.data[offHeaderCRC32C:], crc)
 
-	// Publish even generation.
+	// Step 5 (WritebackSync): msync all modified data (slots + buckets + header).
+	// This ensures data is on disk before we publish the even generation.
+	if syncMode {
+		// Sync entire file to cover all modifications.
+		err := msyncRange(w.cache.data, 0, len(w.cache.data))
+		if err != nil {
+			msyncFailed = true
+		}
+	}
+
+	// Step 6: Publish even generation.
 	newEvenGen := newOddGen + 1
 	binary.LittleEndian.PutUint64(w.cache.data[offGeneration:], newEvenGen)
+
+	// Step 7 (WritebackSync): msync header to ensure even generation is on disk.
+	if syncMode {
+		err := msyncRange(w.cache.data, 0, slc1HeaderSize)
+		if err != nil {
+			msyncFailed = true
+		}
+	}
 
 	w.cache.registry.mu.Unlock()
 
 	w.closeByCommit()
+
+	// If any msync failed, data is visible via MAP_SHARED but durability
+	// is not guaranteed. Return ErrWriteback per spec.
+	if msyncFailed {
+		return ErrWriteback
+	}
 
 	return nil
 }

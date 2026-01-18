@@ -96,6 +96,7 @@ type cache struct {
 	activeWriter   *writer
 	disableLocking bool
 	path           string
+	writeback      WritebackMode
 }
 
 // Open creates or opens a cache file with the given options.
@@ -499,6 +500,7 @@ func mmapAndCreateCache(fd int, size int64, header *slc1Header, opts Options) (*
 		isClosed:       false,
 		disableLocking: opts.DisableLocking,
 		path:           opts.Path,
+		writeback:      opts.Writeback,
 	}, nil
 }
 
