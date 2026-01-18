@@ -279,6 +279,164 @@ func Test_Seqlock_CrossProcess_Get_Does_Not_Observe_Torn_Updates_When_Writer_Com
 	}
 }
 
+func Test_Open_Does_Not_Return_ErrCorrupt_When_Writer_Commits_Concurrently(t *testing.T) {
+	t.Parallel()
+
+	// Parent/child split: the child loops commits; the parent loops Open/Close.
+	if os.Getenv("TK_SLOTCACHE_OPEN_STRESS_HELPER") == "1" {
+		runSeqlockWriterHelper(t)
+
+		return
+	}
+
+	duration := *flagConcurrencyStress
+	if testing.Short() {
+		duration = 250 * time.Millisecond
+	}
+
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "openstress.slc")
+	stopPath := filepath.Join(tmpDir, "STOP")
+	readyPath := filepath.Join(tmpDir, "READY")
+
+	opts := slotcache.Options{
+		Path:         cachePath,
+		KeySize:      8,
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: 64,
+	}
+
+	// Ensure the file exists before starting the helper.
+	c0, openErr := slotcache.Open(opts)
+	if openErr != nil {
+		t.Fatalf("Open(create) failed: %v", openErr)
+	}
+
+	closeErr := c0.Close()
+	if closeErr != nil {
+		t.Fatalf("Close(create) failed: %v", closeErr)
+	}
+
+	ctx := t.Context()
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, duration+3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(timeoutCtx, os.Args[0],
+		"-test.run=^Test_Open_Does_Not_Return_ErrCorrupt_When_Writer_Commits_Concurrently$", "-test.v")
+
+	cmd.Env = append(os.Environ(),
+		"TK_SLOTCACHE_OPEN_STRESS_HELPER=1",
+		"TK_SLOTCACHE_PATH="+cachePath,
+		"TK_SLOTCACHE_STOP="+stopPath,
+		"TK_SLOTCACHE_READY="+readyPath,
+		// Slow down commits a bit so Open has a better chance to observe odd-generation windows.
+		"TK_SLOTCACHE_WRITEBACK=sync",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	startErr := cmd.Start()
+	if startErr != nil {
+		t.Fatalf("start helper: %v", startErr)
+	}
+
+	waitForFile(t, readyPath, 2*time.Second)
+
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		c, openErr := slotcache.Open(opts)
+		if openErr == nil {
+			closeErr := c.Close()
+			if closeErr != nil {
+				t.Fatalf("Close(opened) failed unexpectedly: %v", closeErr)
+			}
+
+			continue
+		}
+
+		if errors.Is(openErr, slotcache.ErrBusy) {
+			continue
+		}
+
+		// Under active concurrent commits, Open must not misclassify transient state as corrupt.
+		if errors.Is(openErr, slotcache.ErrCorrupt) {
+			t.Fatalf("Open() returned ErrCorrupt while writer is committing; got %v", openErr)
+		}
+
+		t.Fatalf("Open() returned unexpected error while writer is committing: %v", openErr)
+	}
+
+	// Stop helper and wait for clean exit.
+	touchFile(t, stopPath)
+
+	waitErr := cmd.Wait()
+
+	if timeoutCtx.Err() == context.DeadlineExceeded {
+		t.Fatal("helper timed out")
+	}
+
+	if waitErr != nil {
+		t.Fatalf("helper failed: %v", waitErr)
+	}
+}
+
+func Test_Reads_Return_ErrBusy_When_Generation_Is_Odd(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "oddgen.slc")
+
+	opts := slotcache.Options{
+		Path:           cachePath,
+		KeySize:        8,
+		IndexSize:      4,
+		UserVersion:    1,
+		SlotCapacity:   64,
+		DisableLocking: true,
+	}
+
+	cache, openErr := slotcache.Open(opts)
+	if openErr != nil {
+		t.Fatalf("Open failed: %v", openErr)
+	}
+
+	defer func() { _ = cache.Close() }()
+
+	w, beginErr := cache.BeginWrite()
+	if beginErr != nil {
+		t.Fatalf("BeginWrite failed: %v", beginErr)
+	}
+
+	putErr := w.Put(seqlockKey, seqlockRevA, seqlockIndexA)
+	if putErr != nil {
+		t.Fatalf("Put failed: %v", putErr)
+	}
+
+	commitErr := w.Commit()
+	if commitErr != nil {
+		t.Fatalf("Commit failed: %v", commitErr)
+	}
+
+	_ = w.Close()
+
+	// Force an "in-progress" state: odd generation.
+	mutateHeader(t, cachePath, func(hdr []byte) {
+		binary.LittleEndian.PutUint64(hdr[offGeneration:offGeneration+8], 1)
+	})
+
+	_, lenErr := cache.Len()
+	if !errors.Is(lenErr, slotcache.ErrBusy) {
+		t.Fatalf("Len() must return ErrBusy when generation is odd; got %v", lenErr)
+	}
+
+	_, _, getErr := cache.Get(seqlockKey)
+	if !errors.Is(getErr, slotcache.ErrBusy) {
+		t.Fatalf("Get() must return ErrBusy when generation is odd; got %v", getErr)
+	}
+}
+
 func runSeqlockWriterHelper(t *testing.T) {
 	t.Helper()
 
@@ -296,6 +454,10 @@ func runSeqlockWriterHelper(t *testing.T) {
 		IndexSize:    4,
 		UserVersion:  1,
 		SlotCapacity: 64,
+	}
+
+	if os.Getenv("TK_SLOTCACHE_WRITEBACK") == "sync" {
+		opts.Writeback = slotcache.WritebackSync
 	}
 
 	cache, err := slotcache.Open(opts)
