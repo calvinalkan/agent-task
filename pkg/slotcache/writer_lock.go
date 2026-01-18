@@ -41,3 +41,10 @@ func releaseWriterLock(lockFile *os.File) {
 	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 	_ = lockFile.Close()
 }
+
+// tryAcquireWriterLock attempts to acquire the lock non-blocking.
+// Returns the lock file on success, or an error on contention/failure.
+// This is used during Open to detect crashed writers.
+func tryAcquireWriterLock(cachePath string) (*os.File, error) {
+	return acquireWriterLock(cachePath)
+}

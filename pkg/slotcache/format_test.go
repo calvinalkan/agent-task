@@ -223,7 +223,7 @@ func Test_EncodeSlot_Aligns_Revision_To_EightBytes_When_KeySize_Varies(t *testin
 func Test_HeaderCRC_Validates_Correctly_When_Header_Is_Fresh_Or_Corrupted(t *testing.T) {
 	t.Parallel()
 
-	h := newHeader(16, 8, 1000, 1, 0.75)
+	h := newHeader(16, 8, 1000, 1, 0.75, false)
 	buf := encodeHeader(&h)
 
 	// Validate CRC
@@ -241,7 +241,7 @@ func Test_HeaderCRC_Validates_Correctly_When_Header_Is_Fresh_Or_Corrupted(t *tes
 func Test_HeaderCRC_Remains_Unchanged_When_Generation_Changes(t *testing.T) {
 	t.Parallel()
 
-	h := newHeader(16, 8, 1000, 1, 0.75)
+	h := newHeader(16, 8, 1000, 1, 0.75, false)
 
 	// Encode with generation=0
 	h.Generation = 0
@@ -313,7 +313,7 @@ func Test_HasReservedBytesSet_Returns_True_When_Reserved_Bytes_Are_Nonzero(t *te
 	t.Parallel()
 
 	// Clean header
-	h := newHeader(16, 0, 100, 1, 0.75)
+	h := newHeader(16, 0, 100, 1, 0.75, false)
 
 	buf := encodeHeader(&h)
 	if hasReservedBytesSet(buf) {

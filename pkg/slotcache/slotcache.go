@@ -2,12 +2,15 @@ package slotcache
 
 import (
 	"bytes"
-	"encoding/gob"
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
+	"syscall"
 )
 
 // Compile-time interface satisfaction checks.
@@ -16,254 +19,493 @@ var (
 	_ Writer = (*writer)(nil)
 )
 
-// slotRecord represents a single slot in the cache.
-type slotRecord struct {
-	key      string
-	isLive   bool
-	revision int64
-	index    string
+// Default load factor for bucket sizing.
+const defaultLoadFactor = 0.5
+
+// fileIdentity uniquely identifies a file by device and inode.
+type fileIdentity struct {
+	dev uint64
+	ino uint64
 }
 
-// persistedSlot is the gob-serializable version of slotRecord.
-type persistedSlot struct {
-	Key      string
-	IsLive   bool
-	Revision int64
-	Index    string
+// fileRegistryEntry tracks per-file state for in-process coordination.
+type fileRegistryEntry struct {
+	mu           sync.RWMutex // protects mmap reads vs writes
+	writerActive bool         // in-process writer guard
 }
 
-// persistedState is the gob-serializable representation of the cache file.
-type persistedState struct {
-	KeySize      int
-	IndexSize    int
-	SlotCapacity uint64
-	UserVersion  uint64
-	OrderedKeys  bool
-	Slots        []persistedSlot
+// globalRegistry maps file identities to their entries.
+var globalRegistry sync.Map // map[fileIdentity]*fileRegistryEntry
+
+// getFileIdentity returns the device and inode for a file.
+func getFileIdentity(fd int) (fileIdentity, error) {
+	var stat syscall.Stat_t
+
+	err := syscall.Fstat(fd, &stat)
+	if err != nil {
+		return fileIdentity{}, err
+	}
+
+	return fileIdentity{dev: stat.Dev, ino: stat.Ino}, nil
 }
 
-// fileState holds the persisted state (shared across handles for the same path).
-type fileState struct {
-	path         string
-	keySize      int
-	indexSize    int
-	slotCapacity uint64
-	userVersion  uint64
-	orderedKeys  bool
-	slots        []slotRecord
-	writerActive bool // in-process writer guard (per file, not per handle)
+// getOrCreateRegistryEntry gets or creates a registry entry for the given identity.
+func getOrCreateRegistryEntry(id fileIdentity) *fileRegistryEntry {
+	if val, ok := globalRegistry.Load(id); ok {
+		if entry, typeOk := val.(*fileRegistryEntry); typeOk {
+			return entry
+		}
+	}
+
+	entry := &fileRegistryEntry{}
+	actual, _ := globalRegistry.LoadOrStore(id, entry)
+
+	if resultEntry, typeOk := actual.(*fileRegistryEntry); typeOk {
+		return resultEntry
+	}
+
+	// Fallback: should never happen if we're consistent.
+	return entry
 }
 
 // cache is the concrete implementation of Cache.
 type cache struct {
-	file           *fileState
+	mu sync.Mutex // protects cache-level state (closed, activeWriter)
+
+	fd       int    // file descriptor
+	data     []byte // mmap'd file data
+	fileSize int64  // total file size
+
+	// Cached immutable config from header
+	keySize       uint32
+	indexSize     uint32
+	slotSize      uint32
+	slotCapacity  uint64
+	userVersion   uint64
+	slotsOffset   uint64
+	bucketsOffset uint64
+	bucketCount   uint64
+	orderedKeys   bool
+
+	// File identity for registry coordination
+	identity fileIdentity
+	registry *fileRegistryEntry
+
+	// State
 	isClosed       bool
 	activeWriter   *writer
 	disableLocking bool
-}
-
-// globalMu protects all slotcache operations.
-// This is intentionally coarse-grained for Phase 1 correctness.
-var globalMu sync.Mutex
-
-// fileRegistry maps paths to their file states (simulates file persistence).
-var fileRegistry sync.Map
-
-// saveState persists the file state to disk using gob encoding.
-func saveState(path string, state *fileState) error {
-	// Create parent directories if needed.
-	dir := filepath.Dir(path)
-	if dir != "" && dir != "." {
-		mkdirErr := os.MkdirAll(dir, 0o750)
-		if mkdirErr != nil {
-			return fmt.Errorf("create directory: %w", mkdirErr)
-		}
-	}
-
-	// Write to a temp file first, then rename for atomicity.
-	tmpPath := path + ".tmp"
-
-	tmpFile, createErr := os.Create(tmpPath)
-	if createErr != nil {
-		return fmt.Errorf("create temp file: %w", createErr)
-	}
-
-	// Convert to persisted format.
-	ps := persistedState{
-		KeySize:      state.keySize,
-		IndexSize:    state.indexSize,
-		SlotCapacity: state.slotCapacity,
-		UserVersion:  state.userVersion,
-		OrderedKeys:  state.orderedKeys,
-		Slots:        make([]persistedSlot, len(state.slots)),
-	}
-
-	for i, slot := range state.slots {
-		ps.Slots[i] = persistedSlot{
-			Key:      slot.key,
-			IsLive:   slot.isLive,
-			Revision: slot.revision,
-			Index:    slot.index,
-		}
-	}
-
-	enc := gob.NewEncoder(tmpFile)
-
-	encodeErr := enc.Encode(ps)
-	if encodeErr != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-
-		return fmt.Errorf("encode state: %w", encodeErr)
-	}
-
-	closeErr := tmpFile.Close()
-	if closeErr != nil {
-		_ = os.Remove(tmpPath)
-
-		return fmt.Errorf("close temp file: %w", closeErr)
-	}
-
-	// Atomic rename.
-	renameErr := os.Rename(tmpPath, path)
-	if renameErr != nil {
-		return fmt.Errorf("rename temp file: %w", renameErr)
-	}
-
-	return nil
-}
-
-// loadState reads the file state from disk.
-func loadState(path string) (*fileState, error) {
-	file, openErr := os.Open(path)
-	if openErr != nil {
-		return nil, fmt.Errorf("open file: %w", openErr)
-	}
-
-	defer func() { _ = file.Close() }()
-
-	var ps persistedState
-
-	dec := gob.NewDecoder(file)
-
-	decodeErr := dec.Decode(&ps)
-	if decodeErr != nil {
-		return nil, fmt.Errorf("decode state: %w", decodeErr)
-	}
-
-	state := &fileState{
-		path:         path,
-		keySize:      ps.KeySize,
-		indexSize:    ps.IndexSize,
-		slotCapacity: ps.SlotCapacity,
-		userVersion:  ps.UserVersion,
-		orderedKeys:  ps.OrderedKeys,
-		slots:        make([]slotRecord, len(ps.Slots)),
-	}
-
-	for i, slot := range ps.Slots {
-		state.slots[i] = slotRecord{
-			key:      slot.Key,
-			isLive:   slot.IsLive,
-			revision: slot.Revision,
-			index:    slot.Index,
-		}
-	}
-
-	return state, nil
-}
-
-// getOrCreateFile returns the file state for a path, creating it if necessary.
-// Must be called with globalMu held.
-func getOrCreateFile(opts Options) (*fileState, error) {
-	// Try in-memory registry first (for open handles).
-	if val, ok := fileRegistry.Load(opts.Path); ok {
-		existing, ok := val.(*fileState)
-		if !ok {
-			return nil, ErrCorrupt
-		}
-
-		// Validate compatibility.
-		if existing.keySize != opts.KeySize ||
-			existing.indexSize != opts.IndexSize ||
-			existing.slotCapacity != opts.SlotCapacity ||
-			existing.userVersion != opts.UserVersion ||
-			existing.orderedKeys != opts.OrderedKeys {
-			return nil, ErrIncompatible
-		}
-
-		return existing, nil
-	}
-
-	// Try loading from disk.
-	_, statErr := os.Stat(opts.Path)
-	if statErr == nil {
-		state, err := loadState(opts.Path)
-		if err != nil {
-			return nil, ErrCorrupt
-		}
-
-		// Validate compatibility.
-		if state.keySize != opts.KeySize ||
-			state.indexSize != opts.IndexSize ||
-			state.slotCapacity != opts.SlotCapacity ||
-			state.userVersion != opts.UserVersion ||
-			state.orderedKeys != opts.OrderedKeys {
-			return nil, ErrIncompatible
-		}
-
-		state.path = opts.Path
-		fileRegistry.Store(opts.Path, state)
-
-		return state, nil
-	}
-
-	// Create new.
-	state := &fileState{
-		path:         opts.Path,
-		keySize:      opts.KeySize,
-		indexSize:    opts.IndexSize,
-		slotCapacity: opts.SlotCapacity,
-		userVersion:  opts.UserVersion,
-		orderedKeys:  opts.OrderedKeys,
-	}
-
-	// Persist to disk.
-	err := saveState(opts.Path, state)
-	if err != nil {
-		return nil, err
-	}
-
-	fileRegistry.Store(opts.Path, state)
-
-	return state, nil
+	path           string
 }
 
 // Open creates or opens a cache file with the given options.
 func Open(opts Options) (Cache, error) {
-	if opts.KeySize <= 0 || opts.IndexSize < 0 || opts.SlotCapacity == 0 {
+	// Validate options.
+	if opts.Path == "" {
 		return nil, ErrInvalidInput
 	}
 
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	if opts.KeySize < 1 {
+		return nil, ErrInvalidInput
+	}
 
-	file, err := getOrCreateFile(opts)
+	if opts.IndexSize < 0 {
+		return nil, ErrInvalidInput
+	}
+
+	if opts.SlotCapacity < 1 {
+		return nil, ErrInvalidInput
+	}
+
+	const maxSlotCapacity = uint64(0xFFFFFFFFFFFFFFFE)
+	if opts.SlotCapacity > maxSlotCapacity {
+		return nil, ErrInvalidInput
+	}
+
+	// Try to open existing file.
+	fd, err := syscall.Open(opts.Path, syscall.O_RDWR, 0)
 	if err != nil {
+		if !errors.Is(err, syscall.ENOENT) {
+			return nil, fmt.Errorf("open file: %w", err)
+		}
+		// File doesn't exist - create it.
+		return createNewCache(opts)
+	}
+
+	// File exists - check size and validate.
+	var stat syscall.Stat_t
+
+	statErr := syscall.Fstat(fd, &stat)
+	if statErr != nil {
+		_ = syscall.Close(fd)
+
+		return nil, fmt.Errorf("stat file: %w", statErr)
+	}
+
+	size := stat.Size
+	if size == 0 {
+		// Empty file - initialize in place.
+		_ = syscall.Close(fd)
+
+		return initializeEmptyFile(opts)
+	}
+
+	if size < slc1HeaderSize {
+		_ = syscall.Close(fd)
+
+		return nil, ErrCorrupt
+	}
+
+	// Read and validate header.
+	headerBuf := make([]byte, slc1HeaderSize)
+
+	n, err := syscall.Pread(fd, headerBuf, 0)
+	if err != nil || n != slc1HeaderSize {
+		_ = syscall.Close(fd)
+
+		return nil, ErrCorrupt
+	}
+
+	c, err := validateAndOpenExisting(fd, headerBuf, size, opts)
+	if err != nil {
+		_ = syscall.Close(fd)
+
 		return nil, err
 	}
 
+	return c, nil
+}
+
+// createNewCache creates a new cache file using temp + rename.
+func createNewCache(opts Options) (Cache, error) {
+	dir := filepath.Dir(opts.Path)
+	if dir == "" {
+		dir = "."
+	}
+
+	// Create parent directories if needed.
+	mkdirErr := os.MkdirAll(dir, 0o750)
+	if mkdirErr != nil {
+		return nil, fmt.Errorf("create directory: %w", mkdirErr)
+	}
+
+	// Create temp file with random suffix.
+	randBytes := make([]byte, 8)
+	_, _ = rand.Read(randBytes) // Ignore error; best-effort randomness.
+	tmpPath := fmt.Sprintf("%s.tmp.%x", opts.Path, randBytes)
+
+	fd, createErr := syscall.Open(tmpPath, syscall.O_RDWR|syscall.O_CREAT|syscall.O_EXCL, 0o600)
+	if createErr != nil {
+		return nil, fmt.Errorf("create temp file: %w", createErr)
+	}
+
+	// Calculate file size.
+	header := newHeader(
+		safeIntToUint32(opts.KeySize),
+		safeIntToUint32(opts.IndexSize),
+		opts.SlotCapacity,
+		opts.UserVersion,
+		defaultLoadFactor,
+		opts.OrderedKeys,
+	)
+	fileSize := safeUint64ToInt64(header.BucketsOffset + header.BucketCount*16)
+
+	// Truncate to full size (sparse file).
+	truncErr := syscall.Ftruncate(fd, fileSize)
+	if truncErr != nil {
+		_ = syscall.Close(fd)
+		_ = syscall.Unlink(tmpPath)
+
+		return nil, fmt.Errorf("ftruncate: %w", truncErr)
+	}
+
+	// Write header.
+	headerBuf := encodeHeader(&header)
+
+	_, writeErr := syscall.Pwrite(fd, headerBuf, 0)
+	if writeErr != nil {
+		_ = syscall.Close(fd)
+		_ = syscall.Unlink(tmpPath)
+
+		return nil, fmt.Errorf("write header: %w", writeErr)
+	}
+
+	// Sync header.
+	syncErr := syscall.Fsync(fd)
+	if syncErr != nil {
+		_ = syscall.Close(fd)
+		_ = syscall.Unlink(tmpPath)
+
+		return nil, fmt.Errorf("fsync: %w", syncErr)
+	}
+
+	_ = syscall.Close(fd)
+
+	// Atomic rename.
+	renameErr := syscall.Rename(tmpPath, opts.Path)
+	if renameErr != nil {
+		_ = syscall.Unlink(tmpPath)
+
+		return nil, fmt.Errorf("rename: %w", renameErr)
+	}
+
+	// Now open the renamed file.
+	fd, openErr := syscall.Open(opts.Path, syscall.O_RDWR, 0)
+	if openErr != nil {
+		return nil, fmt.Errorf("open after rename: %w", openErr)
+	}
+
+	return mmapAndCreateCache(fd, fileSize, &header, opts)
+}
+
+// initializeEmptyFile initializes a 0-byte file in place.
+func initializeEmptyFile(opts Options) (Cache, error) {
+	fd, openErr := syscall.Open(opts.Path, syscall.O_RDWR, 0)
+	if openErr != nil {
+		return nil, fmt.Errorf("open empty file: %w", openErr)
+	}
+
+	header := newHeader(
+		safeIntToUint32(opts.KeySize),
+		safeIntToUint32(opts.IndexSize),
+		opts.SlotCapacity,
+		opts.UserVersion,
+		defaultLoadFactor,
+		opts.OrderedKeys,
+	)
+	fileSize := safeUint64ToInt64(header.BucketsOffset + header.BucketCount*16)
+
+	truncErr := syscall.Ftruncate(fd, fileSize)
+	if truncErr != nil {
+		_ = syscall.Close(fd)
+
+		return nil, fmt.Errorf("ftruncate: %w", truncErr)
+	}
+
+	headerBuf := encodeHeader(&header)
+
+	_, writeErr := syscall.Pwrite(fd, headerBuf, 0)
+	if writeErr != nil {
+		_ = syscall.Close(fd)
+
+		return nil, fmt.Errorf("write header: %w", writeErr)
+	}
+
+	syncErr := syscall.Fsync(fd)
+	if syncErr != nil {
+		_ = syscall.Close(fd)
+
+		return nil, fmt.Errorf("fsync: %w", syncErr)
+	}
+
+	return mmapAndCreateCache(fd, fileSize, &header, opts)
+}
+
+// validateAndOpenExisting validates header and opens existing file.
+func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options) (*cache, error) {
+	// Check magic.
+	if !bytes.Equal(headerBuf[offMagic:offMagic+4], []byte("SLC1")) {
+		return nil, ErrIncompatible
+	}
+
+	// Check version.
+	version := binary.LittleEndian.Uint32(headerBuf[offVersion:])
+	if version != slc1Version {
+		return nil, ErrIncompatible
+	}
+
+	// Check header size.
+	headerSize := binary.LittleEndian.Uint32(headerBuf[offHeaderSize:])
+	if headerSize != slc1HeaderSize {
+		return nil, ErrIncompatible
+	}
+
+	// Check hash algorithm.
+	hashAlg := binary.LittleEndian.Uint32(headerBuf[offHashAlg:])
+	if hashAlg != slc1HashAlgFNV1a64 {
+		return nil, ErrIncompatible
+	}
+
+	// Check for unknown flags.
+	flags := binary.LittleEndian.Uint32(headerBuf[offFlags:])
+	if flags&^slc1FlagOrderedKeys != 0 {
+		return nil, ErrIncompatible
+	}
+
+	// Check reserved bytes.
+	reservedU32 := binary.LittleEndian.Uint32(headerBuf[offReservedU32:])
+	if reservedU32 != 0 {
+		return nil, ErrIncompatible
+	}
+
+	if hasReservedBytesSet(headerBuf) {
+		return nil, ErrIncompatible
+	}
+
+	// Validate CRC.
+	if !validateHeaderCRC(headerBuf) {
+		return nil, ErrCorrupt
+	}
+
+	// Read config fields.
+	keySize := binary.LittleEndian.Uint32(headerBuf[offKeySize:])
+	indexSize := binary.LittleEndian.Uint32(headerBuf[offIndexSize:])
+	slotSize := binary.LittleEndian.Uint32(headerBuf[offSlotSize:])
+	slotCapacity := binary.LittleEndian.Uint64(headerBuf[offSlotCapacity:])
+	userVersion := binary.LittleEndian.Uint64(headerBuf[offUserVersion:])
+	generation := binary.LittleEndian.Uint64(headerBuf[offGeneration:])
+	bucketCount := binary.LittleEndian.Uint64(headerBuf[offBucketCount:])
+	slotsOffset := binary.LittleEndian.Uint64(headerBuf[offSlotsOffset:])
+	bucketsOffset := binary.LittleEndian.Uint64(headerBuf[offBucketsOffset:])
+	slotHighwater := binary.LittleEndian.Uint64(headerBuf[offSlotHighwater:])
+	liveCount := binary.LittleEndian.Uint64(headerBuf[offLiveCount:])
+	bucketUsed := binary.LittleEndian.Uint64(headerBuf[offBucketUsed:])
+	bucketTombstones := binary.LittleEndian.Uint64(headerBuf[offBucketTombstones:])
+	orderedKeys := (flags & slc1FlagOrderedKeys) != 0
+
+	// Check config compatibility.
+	if int(keySize) != opts.KeySize {
+		return nil, ErrIncompatible
+	}
+
+	if int(indexSize) != opts.IndexSize {
+		return nil, ErrIncompatible
+	}
+
+	if userVersion != opts.UserVersion {
+		return nil, ErrIncompatible
+	}
+
+	if slotCapacity != opts.SlotCapacity {
+		return nil, ErrIncompatible
+	}
+
+	if orderedKeys != opts.OrderedKeys {
+		return nil, ErrIncompatible
+	}
+
+	// Validate derived slot size.
+	expectedSlotSize := computeSlotSize(keySize, indexSize)
+	if slotSize != expectedSlotSize {
+		return nil, ErrIncompatible
+	}
+
+	// Structural integrity checks.
+	if slotsOffset != slc1HeaderSize {
+		return nil, ErrCorrupt
+	}
+
+	expectedBucketsOffset := slotsOffset + slotCapacity*uint64(slotSize)
+	if bucketsOffset != expectedBucketsOffset {
+		return nil, ErrCorrupt
+	}
+
+	expectedMinSize := safeUint64ToInt64(bucketsOffset + bucketCount*16)
+	if size < expectedMinSize {
+		return nil, ErrCorrupt
+	}
+
+	if slotHighwater > slotCapacity {
+		return nil, ErrCorrupt
+	}
+
+	if liveCount > slotHighwater {
+		return nil, ErrCorrupt
+	}
+
+	// bucket_count must be power of two >= 2.
+	if bucketCount < 2 || (bucketCount&(bucketCount-1)) != 0 {
+		return nil, ErrCorrupt
+	}
+
+	if bucketUsed+bucketTombstones >= bucketCount {
+		return nil, ErrCorrupt
+	}
+
+	if bucketUsed != liveCount {
+		return nil, ErrCorrupt
+	}
+
+	// Check generation.
+	if generation%2 == 1 {
+		// Odd generation - check if we can prove crashed writer.
+		if !opts.DisableLocking {
+			// Try to acquire lock.
+			lockFile, err := tryAcquireWriterLock(opts.Path)
+			if err == nil {
+				// Lock acquired - crashed writer.
+				releaseWriterLock(lockFile)
+
+				return nil, ErrCorrupt
+			}
+			// Lock busy - active writer.
+			return nil, ErrBusy
+		}
+		// Locking disabled - can't distinguish.
+		return nil, ErrBusy
+	}
+
+	// Build header struct for mmapAndCreateCache.
+	header := slc1Header{
+		KeySize:       keySize,
+		IndexSize:     indexSize,
+		SlotSize:      slotSize,
+		SlotCapacity:  slotCapacity,
+		UserVersion:   userVersion,
+		BucketCount:   bucketCount,
+		SlotsOffset:   slotsOffset,
+		BucketsOffset: bucketsOffset,
+		Flags:         flags,
+	}
+
+	return mmapAndCreateCache(fd, size, &header, opts)
+}
+
+// mmapAndCreateCache mmaps the file and creates a cache instance.
+func mmapAndCreateCache(fd int, size int64, header *slc1Header, opts Options) (*cache, error) {
+	// Get file identity for registry.
+	identity, err := getFileIdentity(fd)
+	if err != nil {
+		_ = syscall.Close(fd)
+
+		return nil, fmt.Errorf("get file identity: %w", err)
+	}
+
+	// mmap the file.
+	data, err := syscall.Mmap(fd, 0, int(size), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	if err != nil {
+		_ = syscall.Close(fd)
+
+		return nil, fmt.Errorf("mmap: %w", err)
+	}
+
+	registry := getOrCreateRegistryEntry(identity)
+
 	return &cache{
-		file:           file,
+		fd:             fd,
+		data:           data,
+		fileSize:       size,
+		keySize:        header.KeySize,
+		indexSize:      header.IndexSize,
+		slotSize:       header.SlotSize,
+		slotCapacity:   header.SlotCapacity,
+		userVersion:    header.UserVersion,
+		slotsOffset:    header.SlotsOffset,
+		bucketsOffset:  header.BucketsOffset,
+		bucketCount:    header.BucketCount,
+		orderedKeys:    (header.Flags & slc1FlagOrderedKeys) != 0,
+		identity:       identity,
+		registry:       registry,
 		isClosed:       false,
 		disableLocking: opts.DisableLocking,
+		path:           opts.Path,
 	}, nil
 }
 
 // Close closes the cache handle.
 func (c *cache) Close() error {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if c.isClosed {
 		return nil
@@ -275,67 +517,116 @@ func (c *cache) Close() error {
 
 	c.isClosed = true
 
+	if c.data != nil {
+		_ = syscall.Munmap(c.data)
+		c.data = nil
+	}
+
+	if c.fd != 0 {
+		_ = syscall.Close(c.fd)
+		c.fd = 0
+	}
+
 	return nil
 }
 
 // Len returns the number of live entries in the cache.
 func (c *cache) Len() (int, error) {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	c.mu.Lock()
 
 	if c.isClosed {
+		c.mu.Unlock()
+
 		return 0, ErrClosed
 	}
 
-	count := 0
+	c.mu.Unlock()
 
-	for _, slot := range c.file.slots {
-		if slot.isLive {
-			count++
+	const maxRetries = 10
+	for range maxRetries {
+		c.registry.mu.RLock()
+
+		g1 := c.readGeneration()
+		if g1%2 == 1 {
+			c.registry.mu.RUnlock()
+
+			continue
+		}
+
+		count := c.readLiveCount()
+		g2 := c.readGeneration()
+		c.registry.mu.RUnlock()
+
+		if g1 == g2 {
+			return safeUint64ToInt(count), nil
 		}
 	}
 
-	return count, nil
+	return 0, ErrBusy
 }
 
 // Get retrieves an entry by exact key.
 func (c *cache) Get(key []byte) (Entry, bool, error) {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	c.mu.Lock()
 
 	if c.isClosed {
+		c.mu.Unlock()
+
 		return Entry{}, false, ErrClosed
 	}
 
-	err := c.validateKey(key)
-	if err != nil {
-		return Entry{}, false, err
+	c.mu.Unlock()
+
+	if len(key) != int(c.keySize) {
+		return Entry{}, false, ErrInvalidInput
 	}
 
-	idx, found := c.findLiveSlot(string(key))
-	if !found {
-		return Entry{}, false, nil
+	const maxRetries = 10
+	for range maxRetries {
+		c.registry.mu.RLock()
+
+		g1 := c.readGeneration()
+		if g1%2 == 1 {
+			c.registry.mu.RUnlock()
+
+			continue
+		}
+
+		entry, found, err := c.lookupKey(key)
+		g2 := c.readGeneration()
+		c.registry.mu.RUnlock()
+
+		if g1 != g2 {
+			continue
+		}
+
+		if err != nil {
+			return Entry{}, false, err
+		}
+
+		return entry, found, nil
 	}
 
-	slot := c.file.slots[idx]
-
-	return Entry{
-		Key:      []byte(slot.key),
-		Revision: slot.revision,
-		Index:    []byte(slot.index),
-	}, true, nil
+	return Entry{}, false, ErrBusy
 }
 
 // Scan iterates over all live entries.
 func (c *cache) Scan(opts ScanOptions) *Cursor {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	c.mu.Lock()
 
 	if c.isClosed {
+		c.mu.Unlock()
+
 		return cursorWithError(ErrClosed)
 	}
 
-	entries, err := c.collect(opts, func(_ []byte) bool { return true })
+	c.mu.Unlock()
+
+	if opts.Offset < 0 || opts.Limit < 0 {
+		return cursorWithError(ErrInvalidInput)
+	}
+
+	entries, err := c.collectEntries(opts, func(_ []byte) bool { return true })
 
 	return cursorFromEntries(entries, err)
 }
@@ -347,11 +638,18 @@ func (c *cache) ScanPrefix(prefix []byte, opts ScanOptions) *Cursor {
 
 // ScanMatch iterates over all live entries whose keys match the given prefix spec.
 func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) *Cursor {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	c.mu.Lock()
 
 	if c.isClosed {
+		c.mu.Unlock()
+
 		return cursorWithError(ErrClosed)
+	}
+
+	c.mu.Unlock()
+
+	if opts.Offset < 0 || opts.Limit < 0 {
+		return cursorWithError(ErrInvalidInput)
 	}
 
 	validationErr := c.validatePrefixSpec(spec)
@@ -359,22 +657,31 @@ func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) *Cursor {
 		return cursorWithError(validationErr)
 	}
 
-	entries, err := c.collect(opts, func(key []byte) bool { return keyMatchesPrefix(key, spec) })
+	entries, err := c.collectEntries(opts, func(key []byte) bool {
+		return keyMatchesPrefix(key, spec)
+	})
 
 	return cursorFromEntries(entries, err)
 }
 
 // ScanRange iterates over all live entries in the half-open key range start <= key < end.
 func (c *cache) ScanRange(start, end []byte, opts ScanOptions) *Cursor {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	c.mu.Lock()
 
 	if c.isClosed {
+		c.mu.Unlock()
+
 		return cursorWithError(ErrClosed)
 	}
 
-	if !c.file.orderedKeys {
+	c.mu.Unlock()
+
+	if !c.orderedKeys {
 		return cursorWithError(ErrUnordered)
+	}
+
+	if opts.Offset < 0 || opts.Limit < 0 {
+		return cursorWithError(ErrInvalidInput)
 	}
 
 	startPadded, endPadded, err := c.normalizeRangeBounds(start, end)
@@ -382,7 +689,7 @@ func (c *cache) ScanRange(start, end []byte, opts ScanOptions) *Cursor {
 		return cursorWithError(err)
 	}
 
-	entries, err := c.collect(opts, func(key []byte) bool {
+	entries, err := c.collectEntries(opts, func(key []byte) bool {
 		if startPadded != nil && bytes.Compare(key, startPadded) < 0 {
 			return false
 		}
@@ -423,32 +730,40 @@ func cursorWithError(err error) *Cursor {
 
 // BeginWrite starts a new write session.
 func (c *cache) BeginWrite() (Writer, error) {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if c.isClosed {
 		return nil, ErrClosed
 	}
 
-	// Check if this file already has an active writer in-process.
-	// This guards against multiple Cache instances for the same path.
-	if c.file.writerActive {
+	// Check in-process writer guard.
+	c.registry.mu.Lock()
+
+	if c.registry.writerActive {
+		c.registry.mu.Unlock()
+
 		return nil, ErrBusy
 	}
 
-	// Acquire cross-process lock if locking is enabled.
+	c.registry.writerActive = true
+	c.registry.mu.Unlock()
+
+	// Acquire cross-process lock if enabled.
 	var lockFile *os.File
 
 	if !c.disableLocking {
 		var err error
 
-		lockFile, err = acquireWriterLock(c.file.path)
+		lockFile, err = acquireWriterLock(c.path)
 		if err != nil {
+			c.registry.mu.Lock()
+			c.registry.writerActive = false
+			c.registry.mu.Unlock()
+
 			return nil, err
 		}
 	}
-
-	c.file.writerActive = true
 
 	wr := &writer{
 		cache:       c,
@@ -461,17 +776,201 @@ func (c *cache) BeginWrite() (Writer, error) {
 	return wr, nil
 }
 
-// validateKey checks if a key is valid.
-func (c *cache) validateKey(key []byte) error {
-	if len(key) != c.file.keySize {
-		return ErrInvalidInput
+// readGeneration reads the generation counter atomically.
+func (c *cache) readGeneration() uint64 {
+	return binary.LittleEndian.Uint64(c.data[offGeneration:])
+}
+
+// readLiveCount reads the live_count from header.
+func (c *cache) readLiveCount() uint64 {
+	return binary.LittleEndian.Uint64(c.data[offLiveCount:])
+}
+
+// readSlotHighwater reads slot_highwater from header.
+func (c *cache) readSlotHighwater() uint64 {
+	return binary.LittleEndian.Uint64(c.data[offSlotHighwater:])
+}
+
+// lookupKey finds a key in the bucket index and returns the entry.
+// Must be called with registry.mu.RLock held.
+func (c *cache) lookupKey(key []byte) (Entry, bool, error) {
+	hash := fnv1a64(key)
+	mask := c.bucketCount - 1
+	startIdx := hash & mask
+	highwater := c.readSlotHighwater()
+
+	for probeCount := range c.bucketCount {
+		idx := (startIdx + probeCount) & mask
+		bucketOffset := c.bucketsOffset + idx*16
+
+		storedHash := binary.LittleEndian.Uint64(c.data[bucketOffset:])
+		slotPlusOne := binary.LittleEndian.Uint64(c.data[bucketOffset+8:])
+
+		if slotPlusOne == 0 {
+			// EMPTY - key not found.
+			return Entry{}, false, nil
+		}
+
+		if slotPlusOne == ^uint64(0) {
+			// TOMBSTONE - continue probing.
+			continue
+		}
+
+		// FULL bucket.
+		slotID := slotPlusOne - 1
+		if slotID >= highwater {
+			return Entry{}, false, ErrCorrupt
+		}
+
+		if storedHash != hash {
+			continue
+		}
+
+		// Hash matches - verify key bytes.
+		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
+		slotKey := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+
+		if !bytes.Equal(slotKey, key) {
+			continue
+		}
+
+		// Key matches - check if live.
+		meta := binary.LittleEndian.Uint64(c.data[slotOffset:])
+		if (meta & slotMetaUsed) == 0 {
+			// Slot is tombstoned but bucket points to it - corruption.
+			return Entry{}, false, ErrCorrupt
+		}
+
+		// Read entry data.
+		keyPad := (8 - (c.keySize % 8)) % 8
+		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
+		revision := getInt64LE(c.data[revOffset : revOffset+8])
+
+		var index []byte
+
+		if c.indexSize > 0 {
+			idxOffset := revOffset + 8
+			index = make([]byte, c.indexSize)
+			copy(index, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
+		}
+
+		keyCopy := make([]byte, c.keySize)
+		copy(keyCopy, slotKey)
+
+		return Entry{
+			Key:      keyCopy,
+			Revision: revision,
+			Index:    index,
+		}, true, nil
 	}
 
-	return nil
+	// Probed all buckets - no EMPTY found - corruption.
+	return Entry{}, false, ErrCorrupt
+}
+
+// collectEntries collects entries matching the predicate with seqlock retry.
+func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
+	const maxRetries = 10
+
+	for range maxRetries {
+		c.registry.mu.RLock()
+
+		g1 := c.readGeneration()
+		if g1%2 == 1 {
+			c.registry.mu.RUnlock()
+
+			continue
+		}
+
+		entries, err := c.doCollect(opts, match)
+		g2 := c.readGeneration()
+		c.registry.mu.RUnlock()
+
+		if g1 != g2 {
+			continue
+		}
+
+		return entries, err
+	}
+
+	return nil, ErrBusy
+}
+
+// doCollect performs the actual slot scan.
+// Must be called with registry.mu.RLock held.
+func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
+	highwater := c.readSlotHighwater()
+	entries := make([]Entry, 0)
+
+	for slotID := range highwater {
+		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
+
+		meta := binary.LittleEndian.Uint64(c.data[slotOffset:])
+		if (meta & slotMetaUsed) == 0 {
+			continue // tombstone
+		}
+
+		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+		if !match(key) {
+			continue
+		}
+
+		keyPad := (8 - (c.keySize % 8)) % 8
+		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
+		revision := getInt64LE(c.data[revOffset : revOffset+8])
+
+		var index []byte
+
+		if c.indexSize > 0 {
+			idxOffset := revOffset + 8
+			index = make([]byte, c.indexSize)
+			copy(index, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
+		}
+
+		// Create borrowed entry for filter.
+		borrowed := Entry{
+			Key:      key,
+			Revision: revision,
+			Index:    index,
+		}
+
+		if opts.Filter != nil && !opts.Filter(borrowed) {
+			continue
+		}
+
+		// Create owned copies for result.
+		keyCopy := make([]byte, c.keySize)
+		copy(keyCopy, key)
+
+		var indexCopy []byte
+		if c.indexSize > 0 {
+			indexCopy = make([]byte, c.indexSize)
+			copy(indexCopy, c.data[revOffset+8:revOffset+8+uint64(c.indexSize)])
+		}
+
+		entries = append(entries, Entry{
+			Key:      keyCopy,
+			Revision: revision,
+			Index:    indexCopy,
+		})
+	}
+
+	if opts.Reverse {
+		slices.Reverse(entries)
+	}
+
+	start := min(opts.Offset, len(entries))
+
+	end := len(entries)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
+	}
+
+	return entries[start:end], nil
 }
 
 func (c *cache) validatePrefixSpec(spec Prefix) error {
-	if spec.Offset < 0 || spec.Offset >= c.file.keySize {
+	if spec.Offset < 0 || spec.Offset >= int(c.keySize) {
 		return ErrInvalidInput
 	}
 
@@ -484,7 +983,7 @@ func (c *cache) validatePrefixSpec(spec Prefix) error {
 			return ErrInvalidInput
 		}
 
-		if spec.Offset+len(spec.Bytes) > c.file.keySize {
+		if spec.Offset+len(spec.Bytes) > int(c.keySize) {
 			return ErrInvalidInput
 		}
 
@@ -500,7 +999,7 @@ func (c *cache) validatePrefixSpec(spec Prefix) error {
 		return ErrInvalidInput
 	}
 
-	if spec.Offset+needBytes > c.file.keySize {
+	if spec.Offset+needBytes > int(c.keySize) {
 		return ErrInvalidInput
 	}
 
@@ -530,86 +1029,18 @@ func (c *cache) normalizeRangeBound(bound []byte) ([]byte, error) {
 		return nil, nil
 	}
 
-	if len(bound) == 0 || len(bound) > c.file.keySize {
+	if len(bound) == 0 || len(bound) > int(c.keySize) {
 		return nil, ErrInvalidInput
 	}
 
-	if len(bound) == c.file.keySize {
+	if len(bound) == int(c.keySize) {
 		return append([]byte(nil), bound...), nil
 	}
 
-	padded := make([]byte, c.file.keySize)
+	padded := make([]byte, c.keySize)
 	copy(padded, bound)
 
 	return padded, nil
-}
-
-// findLiveSlot scans from newest to oldest to respect reinsertion semantics.
-func (c *cache) findLiveSlot(key string) (int, bool) {
-	for i := len(c.file.slots) - 1; i >= 0; i-- {
-		slot := c.file.slots[i]
-		if slot.key == key && slot.isLive {
-			return i, true
-		}
-	}
-
-	return 0, false
-}
-
-// collect gathers entries matching the match predicate with pagination.
-func (c *cache) collect(opts ScanOptions, match func(key []byte) bool) ([]Entry, error) {
-	if opts.Offset < 0 || opts.Limit < 0 {
-		return nil, ErrInvalidInput
-	}
-
-	entries := make([]Entry, 0)
-
-	for _, slot := range c.file.slots {
-		if !slot.isLive {
-			continue
-		}
-
-		keyBytes := []byte(slot.key)
-		if !match(keyBytes) {
-			continue
-		}
-
-		indexBytes := []byte(slot.index)
-
-		if opts.Filter != nil {
-			borrowed := Entry{
-				Key:      keyBytes,
-				Revision: slot.revision,
-				Index:    indexBytes,
-			}
-
-			if !opts.Filter(borrowed) {
-				continue
-			}
-
-			keyBytes = []byte(slot.key)
-			indexBytes = []byte(slot.index)
-		}
-
-		entries = append(entries, Entry{
-			Key:      keyBytes,
-			Revision: slot.revision,
-			Index:    indexBytes,
-		})
-	}
-
-	if opts.Reverse {
-		slices.Reverse(entries)
-	}
-
-	start := min(opts.Offset, len(entries))
-
-	end := len(entries)
-	if opts.Limit > 0 && start+opts.Limit < end {
-		end = start + opts.Limit
-	}
-
-	return entries[start:end], nil
 }
 
 func keyMatchesPrefix(key []byte, spec Prefix) bool {

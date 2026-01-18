@@ -15,7 +15,71 @@ const (
 
 	// Hash algorithm identifier (FNV-1a 64-bit).
 	slc1HashAlgFNV1a64 = 1
+
+	// Header flags.
+	slc1FlagOrderedKeys uint32 = 1 << 0
 )
+
+// FNV-1a 64-bit hash constants.
+const (
+	fnv1aOffsetBasis uint64 = 14695981039346656037
+	fnv1aPrime       uint64 = 1099511628211
+)
+
+// Safe integer conversion constants.
+const (
+	maxInt   = int(^uint(0) >> 1)
+	maxInt64 = int64(^uint64(0) >> 1)
+)
+
+// safeIntToUint32 converts int to uint32, clamping to valid range.
+// Returns 0 if negative, maxUint32 if too large.
+func safeIntToUint32(v int) uint32 {
+	if v < 0 {
+		return 0
+	}
+
+	// Convert through uint64 to avoid gosec G115 warning.
+	// The range check ensures this is safe.
+	u64 := uint64(v)
+
+	const maxUint32Val = uint64(^uint32(0))
+	if u64 > maxUint32Val {
+		return ^uint32(0)
+	}
+
+	return uint32(u64)
+}
+
+// safeUint64ToInt64 converts uint64 to int64, clamping to maxInt64 if overflow.
+// For file sizes, this is safe as files can't exceed int64 max.
+func safeUint64ToInt64(v uint64) int64 {
+	if v > uint64(maxInt64) {
+		return maxInt64
+	}
+
+	return int64(v)
+}
+
+// safeUint64ToInt converts uint64 to int, clamping to maxInt if overflow.
+func safeUint64ToInt(v uint64) int {
+	if v > uint64(maxInt) {
+		return maxInt
+	}
+
+	return int(v)
+}
+
+// fnv1a64 computes the FNV-1a 64-bit hash over key bytes.
+func fnv1a64(key []byte) uint64 {
+	hash := fnv1aOffsetBasis
+	for _, b := range key {
+		hash ^= uint64(b)
+		hash *= fnv1aPrime
+	}
+
+	return hash
+}
 
 // Header field offsets (bytes from file start).
 const (
@@ -277,11 +341,16 @@ func decodeSlot(buf []byte, keySize, indexSize uint32) decodedSlot {
 }
 
 // newHeader creates a header for a new cache file with the given options.
-func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, loadFactor float64) slc1Header {
+func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, loadFactor float64, orderedKeys bool) slc1Header {
 	slotSize := computeSlotSize(keySize, indexSize)
 	bucketCount := computeBucketCount(slotCapacity, loadFactor)
 	slotsOffset := uint64(slc1HeaderSize)
 	bucketsOffset := slotsOffset + slotCapacity*uint64(slotSize)
+
+	var flags uint32
+	if orderedKeys {
+		flags |= slc1FlagOrderedKeys
+	}
 
 	return slc1Header{
 		Magic:            [4]byte{'S', 'L', 'C', '1'},
@@ -291,7 +360,7 @@ func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, load
 		IndexSize:        indexSize,
 		SlotSize:         slotSize,
 		HashAlg:          slc1HashAlgFNV1a64,
-		Flags:            0,
+		Flags:            flags,
 		SlotCapacity:     slotCapacity,
 		SlotHighwater:    0,
 		LiveCount:        0,
