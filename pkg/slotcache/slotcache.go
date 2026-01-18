@@ -343,7 +343,58 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		return nil, ErrIncompatible
 	}
 
-	// Validate CRC.
+	// If generation is odd, a writer is in progress or a previous writer crashed.
+	//
+	// IMPORTANT: we must handle this *before* CRC/invariant validation, because during an
+	// in-progress commit the header may be temporarily inconsistent (CRC mismatch, counters
+	// out of sync). In that case, Open must return ErrBusy (writer active) rather than
+	// misclassifying transient state as ErrCorrupt.
+	generation := binary.LittleEndian.Uint64(headerBuf[offGeneration:])
+	if generation%2 == 1 {
+		if opts.DisableLocking {
+			// Without locking, we can't distinguish active writer vs crashed writer.
+			return nil, ErrBusy
+		}
+
+		// With locking enabled, attempt to acquire the writer lock non-blocking.
+		// - If the lock is busy: an active writer is present -> ErrBusy.
+		// - If we can acquire the lock: no active writer -> likely crashed writer.
+		lockFile, lockErr := tryAcquireWriterLock(opts.Path)
+		if lockErr != nil {
+			// We treat lock contention as busy. Unexpected lock errors are returned as-is.
+			if errors.Is(lockErr, ErrBusy) {
+				return nil, ErrBusy
+			}
+
+			return nil, lockErr
+		}
+
+		// We acquired the lock. Re-read the header under exclusive access to avoid
+		// races with a writer that finished between our initial read and lock acquisition.
+		// If generation is still odd, treat as crashed/incomplete commit.
+		fresh := make([]byte, slc1HeaderSize)
+
+		n, readErr := syscall.Pread(fd, fresh, 0)
+		if readErr != nil || n != slc1HeaderSize {
+			releaseWriterLock(lockFile)
+
+			return nil, ErrCorrupt
+		}
+
+		freshGen := binary.LittleEndian.Uint64(fresh[offGeneration:])
+
+		releaseWriterLock(lockFile)
+
+		if freshGen%2 == 1 {
+			return nil, ErrCorrupt
+		}
+
+		// Writer finished; use the fresh stable header for validation.
+		headerBuf = fresh
+		generation = freshGen
+	}
+
+	// Validate CRC (only after we have a stable even generation snapshot).
 	if !validateHeaderCRC(headerBuf) {
 		return nil, ErrCorrupt
 	}
@@ -354,7 +405,6 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 	slotSize := binary.LittleEndian.Uint32(headerBuf[offSlotSize:])
 	slotCapacity := binary.LittleEndian.Uint64(headerBuf[offSlotCapacity:])
 	userVersion := binary.LittleEndian.Uint64(headerBuf[offUserVersion:])
-	generation := binary.LittleEndian.Uint64(headerBuf[offGeneration:])
 	bucketCount := binary.LittleEndian.Uint64(headerBuf[offBucketCount:])
 	slotsOffset := binary.LittleEndian.Uint64(headerBuf[offSlotsOffset:])
 	bucketsOffset := binary.LittleEndian.Uint64(headerBuf[offBucketsOffset:])
