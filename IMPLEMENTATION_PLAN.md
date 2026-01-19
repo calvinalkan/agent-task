@@ -102,7 +102,12 @@
   - Changed to use `-1` as sentinel (Unix convention for "no file descriptor").
   - Fixed Close() to check `fd >= 0` instead of `fd != 0` and set `fd = -1` after closing.
 
-- [ ] Ordered range scan optimization: binary search to find start slot, then sequential scan.
+- [x] Ordered range scan optimization: binary search to find start slot, then sequential scan. ✅ (2026-01-19)
+  - Added `binarySearchSlotGE()` helper that finds the first slot index where key >= target.
+  - Binary search works correctly with tombstones because they preserve their key bytes (per spec).
+  - Added `collectRangeEntries()` and `doCollectRange()` methods that use binary search + sequential scan.
+  - Early termination: stops scanning when key >= end bound (keys are sorted in ordered mode).
+  - `ScanRange` now uses O(log n + k) instead of O(n), where k is the number of results.
 - [ ] Optional extra corruption detection:
   - sample-check buckets at Open
   - stricter invariant checks during reads (return `ErrCorrupt` under stable even generation)

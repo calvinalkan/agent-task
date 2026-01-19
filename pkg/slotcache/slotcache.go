@@ -807,6 +807,8 @@ func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error) {
 }
 
 // ScanRange returns all live entries in the half-open key range start <= key < end.
+// For ordered-keys mode, this uses binary search to find the start position,
+// then sequential scan, stopping early when keys exceed the end bound.
 func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) {
 	c.mu.Lock()
 
@@ -831,17 +833,7 @@ func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) 
 		return nil, err
 	}
 
-	return c.collectEntries(opts, func(key []byte) bool {
-		if startPadded != nil && bytes.Compare(key, startPadded) < 0 {
-			return false
-		}
-
-		if endPadded != nil && bytes.Compare(key, endPadded) >= 0 {
-			return false
-		}
-
-		return true
-	})
+	return c.collectRangeEntries(startPadded, endPadded, opts)
 }
 
 // BeginWrite starts a new write session.
@@ -890,6 +882,150 @@ func (c *cache) BeginWrite() (Writer, error) {
 	c.activeWriter = wr
 
 	return wr, nil
+}
+
+// binarySearchSlotGE finds the first slot index where key >= target.
+// Returns highwater if all keys are less than target.
+// This works correctly with tombstones because they preserve their key bytes.
+// Must be called with registry.mu.RLock held.
+func (c *cache) binarySearchSlotGE(target []byte, highwater uint64) uint64 {
+	low := uint64(0)
+	high := highwater
+
+	for low < high {
+		mid := low + (high-low)/2
+		slotOffset := c.slotsOffset + mid*uint64(c.slotSize)
+		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+
+		if bytes.Compare(key, target) < 0 {
+			low = mid + 1
+		} else {
+			high = mid
+		}
+	}
+
+	return low
+}
+
+// collectRangeEntries collects entries in the given key range with seqlock retry.
+// Uses binary search optimization for ordered-keys mode.
+func (c *cache) collectRangeEntries(startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
+	for attempt := range readMaxRetries {
+		readBackoff(attempt)
+
+		c.registry.mu.RLock()
+
+		g1 := c.readGeneration()
+		if g1%2 == 1 {
+			c.registry.mu.RUnlock()
+
+			continue
+		}
+
+		entries, err := c.doCollectRange(startPadded, endPadded, opts)
+		g2 := c.readGeneration()
+		c.registry.mu.RUnlock()
+
+		if g1 != g2 {
+			continue
+		}
+
+		return entries, err
+	}
+
+	return nil, ErrBusy
+}
+
+// doCollectRange performs range scan using binary search + sequential scan.
+// Must be called with registry.mu.RLock held.
+func (c *cache) doCollectRange(startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
+	highwater := c.readSlotHighwater()
+
+	if highwater == 0 {
+		return []Entry{}, nil
+	}
+
+	// Binary search to find starting position.
+	// binarySearchSlotGE returns the first slot with key >= startPadded.
+	var startSlot uint64
+	if startPadded != nil {
+		startSlot = c.binarySearchSlotGE(startPadded, highwater)
+	}
+	// If no start bound, startSlot remains 0.
+
+	entries := make([]Entry, 0)
+
+	// Sequential scan from startSlot.
+	for slotID := startSlot; slotID < highwater; slotID++ {
+		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
+		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+
+		// Early termination: if key >= end, we're done (keys are sorted).
+		if endPadded != nil && bytes.Compare(key, endPadded) >= 0 {
+			break
+		}
+
+		// Check if live (not tombstoned).
+		// Use atomic load for meta to avoid torn reads during concurrent writes.
+		meta := atomicLoadUint64(c.data[slotOffset:])
+		if (meta & slotMetaUsed) == 0 {
+			continue // tombstone
+		}
+
+		// Read entry data.
+		keyPad := (8 - (c.keySize % 8)) % 8
+		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
+		// Use atomic load for revision to avoid torn reads during concurrent writes.
+		revision := atomicLoadInt64(c.data[revOffset:])
+
+		var index []byte
+
+		if c.indexSize > 0 {
+			idxOffset := revOffset + 8
+			index = make([]byte, c.indexSize)
+			copy(index, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
+		}
+
+		// Create borrowed entry for filter.
+		borrowed := Entry{
+			Key:      key,
+			Revision: revision,
+			Index:    index,
+		}
+
+		if opts.Filter != nil && !opts.Filter(borrowed) {
+			continue
+		}
+
+		// Create owned copies for result.
+		keyCopy := make([]byte, c.keySize)
+		copy(keyCopy, key)
+
+		var indexCopy []byte
+		if c.indexSize > 0 {
+			indexCopy = make([]byte, c.indexSize)
+			copy(indexCopy, c.data[revOffset+8:revOffset+8+uint64(c.indexSize)])
+		}
+
+		entries = append(entries, Entry{
+			Key:      keyCopy,
+			Revision: revision,
+			Index:    indexCopy,
+		})
+	}
+
+	if opts.Reverse {
+		slices.Reverse(entries)
+	}
+
+	start := min(opts.Offset, len(entries))
+
+	end := len(entries)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
+	}
+
+	return entries[start:end], nil
 }
 
 // readGeneration reads the generation counter atomically.
