@@ -22,9 +22,10 @@ import (
 
 // durableState tracks what SHOULD survive a crash based on the durability model.
 type durableState struct {
-	// contentSynced maps path -> content for files where file.Sync() was called.
-	// The content is what was on disk at the time of sync.
-	contentSynced map[string]string
+	// contentSynced maps inode -> content for files where file.Sync() was called.
+	// Tracking by inode (not path) is important because paths can be reused after
+	// remove+recreate; durability attaches to the underlying file identity.
+	contentSynced map[uint64]string
 
 	// entryDurable maps path -> inode for files where parent dir.Sync() was
 	// called while the file existed. The inode helps track renames.
@@ -45,7 +46,7 @@ type durableState struct {
 
 func newDurableState() *durableState {
 	return &durableState{
-		contentSynced:   make(map[string]string),
+		contentSynced:   make(map[uint64]string),
 		entryDurable:    make(map[string]uint64),
 		dirEntryDurable: make(map[string]bool),
 		liveContent:     make(map[string]string),
@@ -60,32 +61,12 @@ func (s *durableState) expectedAfterCrash() map[string]string {
 	result := make(map[string]string)
 
 	for path, inode := range s.entryDurable {
-		// Entry is durable. Check if content was synced for this inode.
-		// Find the path that synced this inode's content.
-		var content string
-
-		found := false
-
-		for syncPath, syncContent := range s.contentSynced {
-			if syncInode, ok := s.entryDurable[syncPath]; ok && syncInode == inode {
-				content = syncContent
-				found = true
-
-				break
-			}
-			// Also check if the current path's inode matches
-			if s.liveInodes[syncPath] == inode {
-				content = syncContent
-				found = true
-
-				break
-			}
-		}
-
-		if found {
+		// Entry is durable. Content is durable only if we saw a successful file.Sync()
+		// for this inode.
+		if content, ok := s.contentSynced[inode]; ok {
 			result[path] = content
 		} else {
-			// Entry durable but content not synced -> empty file
+			// Entry durable but content not synced -> empty file.
 			result[path] = ""
 		}
 	}
@@ -195,8 +176,10 @@ func executeFuzzOp(_ *testing.T, crash *fs.Crash, state *durableState, rng *rand
 		if err == nil {
 			err := f.Sync()
 			if err == nil {
-				if content, ok := state.liveContent[path]; ok {
-					state.contentSynced[path] = content
+				if inode, ok := state.liveInodes[path]; ok {
+					if content, ok := state.liveContent[path]; ok {
+						state.contentSynced[inode] = content
+					}
 				}
 			}
 
@@ -226,7 +209,6 @@ func executeFuzzOp(_ *testing.T, crash *fs.Crash, state *durableState, rng *rand
 					if parent == dir {
 						if _, exists := state.liveInodes[path]; !exists {
 							delete(state.entryDurable, path)
-							delete(state.contentSynced, path)
 						}
 					}
 				}
@@ -258,11 +240,7 @@ func executeFuzzOp(_ *testing.T, crash *fs.Crash, state *durableState, rng *rand
 				delete(state.liveContent, src)
 				state.liveContent[dst] = content
 			}
-			// Move synced content tracking
-			if content, ok := state.contentSynced[src]; ok {
-				delete(state.contentSynced, src)
-				state.contentSynced[dst] = content
-			}
+			// Synced content tracking is keyed by inode, so rename does not affect it.
 		}
 
 	case opRemove:
