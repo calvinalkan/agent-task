@@ -519,6 +519,21 @@ Exact function signatures and return types are implementation-defined.
 - Read APIs that return results MUST return **copied** key bytes and **copied** index bytes so callers can retain results safely
 - Callback/predicate APIs MAY pass **borrowed** slices that are valid only for the duration of the callback
 
+### Scan consistency modes (streaming vs snapshot)
+
+All scan-style operations (Scan, ScanMatch, ScanPrefix, ScanRange) MUST return entries from a single stable even generation. Implementations MAY choose either of these strategies:
+
+**Snapshot mode:**
+- Acquire a stable generation using the reader coherence rule (`g1`/scan/`g2`) over the entire scan
+- If the generation changes or is observed odd before completion (after bounded retries), the operation MUST return `ErrBusy` and MUST NOT return any results
+- The returned cursor iterates over copied results and cannot fail mid-iteration
+
+**Streaming mode:**
+- Read `g1` once (must be even) and scan incrementally
+- Before yielding each entry, the implementation MUST verify the generation is still even and equal to `g1`
+- If the generation changes or becomes odd, iteration MUST stop and `ErrBusy` MUST be reported
+- Partial results MAY have been yielded, but all yielded entries are guaranteed to come from generation `g1`
+
 ### Len
 
 `Len()` returns the number of live entries in the cache (i.e., `live_count` from the header). Tombstoned slots are not counted.
@@ -542,6 +557,8 @@ Slot scans iterate slot IDs sequentially and evaluate predicates on live slots.
 - Scans are ordered by **slot ID** (ascending by default)
 - Tombstones are skipped
 - Only slots matching the caller-provided predicate are returned
+
+Consistency and `ErrBusy` behavior follow **Scan consistency modes (streaming vs snapshot)**.
 
 **Filter options:**
 
@@ -589,6 +606,8 @@ Matching rules:
 
 This primitive is **not** accelerated by the hash index (hashing destroys ordering information). It is implemented as an O(n) scan.
 
+Consistency and `ErrBusy` behavior follow **Scan consistency modes (streaming vs snapshot)**.
+
 **Prefix validation:**
 
 The following are invalid:
@@ -619,7 +638,7 @@ If and only if `FLAG_ORDERED_KEYS` is set, the implementation provides ordered r
 
 Binary search works correctly because tombstoned slots preserve their key bytes (required by ordered-keys mode). The binary search may land on a tombstone; the sequential scan skips it. Only live slots are returned to the caller.
 
-Because slotcache uses a seqlock, iteration is defined over a stable generation snapshot. If the generation changes mid-iteration, the next iteration step returns `ErrBusy` and the caller retries from the beginning.
+Consistency and `ErrBusy` behavior follow **Scan consistency modes (streaming vs snapshot)**. In snapshot mode, the range is captured before any results are returned; in streaming mode, a generation change stops iteration with `ErrBusy`.
 
 **Errors:** `ErrClosed`, `ErrBusy`, `ErrCorrupt`, `ErrInvalidInput` (invalid bounds), `ErrUnordered` (file not created with ordered mode)
 

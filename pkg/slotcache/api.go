@@ -279,10 +279,10 @@ type Prefix struct {
 //	    // handle [ErrBusy], [ErrCorrupt], etc.
 //	}
 //
-// If a concurrent writer commits mid-iteration, iteration stops early and
-// [Cursor.Err] returns [ErrBusy]. Unlike point reads (which retry automatically),
-// iteration cannot retry transparently because entries may have already been
-// yielded. Callers needing consistency should retry the entire scan.
+// Scan-style operations capture a stable snapshot before returning a Cursor.
+// If a stable generation cannot be acquired after bounded retries, the Cursor
+// yields no entries and [Cursor.Err] returns [ErrBusy]. Once iteration begins,
+// it will not fail due to concurrent commits.
 type Cursor struct {
 	seq func(yield func(Entry) bool)
 	err error
@@ -314,6 +314,8 @@ func (c *Cursor) Err() error {
 //
 // If a writer commits while a read is in progress, the read retries
 // automatically. If retries are exhausted, [ErrBusy] is returned.
+// Scan-style methods capture a stable snapshot before returning a Cursor;
+// if acquisition fails, the Cursor yields no entries and [ErrBusy] is reported.
 type Cache interface {
 	// Close releases all resources associated with the cache.
 	//
@@ -335,12 +337,18 @@ type Cache interface {
 
 	// Scan iterates over all live entries in insertion order.
 	//
+	// Scan captures a stable snapshot before returning the Cursor. If snapshot
+	// acquisition fails, the Cursor yields no entries and [Cursor.Err] is [ErrBusy].
+	//
 	// Check [Cursor.Err] after iteration for: [ErrClosed], [ErrBusy], [ErrCorrupt].
 	Scan(opts ScanOptions) *Cursor
 
 	// ScanPrefix iterates over entries with a byte-aligned prefix at offset 0.
 	//
 	// Equivalent to ScanMatch([Prefix]{Bytes: prefix}, opts).
+	// ScanPrefix captures a stable snapshot before returning the Cursor. If
+	// snapshot acquisition fails, the Cursor yields no entries and [Cursor.Err]
+	// is [ErrBusy].
 	//
 	// Check [Cursor.Err] after iteration for: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
 	ScanPrefix(prefix []byte, opts ScanOptions) *Cursor
@@ -348,6 +356,9 @@ type Cache interface {
 	// ScanMatch iterates over entries matching a [Prefix].
 	//
 	// This scans all entries; it cannot use the key index for acceleration.
+	// ScanMatch captures a stable snapshot before returning the Cursor. If
+	// snapshot acquisition fails, the Cursor yields no entries and [Cursor.Err]
+	// is [ErrBusy].
 	//
 	// Check [Cursor.Err] after iteration for: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
 	ScanMatch(spec Prefix, opts ScanOptions) *Cursor
@@ -356,6 +367,9 @@ type Cache interface {
 	//
 	// Requires [Options.OrderedKeys]. Either bound may be nil (unbounded).
 	// Bounds shorter than KeySize are right-padded with 0x00.
+	// ScanRange captures a stable snapshot before returning the Cursor. If
+	// snapshot acquisition fails, the Cursor yields no entries and [Cursor.Err]
+	// is [ErrBusy].
 	//
 	// Check [Cursor.Err] after iteration for: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrUnordered].
 	ScanRange(start, end []byte, opts ScanOptions) *Cursor
