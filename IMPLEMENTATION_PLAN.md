@@ -97,9 +97,10 @@
 
 ### P2 — Performance and hardening
 
-- [ ] Fix fd sentinel handling
-  - `cache.fd` currently uses `0` as the "closed" sentinel, but fd 0 is valid.
-  - Use `-1` as sentinel or store `*os.File` instead.
+- [x] Fix fd sentinel handling ✅ (2026-01-19)
+  - `cache.fd` was using `0` as the "closed" sentinel, but fd 0 is valid (stdin).
+  - Changed to use `-1` as sentinel (Unix convention for "no file descriptor").
+  - Fixed Close() to check `fd >= 0` instead of `fd != 0` and set `fd = -1` after closing.
 
 - [ ] Ordered range scan optimization: binary search to find start slot, then sequential scan.
 - [ ] Optional extra corruption detection:

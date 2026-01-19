@@ -660,9 +660,9 @@ func (c *cache) Close() error {
 		c.data = nil
 	}
 
-	if c.fd != 0 {
+	if c.fd >= 0 {
 		_ = syscall.Close(c.fd)
-		c.fd = 0
+		c.fd = -1
 	}
 
 	return nil
