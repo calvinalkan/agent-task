@@ -280,6 +280,11 @@ func nextPow2(value uint64) uint64 {
 const (
 	// slotMetaUsed indicates a live (non-deleted) slot.
 	slotMetaUsed uint64 = 1 << 0
+
+	// slotMetaReservedMask is the mask for reserved bits in slot meta.
+	// Per spec (002-format.md): "All other bits are reserved and MUST be zero in v1."
+	// If (meta & slotMetaReservedMask) != 0 under a stable even generation, it's corruption.
+	slotMetaReservedMask = ^slotMetaUsed
 )
 
 // encodeSlot serializes a slot record to a fixed-size byte slice.

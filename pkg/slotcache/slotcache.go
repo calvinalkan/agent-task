@@ -1124,7 +1124,7 @@ func (c *cache) collectRangeEntries(startPadded, endPadded []byte, opts ScanOpti
 			continue
 		}
 
-		entries, err := c.doCollectRange(startPadded, endPadded, opts)
+		entries, err := c.doCollectRange(g1, startPadded, endPadded, opts)
 		g2 := c.readGeneration()
 		c.registry.mu.RUnlock()
 
@@ -1141,9 +1141,13 @@ func (c *cache) collectRangeEntries(startPadded, endPadded []byte, opts ScanOpti
 // doCollectRange performs range scan using binary search + sequential scan.
 // Must be called with registry.mu.RLock held.
 //
+// The expectedGen parameter is the generation read at the start of the operation.
+// When an impossible invariant is detected (e.g., reserved meta bits set), we re-check
+// generation to distinguish overlap (errOverlap) from real corruption (ErrCorrupt).
+//
 // Allocation optimization: Same approach as doCollect - borrow mmap slices for
 // filter callbacks, only allocate owned copies for entries that pass the filter.
-func (c *cache) doCollectRange(startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
+func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
 	highwater := c.readSlotHighwater()
 
 	if highwater == 0 {
@@ -1174,6 +1178,13 @@ func (c *cache) doCollectRange(startPadded, endPadded []byte, opts ScanOptions) 
 		// Check if live (not tombstoned).
 		// Use atomic load for meta to avoid torn reads during concurrent writes.
 		meta := atomicLoadUint64(c.data[slotOffset:])
+
+		// Check for reserved bits set (corruption indicator).
+		// Per spec: "All other bits are reserved and MUST be zero in v1."
+		if meta&slotMetaReservedMask != 0 {
+			return nil, c.checkInvariantViolation(expectedGen)
+		}
+
 		if (meta & slotMetaUsed) == 0 {
 			continue // tombstone
 		}
@@ -1327,6 +1338,13 @@ func (c *cache) lookupKey(key []byte, expectedGen uint64) (Entry, bool, error) {
 		// Key matches - check if live.
 		// Use atomic load for meta to avoid torn reads during concurrent writes.
 		meta := atomicLoadUint64(c.data[slotOffset:])
+
+		// Check for reserved bits set (corruption indicator).
+		// Per spec: "All other bits are reserved and MUST be zero in v1."
+		if meta&slotMetaReservedMask != 0 {
+			return Entry{}, false, c.checkInvariantViolation(expectedGen)
+		}
+
 		if (meta & slotMetaUsed) == 0 {
 			// Impossible invariant: bucket points to tombstoned slot.
 			// This could be overlap with concurrent write or real corruption.
@@ -1377,7 +1395,7 @@ func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Ent
 			continue
 		}
 
-		entries, err := c.doCollect(opts, match)
+		entries, err := c.doCollect(g1, opts, match)
 		g2 := c.readGeneration()
 		c.registry.mu.RUnlock()
 
@@ -1394,11 +1412,15 @@ func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Ent
 // doCollect performs the actual slot scan.
 // Must be called with registry.mu.RLock held.
 //
+// The expectedGen parameter is the generation read at the start of the operation.
+// When an impossible invariant is detected (e.g., reserved meta bits set), we re-check
+// generation to distinguish overlap (errOverlap) from real corruption (ErrCorrupt).
+//
 // Allocation optimization: We minimize allocations by:
 // 1. Borrowing mmap slices directly for filter callbacks (API contract allows this)
 // 2. Only allocating owned copies for entries that pass the filter
 // 3. Skipping borrowed entry construction entirely when no filter is set.
-func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
+func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
 	highwater := c.readSlotHighwater()
 	entries := make([]Entry, 0)
 
@@ -1409,6 +1431,13 @@ func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, e
 
 		// Use atomic load for meta to avoid torn reads during concurrent writes.
 		meta := atomicLoadUint64(c.data[slotOffset:])
+
+		// Check for reserved bits set (corruption indicator).
+		// Per spec: "All other bits are reserved and MUST be zero in v1."
+		if meta&slotMetaReservedMask != 0 {
+			return nil, c.checkInvariantViolation(expectedGen)
+		}
+
 		if (meta & slotMetaUsed) == 0 {
 			continue // tombstone
 		}

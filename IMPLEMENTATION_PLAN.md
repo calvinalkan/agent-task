@@ -1,6 +1,6 @@
 # IMPLEMENTATION_PLAN.md
 
-Last updated: 2026-01-19 (Bucket sizing aligned with spec)
+Last updated: 2026-01-19 (Slot meta reserved bits validation)
 
 This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant with the SLC1 spec in `pkg/slotcache/specs/*`.
 
@@ -14,8 +14,11 @@ This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant wit
 
 ## P2 — Optional hardening / performance
 
-- [ ] **Surface additional corruption early on reads (cheap checks)**
+- [x] **Surface additional corruption early on reads (cheap checks)**
   - Example: if a slot `meta` has reserved bits set (`meta &^ 1 != 0`) under a stable even generation, classify as `ErrCorrupt` (or retry if generation changed).
+  - Implemented in `lookupKey`, `doCollect`, and `doCollectRange` with proper seqlock overlap handling.
+  - Added `slotMetaReservedMask` constant for clarity.
+  - Tests in `slot_meta_corruption_test.go` verify ErrCorrupt for Get/Scan/ScanRange with reserved bits set.
 
 - [ ] **Optional Open-time bucket sampling** (spec says MAY)
   - Sample-check a small number of bucket entries for obvious out-of-range slot IDs to fail-fast on common corruptions without scanning the full table.
