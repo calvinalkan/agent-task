@@ -662,86 +662,82 @@ func (c *cache) Get(key []byte) (Entry, bool, error) {
 	return Entry{}, false, ErrBusy
 }
 
-// Scan iterates over all live entries.
-func (c *cache) Scan(opts ScanOptions) *Cursor {
+// Scan returns all live entries in insertion (slot) order.
+func (c *cache) Scan(opts ScanOptions) ([]Entry, error) {
 	c.mu.Lock()
 
 	if c.isClosed {
 		c.mu.Unlock()
 
-		return cursorWithError(ErrClosed)
+		return nil, ErrClosed
 	}
 
 	c.mu.Unlock()
 
 	if opts.Offset < 0 || opts.Limit < 0 {
-		return cursorWithError(ErrInvalidInput)
+		return nil, ErrInvalidInput
 	}
 
-	entries, err := c.collectEntries(opts, func(_ []byte) bool { return true })
-
-	return cursorFromEntries(entries, err)
+	return c.collectEntries(opts, func(_ []byte) bool { return true })
 }
 
-// ScanPrefix iterates over live entries matching the given byte prefix.
-func (c *cache) ScanPrefix(prefix []byte, opts ScanOptions) *Cursor {
+// ScanPrefix returns live entries matching the given byte prefix at offset 0.
+func (c *cache) ScanPrefix(prefix []byte, opts ScanOptions) ([]Entry, error) {
 	return c.ScanMatch(Prefix{Offset: 0, Bits: 0, Bytes: prefix}, opts)
 }
 
-// ScanMatch iterates over all live entries whose keys match the given prefix spec.
-func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) *Cursor {
+// ScanMatch returns all live entries whose keys match the given prefix spec.
+func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error) {
 	c.mu.Lock()
 
 	if c.isClosed {
 		c.mu.Unlock()
 
-		return cursorWithError(ErrClosed)
+		return nil, ErrClosed
 	}
 
 	c.mu.Unlock()
 
 	if opts.Offset < 0 || opts.Limit < 0 {
-		return cursorWithError(ErrInvalidInput)
+		return nil, ErrInvalidInput
 	}
 
 	validationErr := c.validatePrefixSpec(spec)
 	if validationErr != nil {
-		return cursorWithError(validationErr)
+		return nil, validationErr
 	}
 
-	entries, err := c.collectEntries(opts, func(key []byte) bool {
+	return c.collectEntries(opts, func(key []byte) bool {
 		return keyMatchesPrefix(key, spec)
 	})
-
-	return cursorFromEntries(entries, err)
 }
 
-// ScanRange iterates over all live entries in the half-open key range start <= key < end.
-func (c *cache) ScanRange(start, end []byte, opts ScanOptions) *Cursor {
+// ScanRange returns all live entries in the half-open key range start <= key < end.
+func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) {
 	c.mu.Lock()
 
 	if c.isClosed {
 		c.mu.Unlock()
 
-		return cursorWithError(ErrClosed)
+		return nil, ErrClosed
 	}
 
 	c.mu.Unlock()
 
 	if !c.orderedKeys {
-		return cursorWithError(ErrUnordered)
+		return nil, ErrUnordered
 	}
 
 	if opts.Offset < 0 || opts.Limit < 0 {
-		return cursorWithError(ErrInvalidInput)
+		return nil, ErrInvalidInput
 	}
 
 	startPadded, endPadded, err := c.normalizeRangeBounds(start, end)
 	if err != nil {
-		return cursorWithError(err)
+		return nil, err
 	}
 
-	entries, err := c.collectEntries(opts, func(key []byte) bool {
+	return c.collectEntries(opts, func(key []byte) bool {
 		if startPadded != nil && bytes.Compare(key, startPadded) < 0 {
 			return false
 		}
@@ -752,32 +748,6 @@ func (c *cache) ScanRange(start, end []byte, opts ScanOptions) *Cursor {
 
 		return true
 	})
-
-	return cursorFromEntries(entries, err)
-}
-
-func cursorFromEntries(entries []Entry, err error) *Cursor {
-	if err != nil {
-		return cursorWithError(err)
-	}
-
-	return &Cursor{
-		seq: func(yield func(Entry) bool) {
-			for _, entry := range entries {
-				if !yield(entry) {
-					return
-				}
-			}
-		},
-		err: nil,
-	}
-}
-
-func cursorWithError(err error) *Cursor {
-	return &Cursor{
-		seq: func(func(Entry) bool) {},
-		err: err,
-	}
 }
 
 // BeginWrite starts a new write session.

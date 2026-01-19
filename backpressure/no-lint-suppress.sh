@@ -50,13 +50,19 @@ get_suppressions_from_git() {
 
     local untracked=""
     if [ -n "$untracked_files" ]; then
-        # rg returns 1 when no matches - that's valid here
-        local rg_exit
-        untracked=$(echo "$untracked_files" | xargs -r rg -n "$RG_PATTERN" 2>&1) && rg_exit=0 || rg_exit=$?
-        if [ "$rg_exit" -gt 1 ]; then
-            echo "Error: rg failed on untracked files: $untracked" >&2
-            return 1
-        fi
+        local rg_output=""
+        while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            local file_output rg_exit
+            file_output=$(rg -n "$RG_PATTERN" "$file" 2>&1) && rg_exit=0 || rg_exit=$?
+            if [ "$rg_exit" -eq 0 ]; then
+                rg_output="${rg_output}${rg_output:+$'\n'}${file_output}"
+            elif [ "$rg_exit" -ne 1 ]; then
+                echo "Error: rg failed on untracked files: $file_output" >&2
+                return 1
+            fi
+        done <<< "$untracked_files"
+        untracked="$rg_output"
     fi
 
     result="${changed}${changed:+$'\n'}${untracked}"

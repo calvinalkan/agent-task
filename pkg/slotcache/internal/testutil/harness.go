@@ -240,9 +240,12 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 			opts.Filter = BuildFilter(*concreteOperation.Filter)
 		}
 
-		cursor := testHarness.Real.Cache.Scan(opts)
+		entries, scanError := testHarness.Real.Cache.Scan(opts)
+		if scanError != nil {
+			return ResScan{Entries: nil, Error: scanError}
+		}
 
-		return ResScan{Entries: collectSeqInto(nil, cursor), Error: cursor.Err()}
+		return ResScan{Entries: entries, Error: nil}
 
 	case OpScanPrefix:
 		opts := concreteOperation.Options
@@ -250,9 +253,12 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 			opts.Filter = BuildFilter(*concreteOperation.Filter)
 		}
 
-		cursor := testHarness.Real.Cache.ScanPrefix(concreteOperation.Prefix, opts)
+		entries, scanError := testHarness.Real.Cache.ScanPrefix(concreteOperation.Prefix, opts)
+		if scanError != nil {
+			return ResScan{Entries: nil, Error: scanError}
+		}
 
-		return ResScan{Entries: collectSeqInto(nil, cursor), Error: cursor.Err()}
+		return ResScan{Entries: entries, Error: nil}
 
 	case OpScanMatch:
 		opts := concreteOperation.Options
@@ -260,9 +266,12 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 			opts.Filter = BuildFilter(*concreteOperation.Filter)
 		}
 
-		cursor := testHarness.Real.Cache.ScanMatch(concreteOperation.Spec, opts)
+		entries, scanError := testHarness.Real.Cache.ScanMatch(concreteOperation.Spec, opts)
+		if scanError != nil {
+			return ResScan{Entries: nil, Error: scanError}
+		}
 
-		return ResScan{Entries: collectSeqInto(nil, cursor), Error: cursor.Err()}
+		return ResScan{Entries: entries, Error: nil}
 
 	case OpScanRange:
 		opts := concreteOperation.Options
@@ -270,9 +279,12 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 			opts.Filter = BuildFilter(*concreteOperation.Filter)
 		}
 
-		cursor := testHarness.Real.Cache.ScanRange(concreteOperation.Start, concreteOperation.End, opts)
+		entries, scanError := testHarness.Real.Cache.ScanRange(concreteOperation.Start, concreteOperation.End, opts)
+		if scanError != nil {
+			return ResScan{Entries: nil, Error: scanError}
+		}
 
-		return ResScan{Entries: collectSeqInto(nil, cursor), Error: cursor.Err()}
+		return ResScan{Entries: entries, Error: nil}
 
 	case OpBeginWrite:
 		writerHandle, beginError := testHarness.Real.Cache.BeginWrite()

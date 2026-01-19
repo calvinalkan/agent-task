@@ -61,55 +61,63 @@ func ensureEntriesCapacity(dst []slotcache.Entry, capacity int) []slotcache.Entr
 }
 
 // -----------------------------------------------------------------------------
-// Scan collection helpers
+// Scan helpers
 // -----------------------------------------------------------------------------
-
-func collectSeqInto(dst []slotcache.Entry, cursor *slotcache.Cursor) []slotcache.Entry {
-	// Keep nil cursor behavior compatible with Collect().
-	if cursor == nil {
-		return dst[:0]
-	}
-
-	dst = dst[:0]
-	for entry := range cursor.Seq() {
-		dst = append(dst, entry)
-	}
-
-	return dst
-}
-
-// CollectInto drains a cursor into dst and returns (entries, err).
-//
-// dst is reused if it has enough capacity.
-func CollectInto(dst []slotcache.Entry, cursor *slotcache.Cursor) ([]slotcache.Entry, error) {
-	entries := collectSeqInto(dst, cursor)
-	if cursor == nil {
-		return entries, nil
-	}
-
-	err := cursor.Err()
-	if err != nil {
-		return entries, fmt.Errorf("cursor error: %w", err)
-	}
-
-	return entries, nil
-}
-
-// Collect drains a cursor and returns its entries and error.
-func Collect(cursor *slotcache.Cursor) ([]slotcache.Entry, error) {
-	return CollectInto(nil, cursor)
-}
 
 func scanRealInto(tb testing.TB, cache slotcache.Cache, opts slotcache.ScanOptions, dst []slotcache.Entry) ([]slotcache.Entry, error) {
 	tb.Helper()
 
-	return CollectInto(dst, cache.Scan(opts))
+	entries, err := cache.Scan(opts)
+	if err != nil {
+		return nil, fmt.Errorf("real scan: %w", err)
+	}
+
+	dst = dst[:0]
+	dst = append(dst, entries...)
+
+	return dst, nil
 }
 
 func scanRealPrefixInto(tb testing.TB, cache slotcache.Cache, prefix []byte, opts slotcache.ScanOptions, dst []slotcache.Entry) ([]slotcache.Entry, error) {
 	tb.Helper()
 
-	return CollectInto(dst, cache.ScanPrefix(prefix, opts))
+	entries, err := cache.ScanPrefix(prefix, opts)
+	if err != nil {
+		return nil, fmt.Errorf("real scan prefix: %w", err)
+	}
+
+	dst = dst[:0]
+	dst = append(dst, entries...)
+
+	return dst, nil
+}
+
+func scanRealMatchInto(tb testing.TB, cache slotcache.Cache, spec slotcache.Prefix, opts slotcache.ScanOptions, dst []slotcache.Entry) ([]slotcache.Entry, error) {
+	tb.Helper()
+
+	entries, err := cache.ScanMatch(spec, opts)
+	if err != nil {
+		return nil, fmt.Errorf("real scan match: %w", err)
+	}
+
+	dst = dst[:0]
+	dst = append(dst, entries...)
+
+	return dst, nil
+}
+
+func scanRealRangeInto(tb testing.TB, cache slotcache.Cache, start, end []byte, opts slotcache.ScanOptions, dst []slotcache.Entry) ([]slotcache.Entry, error) {
+	tb.Helper()
+
+	entries, err := cache.ScanRange(start, end, opts)
+	if err != nil {
+		return nil, fmt.Errorf("real scan range: %w", err)
+	}
+
+	dst = dst[:0]
+	dst = append(dst, entries...)
+
+	return dst, nil
 }
 
 func scanModelInto(tb testing.TB, cache *model.CacheModel, opts slotcache.ScanOptions, dst []slotcache.Entry) ([]slotcache.Entry, error) {
@@ -472,7 +480,7 @@ func CompareState(tb testing.TB, harness *Harness) {
 		}
 
 		harness.Scratch.realTmp2 = ensureEntriesCapacity(harness.Scratch.realTmp2, expectedEntries)
-		rMatchEntries, rMatchErr := CollectInto(harness.Scratch.realTmp2, harness.Real.Cache.ScanMatch(spec, fwdOpts))
+		rMatchEntries, rMatchErr := scanRealMatchInto(tb, harness.Real.Cache, spec, fwdOpts, harness.Scratch.realTmp2)
 		harness.Scratch.realTmp2 = rMatchEntries
 
 		if !errorsMatch(mMatchErr, rMatchErr) {
@@ -501,7 +509,7 @@ func CompareState(tb testing.TB, harness *Harness) {
 	mRange, mRangeErr := harness.Model.Cache.ScanRange(nil, nil, fwdOpts)
 
 	harness.Scratch.realTmp1 = ensureEntriesCapacity(harness.Scratch.realTmp1, expectedEntries)
-	rRangeEntries, rRangeErr := CollectInto(harness.Scratch.realTmp1, harness.Real.Cache.ScanRange(nil, nil, fwdOpts))
+	rRangeEntries, rRangeErr := scanRealRangeInto(tb, harness.Real.Cache, nil, nil, fwdOpts, harness.Scratch.realTmp1)
 	harness.Scratch.realTmp1 = rRangeEntries
 
 	if !errorsMatch(mRangeErr, rRangeErr) {
@@ -538,7 +546,7 @@ func CompareState(tb testing.TB, harness *Harness) {
 		mHead, mHeadErr := harness.Model.Cache.ScanRange(nil, end, fwdOpts)
 
 		harness.Scratch.realTmp2 = ensureEntriesCapacity(harness.Scratch.realTmp2, expectedEntries)
-		rHeadEntries, rHeadErr := CollectInto(harness.Scratch.realTmp2, harness.Real.Cache.ScanRange(nil, end, fwdOpts))
+		rHeadEntries, rHeadErr := scanRealRangeInto(tb, harness.Real.Cache, nil, end, fwdOpts, harness.Scratch.realTmp2)
 		harness.Scratch.realTmp2 = rHeadEntries
 
 		if !errorsMatch(mHeadErr, rHeadErr) {

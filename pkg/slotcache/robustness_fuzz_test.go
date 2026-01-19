@@ -69,8 +69,8 @@ func FuzzSpec_OpenAndReadRobustness(f *testing.F) {
 		// Exercise basic reads. They must not panic.
 		_, _ = cacheHandle.Len()
 		_, _, _ = cacheHandle.Get(make([]byte, options.KeySize))
-		_ = cacheHandle.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
-		_ = cacheHandle.ScanPrefix([]byte{0x00}, slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+		_, _ = cacheHandle.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+		_, _ = cacheHandle.ScanPrefix([]byte{0x00}, slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
 
 		_ = cacheHandle.Close()
 	})

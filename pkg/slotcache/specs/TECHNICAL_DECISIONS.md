@@ -10,7 +10,7 @@ Framing:
 - Where the spec explicitly leaves details **implementation-defined** (e.g. retry/backoff parameters, sizing heuristics, internal structure), we record our decisions here so the implementation stays consistent over time.
 - `IMPLEMENTATION_PLAN.md` is intentionally ephemeral; this file is intended to remain stable across plan rewrites.
 
-Last updated: 2026-01-18
+Last updated: 2026-01-19
 
 ---
 
@@ -49,11 +49,11 @@ However, inside a single Go process, a reader goroutine can overlap with a commi
 
 Decision:
 
-- Maintain a per-file (dev+inode keyed) in-process `sync.RWMutex`.
-  - Readers take `RLock` only while reading/copying from the mmap.
-  - `Writer.Commit()` takes `Lock` during the publish window (`generation` odd → mutations → `generation` even).
-- Cursor iteration must not hold locks while calling the user-provided `yield` function.
-  - Lock only for the brief “copy one entry” step.
+- Maintain a per-file (dev+inode keyed) in-process `sync.RWMutex` (`fileRegistryEntry.mu`).
+  - Read operations take `mu.RLock()` while touching the mmap (including calling `ScanOptions.Filter`, which receives borrowed slices).
+  - `Writer.Commit()` takes `mu.Lock()` during the publish window (`generation` odd → mutations → `generation` even).
+- Snapshot scans materialize results under `mu.RLock()` and return an in-memory `[]Entry` slice.
+  - The returned slice is already fully detached from the mmap.
 
 ---
 
@@ -82,3 +82,18 @@ Decision:
 - Once acquired, a `Writer` is **not** goroutine-safe; callers must synchronize access.
 
 (Aligned with `pkg/slotcache/specs/003-semantics.md`.)
+
+---
+
+## 7) Scan consistency: snapshot mode (no streaming scans)
+
+The spec allows two scan strategies (“snapshot mode” and “streaming mode”); see **003-semantics.md → Scan consistency modes**.
+
+Decision:
+
+- All scan-style APIs (`Scan`, `ScanPrefix`, `ScanMatch`, `ScanRange`) use **snapshot mode**.
+- We collect and copy all matching entries under a stable even `generation` before returning.
+- If a stable generation cannot be acquired after bounded retries, the scan yields **no entries** and reports `ErrBusy`.
+- We do **not** implement streaming scans that may yield partial results and then fail with `ErrBusy`.
+
+Note: the public API returns an in-memory `[]Entry` slice for scans; it does not read from the mmap after returning.

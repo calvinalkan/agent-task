@@ -800,7 +800,7 @@ func Test_Metamorphic_ScanMatch_Matches_Filtered_Scan_When_Using_Same_Spec(t *te
 			modelAllRaw, _ := modelCache.Scan(slotcache.ScanOptions{})
 			modelAll := testutil.ToEntries(modelAllRaw)
 
-			realAll, err := testutil.Collect(realCache.Scan(slotcache.ScanOptions{}))
+			realAll, err := realCache.Scan(slotcache.ScanOptions{})
 			if err != nil {
 				t.Fatalf("real.Scan failed: %v", err)
 			}
@@ -826,7 +826,7 @@ func Test_Metamorphic_ScanMatch_Matches_Filtered_Scan_When_Using_Same_Spec(t *te
 
 					wantReal := applyScanOptionsToEntries(filterEntriesByPrefixSpec(realAll, spec), scanOpts)
 
-					gotReal, err := testutil.Collect(realCache.ScanMatch(spec, scanOpts))
+					gotReal, err := realCache.ScanMatch(spec, scanOpts)
 					if err != nil {
 						t.Fatalf("real.ScanMatch(%+v) failed: %v", spec, err)
 					}
@@ -914,7 +914,7 @@ func Test_Metamorphic_ScanRange_Matches_Filtered_Scan_When_Using_Same_Bounds(t *
 			modelAllRaw, _ := modelCache.Scan(slotcache.ScanOptions{})
 			modelAll := testutil.ToEntries(modelAllRaw)
 
-			realAll, err := testutil.Collect(realCache.Scan(slotcache.ScanOptions{}))
+			realAll, err := realCache.Scan(slotcache.ScanOptions{})
 			if err != nil {
 				t.Fatalf("real.Scan failed: %v", err)
 			}
@@ -944,7 +944,7 @@ func Test_Metamorphic_ScanRange_Matches_Filtered_Scan_When_Using_Same_Bounds(t *
 
 					wantReal := applyScanOptionsToEntries(filterEntriesByRange(realAll, start, end, options.KeySize), scanOpts)
 
-					gotReal, err := testutil.Collect(realCache.ScanRange(start, end, scanOpts))
+					gotReal, err := realCache.ScanRange(start, end, scanOpts)
 					if err != nil {
 						t.Fatalf("real.ScanRange(start=%x,end=%x) failed: %v", start, end, err)
 					}
@@ -1036,7 +1036,7 @@ func Test_Metamorphic_Commit_Does_Not_Publish_When_OutOfOrder_Insert_Fails(t *te
 		_ = w.Put(keyC, 2, idx2)
 		_ = w.Commit()
 
-		before, err := testutil.Collect(cache.Scan(slotcache.ScanOptions{}))
+		before, err := cache.Scan(slotcache.ScanOptions{})
 		if err != nil {
 			t.Fatalf("real.Scan failed: %v", err)
 		}
@@ -1052,7 +1052,7 @@ func Test_Metamorphic_Commit_Does_Not_Publish_When_OutOfOrder_Insert_Fails(t *te
 			t.Fatalf("expected ErrOutOfOrderInsert, got %v", err)
 		}
 
-		after, err := testutil.Collect(cache.Scan(slotcache.ScanOptions{}))
+		after, err := cache.Scan(slotcache.ScanOptions{})
 		if err != nil {
 			t.Fatalf("real.Scan failed: %v", err)
 		}
@@ -1541,7 +1541,7 @@ func Test_Metamorphic_State_Persists_When_Cache_Is_Reopened(t *testing.T) {
 			}
 
 			// Snapshot state before close.
-			beforeSlice, err := testutil.Collect(cache1.Scan(slotcache.ScanOptions{}))
+			beforeSlice, err := cache1.Scan(slotcache.ScanOptions{})
 			if err != nil {
 				t.Fatalf("Scan before close failed: %v", err)
 			}
@@ -1561,7 +1561,7 @@ func Test_Metamorphic_State_Persists_When_Cache_Is_Reopened(t *testing.T) {
 			defer func() { _ = cache2.Close() }()
 
 			// Snapshot state after reopen.
-			afterSlice, err2 := testutil.Collect(cache2.Scan(slotcache.ScanOptions{}))
+			afterSlice, err2 := cache2.Scan(slotcache.ScanOptions{})
 			if err2 != nil {
 				t.Fatalf("Scan after reopen failed: %v", err2)
 			}
@@ -2012,7 +2012,7 @@ func execReal(t *testing.T, options slotcache.Options, operations []writerOp) []
 		t.Fatalf("real.Writer.Commit failed unexpectedly: %v\nops:\n%s", commitErr, fmtOps(operations))
 	}
 
-	entries, scanErr := testutil.Collect(cache.Scan(slotcache.ScanOptions{}))
+	entries, scanErr := cache.Scan(slotcache.ScanOptions{})
 	if scanErr != nil {
 		t.Fatalf("real.Scan failed unexpectedly: %v", scanErr)
 	}

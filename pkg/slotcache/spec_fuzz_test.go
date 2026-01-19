@@ -93,11 +93,11 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 					_, _, _ = cache.Get(keyBytes)
 
 				case 3:
-					_ = cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+					_, _ = cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
 
 				case 4:
 					prefixBytes := decoder.NextPrefix(options.KeySize)
-					_ = cache.ScanPrefix(prefixBytes, slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+					_, _ = cache.ScanPrefix(prefixBytes, slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
 				}
 
 				continue

@@ -267,46 +267,6 @@ type Prefix struct {
 	Bytes []byte
 }
 
-// Cursor is an iterator over cache entries with error reporting.
-//
-// Use [Cursor.Seq] to iterate, then check [Cursor.Err] for any errors:
-//
-//	cur := cache.Scan(opts)
-//	for entry := range cur.Seq() {
-//	    // process entry
-//	}
-//	if err := cur.Err(); err != nil {
-//	    // handle [ErrBusy], [ErrCorrupt], etc.
-//	}
-//
-// Scan-style operations capture a stable snapshot before returning a Cursor.
-// If a stable generation cannot be acquired after bounded retries, the Cursor
-// yields no entries and [Cursor.Err] returns [ErrBusy]. Once iteration begins,
-// it will not fail due to concurrent commits.
-type Cursor struct {
-	seq func(yield func(Entry) bool)
-	err error
-}
-
-// Seq returns an iterator function for use with range.
-//
-// Follows the iter.Seq[T] pattern from Go 1.23+.
-func (c *Cursor) Seq() func(yield func(Entry) bool) {
-	if c.seq == nil {
-		return func(func(Entry) bool) {}
-	}
-
-	return c.seq
-}
-
-// Err returns any error that occurred during iteration.
-//
-// Returns nil if iteration completed successfully.
-// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrUnordered].
-func (c *Cursor) Err() error {
-	return c.err
-}
-
 // Cache is a read-only handle to an open cache file.
 //
 // All read methods are safe for concurrent use by multiple goroutines.
@@ -314,8 +274,9 @@ func (c *Cursor) Err() error {
 //
 // If a writer commits while a read is in progress, the read retries
 // automatically. If retries are exhausted, [ErrBusy] is returned.
-// Scan-style methods capture a stable snapshot before returning a Cursor;
-// if acquisition fails, the Cursor yields no entries and [ErrBusy] is reported.
+// Scan-style methods capture a stable snapshot before returning results.
+// If a stable snapshot cannot be acquired after bounded retries, they return
+// [ErrBusy] and no results.
 type Cache interface {
 	// Close releases all resources associated with the cache.
 	//
@@ -335,44 +296,41 @@ type Cache interface {
 	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
 	Get(key []byte) (Entry, bool, error)
 
-	// Scan iterates over all live entries in insertion order.
+	// Scan returns all live entries in insertion order.
 	//
-	// Scan captures a stable snapshot before returning the Cursor. If snapshot
-	// acquisition fails, the Cursor yields no entries and [Cursor.Err] is [ErrBusy].
+	// Scan captures a stable snapshot before returning. If snapshot acquisition
+	// fails, it returns [ErrBusy] and no results.
 	//
-	// Check [Cursor.Err] after iteration for: [ErrClosed], [ErrBusy], [ErrCorrupt].
-	Scan(opts ScanOptions) *Cursor
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
+	Scan(opts ScanOptions) ([]Entry, error)
 
-	// ScanPrefix iterates over entries with a byte-aligned prefix at offset 0.
+	// ScanPrefix returns live entries matching the given byte prefix at offset 0.
 	//
 	// Equivalent to ScanMatch([Prefix]{Bytes: prefix}, opts).
-	// ScanPrefix captures a stable snapshot before returning the Cursor. If
-	// snapshot acquisition fails, the Cursor yields no entries and [Cursor.Err]
-	// is [ErrBusy].
+	// ScanPrefix captures a stable snapshot before returning. If snapshot
+	// acquisition fails, it returns [ErrBusy] and no results.
 	//
-	// Check [Cursor.Err] after iteration for: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
-	ScanPrefix(prefix []byte, opts ScanOptions) *Cursor
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
+	ScanPrefix(prefix []byte, opts ScanOptions) ([]Entry, error)
 
-	// ScanMatch iterates over entries matching a [Prefix].
+	// ScanMatch returns live entries matching a [Prefix].
 	//
 	// This scans all entries; it cannot use the key index for acceleration.
-	// ScanMatch captures a stable snapshot before returning the Cursor. If
-	// snapshot acquisition fails, the Cursor yields no entries and [Cursor.Err]
-	// is [ErrBusy].
+	// ScanMatch captures a stable snapshot before returning. If snapshot
+	// acquisition fails, it returns [ErrBusy] and no results.
 	//
-	// Check [Cursor.Err] after iteration for: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
-	ScanMatch(spec Prefix, opts ScanOptions) *Cursor
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
+	ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error)
 
-	// ScanRange iterates over entries in the half-open range [start, end).
+	// ScanRange returns live entries in the half-open key range [start, end).
 	//
 	// Requires [Options.OrderedKeys]. Either bound may be nil (unbounded).
 	// Bounds shorter than KeySize are right-padded with 0x00.
-	// ScanRange captures a stable snapshot before returning the Cursor. If
-	// snapshot acquisition fails, the Cursor yields no entries and [Cursor.Err]
-	// is [ErrBusy].
+	// ScanRange captures a stable snapshot before returning. If snapshot
+	// acquisition fails, it returns [ErrBusy] and no results.
 	//
-	// Check [Cursor.Err] after iteration for: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrUnordered].
-	ScanRange(start, end []byte, opts ScanOptions) *Cursor
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrUnordered].
+	ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error)
 
 	// BeginWrite starts a new write session.
 	//
