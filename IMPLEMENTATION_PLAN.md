@@ -80,8 +80,11 @@
   - ensure `msync` ranges are page-aligned (macOS requirement)
   - if any `msync` fails: still complete commit and return `ErrWriteback`
 - [ ] Implement tombstone-driven rehashing (e.g. when `bucket_tombstones/bucket_count > 0.25`) during Commit.
-- [ ] Implement bounded point-read retries with backoff; return `ErrBusy` after exhausting retries.
-  - Add explicit parameters (attempt count + backoff schedule) and document them in `pkg/slotcache/specs/TECHNICAL_DECISIONS.md`.
+- [x] Implement bounded point-read retries with backoff; return `ErrBusy` after exhausting retries. ✅ (2026-01-19)
+  - Added `readMaxRetries=10`, `readInitialBackoff=50µs`, `readMaxBackoff=1ms` constants.
+  - Exponential backoff schedule: 0, 50µs, 100µs, 200µs, 400µs, 800µs, 1ms (capped).
+  - Total worst-case delay ~6.55ms before returning `ErrBusy`.
+  - Documented in `pkg/slotcache/specs/TECHNICAL_DECISIONS.md` §8.
 
 ---
 

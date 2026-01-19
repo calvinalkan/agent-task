@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Compile-time interface satisfaction checks.
@@ -24,6 +25,36 @@ var (
 // a concurrent write. Callers should retry. This is not exported; callers see ErrBusy
 // after retry exhaustion.
 var errOverlap = errors.New("internal: read overlapped with concurrent write")
+
+// Retry configuration for read operations under seqlock contention.
+// See TECHNICAL_DECISIONS.md §8 for rationale.
+const (
+	// readMaxRetries is the maximum number of retry attempts for read operations
+	// before returning ErrBusy.
+	readMaxRetries = 10
+
+	// readInitialBackoff is the initial sleep duration between retry attempts.
+	readInitialBackoff = 50 * time.Microsecond
+
+	// readMaxBackoff caps the exponential backoff growth.
+	readMaxBackoff = 1 * time.Millisecond
+)
+
+// readBackoff waits for an exponentially increasing duration based on the
+// attempt number (0-indexed). Returns the backoff duration used.
+func readBackoff(attempt int) time.Duration {
+	if attempt == 0 {
+		return 0 // First attempt is immediate
+	}
+
+	backoff := min(
+		// Exponential: 50µs, 100µs, 200µs, ...
+		readInitialBackoff<<(attempt-1), readMaxBackoff)
+
+	<-time.After(backoff)
+
+	return backoff
+}
 
 // Default load factor for bucket sizing.
 const defaultLoadFactor = 0.5
@@ -649,8 +680,9 @@ func (c *cache) Len() (int, error) {
 
 	c.mu.Unlock()
 
-	const maxRetries = 10
-	for range maxRetries {
+	for attempt := range readMaxRetries {
+		readBackoff(attempt)
+
 		c.registry.mu.RLock()
 
 		g1 := c.readGeneration()
@@ -688,8 +720,9 @@ func (c *cache) Get(key []byte) (Entry, bool, error) {
 		return Entry{}, false, ErrInvalidInput
 	}
 
-	const maxRetries = 10
-	for range maxRetries {
+	for attempt := range readMaxRetries {
+		readBackoff(attempt)
+
 		c.registry.mu.RLock()
 
 		g1 := c.readGeneration()
@@ -987,9 +1020,9 @@ func (c *cache) lookupKey(key []byte, expectedGen uint64) (Entry, bool, error) {
 
 // collectEntries collects entries matching the predicate with seqlock retry.
 func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
-	const maxRetries = 10
+	for attempt := range readMaxRetries {
+		readBackoff(attempt)
 
-	for range maxRetries {
 		c.registry.mu.RLock()
 
 		g1 := c.readGeneration()

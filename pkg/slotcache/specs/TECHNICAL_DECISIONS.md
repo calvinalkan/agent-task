@@ -97,3 +97,37 @@ Decision:
 - We do **not** implement streaming scans that may yield partial results and then fail with `ErrBusy`.
 
 Note: the public API returns an in-memory `[]Entry` slice for scans; it does not read from the mmap after returning.
+
+---
+
+## 8) Read retry/backoff parameters
+
+The spec requires bounded retries with backoff for read operations (see **003-semantics.md → Reader coherence rule**). The specific parameters are implementation-defined.
+
+**Parameters:**
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `readMaxRetries` | 10 | Balances responsiveness vs. giving the writer time to complete. 10 attempts is enough for most short commits. |
+| `readInitialBackoff` | 50µs | Small enough for fast retry under brief contention, large enough to avoid pure busy-spinning. |
+| `readMaxBackoff` | 1ms | Caps exponential growth; prevents excessive delays if retries are exhausted. |
+
+**Schedule:**
+
+- Attempt 0: immediate (no delay)
+- Attempt 1: 50µs
+- Attempt 2: 100µs
+- Attempt 3: 200µs
+- Attempt 4: 400µs
+- Attempt 5: 800µs
+- Attempt 6–9: 1ms (capped)
+
+**Total worst-case delay:** ~6.55ms (sum of all backoffs if all 10 attempts fail).
+
+**Why exponential backoff:** Starts fast to handle brief contention (writer finishing), then backs off to reduce CPU pressure during sustained contention (long commit). This balances latency for the common case (writer finishes quickly) against efficiency for the rare case (long commit or many retries).
+
+**Why not longer timeouts:** slotcache is a "throwaway cache" — if the writer is holding the lock for extended periods (e.g., >10ms), callers should either:
+1. Retry at the application level with longer intervals, or
+2. Accept `ErrBusy` and fall back to the source of truth.
+
+Callers needing guaranteed reads under heavy write load should use external coordination or queue writes.
