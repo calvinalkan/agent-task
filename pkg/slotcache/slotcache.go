@@ -907,7 +907,8 @@ func (c *cache) lookupKey(key []byte) (Entry, bool, error) {
 		}
 
 		// Key matches - check if live.
-		meta := binary.LittleEndian.Uint64(c.data[slotOffset:])
+		// Use atomic load for meta to avoid torn reads during concurrent writes.
+		meta := atomicLoadUint64(c.data[slotOffset:])
 		if (meta & slotMetaUsed) == 0 {
 			// Slot is tombstoned but bucket points to it - corruption.
 			return Entry{}, false, ErrCorrupt
@@ -916,7 +917,8 @@ func (c *cache) lookupKey(key []byte) (Entry, bool, error) {
 		// Read entry data.
 		keyPad := (8 - (c.keySize % 8)) % 8
 		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
-		revision := getInt64LE(c.data[revOffset : revOffset+8])
+		// Use atomic load for revision to avoid torn reads during concurrent writes.
+		revision := atomicLoadInt64(c.data[revOffset:])
 
 		var index []byte
 
@@ -977,7 +979,8 @@ func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, e
 	for slotID := range highwater {
 		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
 
-		meta := binary.LittleEndian.Uint64(c.data[slotOffset:])
+		// Use atomic load for meta to avoid torn reads during concurrent writes.
+		meta := atomicLoadUint64(c.data[slotOffset:])
 		if (meta & slotMetaUsed) == 0 {
 			continue // tombstone
 		}
@@ -989,7 +992,8 @@ func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, e
 
 		keyPad := (8 - (c.keySize % 8)) % 8
 		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
-		revision := getInt64LE(c.data[revOffset : revOffset+8])
+		// Use atomic load for revision to avoid torn reads during concurrent writes.
+		revision := atomicLoadInt64(c.data[revOffset:])
 
 		var index []byte
 

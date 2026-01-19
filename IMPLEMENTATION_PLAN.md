@@ -50,9 +50,10 @@
     - re-read generation; if changed/odd → overlap → retry/ErrBusy
     - if same even generation → real corruption → `ErrCorrupt`
 
-- [ ] **Make slot `meta` and `revision` atomic (spec strictness)**
-  - Replace bytewise reads/writes of slot `meta` (u64) and `revision` (i64) with atomic 64-bit ops (`sync/atomic` + `unsafe`).
-  - Stop writing these fields via bytewise helpers (e.g. `binary.LittleEndian.PutUint64`, `putInt64LE`), because those are not atomic.
+- [x] **Make slot `meta` and `revision` atomic (spec strictness)** ✅ (2026-01-19)
+  - Added `atomicLoadInt64()` and `atomicStoreInt64()` helpers in format.go using `sync/atomic` + `unsafe`.
+  - Updated all mmap-based slot `meta` reads/writes to use `atomicLoadUint64()`/`atomicStoreUint64()`.
+  - Updated all mmap-based slot `revision` reads/writes to use `atomicLoadInt64()`/`atomicStoreInt64()`.
   - Note: `index` remains non-atomic and is protected by seqlock stability.
 
 - [ ] **Regression tests**

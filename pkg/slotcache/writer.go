@@ -278,7 +278,8 @@ func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) {
 	keyPad := (8 - (w.cache.keySize % 8)) % 8
 	revOffset := slotOffset + 8 + uint64(w.cache.keySize) + uint64(keyPad)
 
-	putInt64LE(w.cache.data[revOffset:revOffset+8], revision)
+	// Use atomic store for revision to ensure readers see complete values.
+	atomicStoreInt64(w.cache.data[revOffset:], revision)
 
 	if w.cache.indexSize > 0 {
 		idxOffset := revOffset + 8
@@ -290,8 +291,8 @@ func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) {
 func (w *writer) deleteSlot(slotID uint64, key []byte) {
 	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 
-	// Clear USED bit.
-	binary.LittleEndian.PutUint64(w.cache.data[slotOffset:], 0)
+	// Clear USED bit. Use atomic store to ensure readers see complete values.
+	atomicStoreUint64(w.cache.data[slotOffset:], 0)
 
 	// Find and tombstone the bucket entry.
 	hash := fnv1a64(key)
@@ -333,12 +334,14 @@ func (w *writer) insertSlot(key []byte, revision int64, index []byte) {
 	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 
 	// Write slot.
-	binary.LittleEndian.PutUint64(w.cache.data[slotOffset:], slotMetaUsed) // meta = USED
+	// Use atomic store for meta to ensure readers see complete values.
+	atomicStoreUint64(w.cache.data[slotOffset:], slotMetaUsed) // meta = USED
 	copy(w.cache.data[slotOffset+8:slotOffset+8+uint64(w.cache.keySize)], key)
 
 	keyPad := (8 - (w.cache.keySize % 8)) % 8
 	revOffset := slotOffset + 8 + uint64(w.cache.keySize) + uint64(keyPad)
-	putInt64LE(w.cache.data[revOffset:revOffset+8], revision)
+	// Use atomic store for revision to ensure readers see complete values.
+	atomicStoreInt64(w.cache.data[revOffset:], revision)
 
 	if w.cache.indexSize > 0 {
 		idxOffset := revOffset + 8
@@ -448,7 +451,8 @@ func (w *writer) findLiveSlotLocked(key []byte) (uint64, bool) {
 
 		slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 
-		meta := binary.LittleEndian.Uint64(w.cache.data[slotOffset:])
+		// Use atomic load for meta for consistency with other slot reads.
+		meta := atomicLoadUint64(w.cache.data[slotOffset:])
 		if (meta & slotMetaUsed) == 0 {
 			continue
 		}

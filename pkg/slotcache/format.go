@@ -453,6 +453,39 @@ func atomicStoreUint64(buf []byte, val uint64) {
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&buf[0])), val)
 }
 
+// atomicLoadInt64 performs an atomic 64-bit load from an 8-byte-aligned
+// position in the buffer and returns it as int64. Used for slot revision reads.
+//
+// Preconditions:
+//   - buf must be at least 8 bytes
+//   - buf[0] must be 8-byte aligned (enforced by SLC1 slot layout: revision is 8-byte aligned)
+//
+// Go's sync/atomic operations provide sequential consistency.
+func atomicLoadInt64(buf []byte) int64 {
+	// Bounds check.
+	_ = buf[7]
+
+	// SAFETY: SLC1 slot layout ensures revision is 8-byte aligned:
+	// meta(8) + key + key_pad(align to 8) + revision(8)
+	return atomic.LoadInt64((*int64)(unsafe.Pointer(&buf[0])))
+}
+
+// atomicStoreInt64 performs an atomic 64-bit store to an 8-byte-aligned
+// position in the buffer. Used for slot revision writes.
+//
+// Preconditions:
+//   - buf must be at least 8 bytes
+//   - buf[0] must be 8-byte aligned (enforced by SLC1 slot layout: revision is 8-byte aligned)
+//
+// Go's sync/atomic operations provide sequential consistency.
+func atomicStoreInt64(buf []byte, val int64) {
+	// Bounds check.
+	_ = buf[7]
+
+	// SAFETY: Same alignment guarantees as atomicLoadInt64.
+	atomic.StoreInt64((*int64)(unsafe.Pointer(&buf[0])), val)
+}
+
 // pageSize is the system page size, used for aligning msync ranges.
 // macOS requires page-aligned ranges for msync.
 var pageSize = unix.Getpagesize()
