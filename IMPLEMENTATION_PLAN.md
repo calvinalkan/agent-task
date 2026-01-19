@@ -17,13 +17,14 @@ This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant wit
 - [ ] **Surface additional corruption early on reads (cheap checks)**
   - Example: if a slot `meta` has reserved bits set (`meta &^ 1 != 0`) under a stable even generation, classify as `ErrCorrupt` (or retry if generation changed).
 
-- [ ] **Reduce allocation/overhead in read retry backoff**
-  - Replace `time.After()` in `readBackoff()` with `time.Sleep()` to avoid allocating timers on hot read paths.
-
 - [ ] **Optional Open-time bucket sampling** (spec says MAY)
   - Sample-check a small number of bucket entries for obvious out-of-range slot IDs to fail-fast on common corruptions without scanning the full table.
 
 ## Completed
+
+- [x] **Reduce allocation/overhead in read retry backoff**
+  - Replaced `time.After()` in `readBackoff()` with `time.Sleep()` to avoid allocating a timer and channel on every backoff attempt.
+  - Added linter exception in `.golangci.yml` for this specific hot-path optimization.
 
 - [x] **Replace "clamping" integer conversions with explicit validation**
   - Replaced `safeIntToUint32` / `safeUint64ToInt64` / `safeUint64ToInt` clamping functions with checked versions (`intToUint32Checked`, `uint64ToInt64Checked`, `uint64ToIntChecked`) that return `(value, ok)`.

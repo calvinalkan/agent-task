@@ -276,6 +276,11 @@ linters:
         text: "time\\.Sleep"
         linters:
           - forbidigo
+      # Allow time.Sleep in readBackoff (hot path optimization - avoids timer allocation)
+      - path: pkg/slotcache/slotcache\.go
+        text: "time\\.Sleep"
+        linters:
+          - forbidigo
       # Allow env access in tests
       - path: _test\.go
         text: "os\\.(Getenv|LookupEnv|ExpandEnv)"

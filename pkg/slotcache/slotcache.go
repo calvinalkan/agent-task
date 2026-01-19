@@ -53,7 +53,7 @@ func readBackoff(attempt int) time.Duration {
 		// Exponential: 50µs, 100µs, 200µs, ...
 		readInitialBackoff<<(attempt-1), readMaxBackoff)
 
-	<-time.After(backoff)
+	time.Sleep(backoff)
 
 	return backoff
 }
