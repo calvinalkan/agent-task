@@ -35,6 +35,19 @@ type writer struct {
 	isClosed       bool
 	closedByCommit bool
 	lock           *fs.Lock
+
+	// Dirty range tracking for WritebackSync optimization.
+	// Instead of msync'ing the entire file, we track which page ranges
+	// were modified and only sync those. The kernel usually skips clean
+	// pages, but for large caches this can reduce syscall overhead.
+	//
+	// Slots and buckets are tracked as byte ranges [minOffset, maxOffset).
+	// A value of -1 for minSlotOffset means no slots were touched.
+	minSlotOffset   int
+	maxSlotOffset   int // exclusive: points past the last modified byte
+	minBucketOffset int
+	maxBucketOffset int  // exclusive: points past the last modified byte
+	rehashOccurred  bool // if true, all buckets were rewritten
 }
 
 // Put buffers a put operation for the given key.
@@ -101,6 +114,9 @@ func (w *writer) Commit() error {
 	if w.isClosed || w.cache.isClosed {
 		return ErrClosed
 	}
+
+	// Initialize dirty range tracking for WritebackSync optimization.
+	w.resetDirtyTracking()
 
 	// Compute final ops (last-wins per key).
 	finalOps := w.finalOps()
@@ -229,13 +245,40 @@ func (w *writer) Commit() error {
 	crc := computeHeaderCRC(w.cache.data[:slc1HeaderSize])
 	binary.LittleEndian.PutUint32(w.cache.data[offHeaderCRC32C:], crc)
 
-	// Step 5 (WritebackSync): msync all modified data (slots + buckets + header).
+	// Step 5 (WritebackSync): msync modified data (slots + buckets + header).
 	// This ensures data is on disk before we publish the even generation.
+	// Optimization: track dirty page ranges and only sync those instead of
+	// the entire file. The kernel usually skips clean pages, but for large
+	// caches this can reduce syscall overhead.
 	if syncMode {
-		// Sync entire file to cover all modifications.
-		err := msyncRange(w.cache.data, 0, len(w.cache.data))
+		// Always sync header (contains generation, counters, CRC).
+		err := msyncRange(w.cache.data, 0, slc1HeaderSize)
 		if err != nil {
 			msyncFailed = true
+		}
+
+		// Sync dirty slot range if any slots were modified.
+		if w.minSlotOffset >= 0 {
+			err := msyncRange(w.cache.data, w.minSlotOffset, w.maxSlotOffset-w.minSlotOffset)
+			if err != nil {
+				msyncFailed = true
+			}
+		}
+
+		// Sync buckets: all if rehash occurred, otherwise just dirty range.
+		if w.rehashOccurred {
+			bucketsStart, _ := uint64ToIntChecked(w.cache.bucketsOffset)
+			bucketsLen, _ := uint64ToIntChecked(w.cache.bucketCount * 16)
+
+			err := msyncRange(w.cache.data, bucketsStart, bucketsLen)
+			if err != nil {
+				msyncFailed = true
+			}
+		} else if w.minBucketOffset >= 0 {
+			err := msyncRange(w.cache.data, w.minBucketOffset, w.maxBucketOffset-w.minBucketOffset)
+			if err != nil {
+				msyncFailed = true
+			}
 		}
 	}
 
@@ -291,6 +334,59 @@ func (w *writer) Close() error {
 	return nil
 }
 
+// resetDirtyTracking initializes dirty range tracking for a new commit.
+func (w *writer) resetDirtyTracking() {
+	w.minSlotOffset = -1
+	w.maxSlotOffset = -1
+	w.minBucketOffset = -1
+	w.maxBucketOffset = -1
+	w.rehashOccurred = false
+}
+
+// markSlotDirty expands the dirty slot range to include the given slot.
+// File layout is validated at open time to fit in int64, so conversions are safe.
+func (w *writer) markSlotDirty(slotID uint64) {
+	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
+	slotEnd := slotOffset + uint64(w.cache.slotSize)
+
+	off, ok1 := uint64ToIntChecked(slotOffset)
+	end, ok2 := uint64ToIntChecked(slotEnd)
+
+	if !ok1 || !ok2 {
+		return // Should never happen due to validation at open time.
+	}
+
+	if w.minSlotOffset < 0 || off < w.minSlotOffset {
+		w.minSlotOffset = off
+	}
+
+	if end > w.maxSlotOffset {
+		w.maxSlotOffset = end
+	}
+}
+
+// markBucketDirty expands the dirty bucket range to include the given bucket.
+// File layout is validated at open time to fit in int64, so conversions are safe.
+func (w *writer) markBucketDirty(bucketIdx uint64) {
+	bucketOffset := w.cache.bucketsOffset + bucketIdx*16
+	bucketEnd := bucketOffset + 16
+
+	off, ok1 := uint64ToIntChecked(bucketOffset)
+	end, ok2 := uint64ToIntChecked(bucketEnd)
+
+	if !ok1 || !ok2 {
+		return // Should never happen due to validation at open time.
+	}
+
+	if w.minBucketOffset < 0 || off < w.minBucketOffset {
+		w.minBucketOffset = off
+	}
+
+	if end > w.maxBucketOffset {
+		w.maxBucketOffset = end
+	}
+}
+
 // updateSlot updates an existing slot with new revision and index.
 func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) {
 	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
@@ -304,6 +400,8 @@ func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) {
 		idxOffset := revOffset + 8
 		copy(w.cache.data[idxOffset:idxOffset+uint64(w.cache.indexSize)], index)
 	}
+
+	w.markSlotDirty(slotID)
 }
 
 // deleteSlot marks a slot as tombstoned and updates the bucket index.
@@ -312,6 +410,8 @@ func (w *writer) deleteSlot(slotID uint64, key []byte) {
 
 	// Clear USED bit. Use atomic store to ensure readers see complete values.
 	atomicStoreUint64(w.cache.data[slotOffset:], 0)
+
+	w.markSlotDirty(slotID)
 
 	// Find and tombstone the bucket entry.
 	hash := fnv1a64(key)
@@ -336,6 +436,8 @@ func (w *writer) deleteSlot(slotID uint64, key []byte) {
 		if slotPlusOne-1 == slotID {
 			// Found our bucket entry - tombstone it.
 			binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], ^uint64(0))
+
+			w.markBucketDirty(idx)
 
 			// Update bucket_tombstones.
 			tombstones := binary.LittleEndian.Uint64(w.cache.data[offBucketTombstones:])
@@ -370,6 +472,8 @@ func (w *writer) insertSlot(key []byte, revision int64, index []byte) {
 	// Update highwater (done in Commit after all inserts).
 	binary.LittleEndian.PutUint64(w.cache.data[offSlotHighwater:], highwater+1)
 
+	w.markSlotDirty(slotID)
+
 	// Insert into bucket index.
 	hash := fnv1a64(key)
 	mask := w.cache.bucketCount - 1
@@ -384,6 +488,8 @@ func (w *writer) insertSlot(key []byte, revision int64, index []byte) {
 			// EMPTY or TOMBSTONE - insert here.
 			binary.LittleEndian.PutUint64(w.cache.data[bucketOffset:], hash)
 			binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], slotID+1)
+
+			w.markBucketDirty(idx)
 
 			// If we filled a tombstone, decrement tombstone count.
 			if slotPlusOne == ^uint64(0) {
@@ -453,6 +559,9 @@ func (w *writer) rehashBuckets(highwater uint64) {
 
 	// Step 3: Update header - reset bucket_tombstones to 0.
 	binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], 0)
+
+	// Mark that all buckets were touched for WritebackSync optimization.
+	w.rehashOccurred = true
 }
 func (w *writer) closeByCommit() {
 	w.isClosed = true
