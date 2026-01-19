@@ -79,7 +79,12 @@
   - `WritebackSync`: `msync` barriers per spec (header odd → data → header even)
   - ensure `msync` ranges are page-aligned (macOS requirement)
   - if any `msync` fails: still complete commit and return `ErrWriteback`
-- [ ] Implement tombstone-driven rehashing (e.g. when `bucket_tombstones/bucket_count > 0.25`) during Commit.
+- [x] Implement tombstone-driven rehashing (e.g. when `bucket_tombstones/bucket_count > 0.25`) during Commit. ✅ (2026-01-19)
+  - Added `rehashThreshold` constant (0.25) in writer.go.
+  - Added `rehashBuckets()` method that clears all buckets and re-inserts entries for live slots.
+  - Called during Commit after all operations are applied, before CRC recomputation.
+  - Resets `bucket_tombstones` to 0 after rehash.
+  - Added behavioral tests in `rehash_test.go` verifying correctness through public API.
 - [x] Implement bounded point-read retries with backoff; return `ErrBusy` after exhausting retries. ✅ (2026-01-19)
   - Added `readMaxRetries=10`, `readInitialBackoff=50µs`, `readMaxBackoff=1ms` constants.
   - Exponential backoff schedule: 0, 50µs, 100µs, 200µs, 400µs, 800µs, 1ms (capped).

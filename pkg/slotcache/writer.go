@@ -8,6 +8,10 @@ import (
 	"sort"
 )
 
+// rehashThreshold is the ratio of bucket_tombstones/bucket_count above which
+// we rebuild the hash table during Commit. Per TECHNICAL_DECISIONS.md §5.
+const rehashThreshold = 0.25
+
 // bufferedOp represents a buffered Put or Delete operation.
 type bufferedOp struct {
 	isPut    bool
@@ -204,6 +208,13 @@ func (w *writer) Commit() error {
 	// bucket_used must equal live_count.
 	binary.LittleEndian.PutUint64(w.cache.data[offBucketUsed:], newLiveCount)
 
+	// Step 3b: Check if tombstone-driven rehash is needed.
+	// Per TECHNICAL_DECISIONS.md §5: rebuild when bucket_tombstones/bucket_count > 0.25.
+	bucketTombstones := binary.LittleEndian.Uint64(w.cache.data[offBucketTombstones:])
+	if w.cache.bucketCount > 0 && float64(bucketTombstones)/float64(w.cache.bucketCount) > rehashThreshold {
+		w.rehashBuckets(newHighwater)
+	}
+
 	// Step 4: Recompute header CRC.
 	crc := computeHeaderCRC(w.cache.data[:slc1HeaderSize])
 	binary.LittleEndian.PutUint32(w.cache.data[offHeaderCRC32C:], crc)
@@ -375,6 +386,58 @@ func (w *writer) insertSlot(key []byte, revision int64, index []byte) {
 			break
 		}
 	}
+}
+
+// rehashBuckets rebuilds the bucket index by clearing all buckets and
+// re-inserting entries for all live slots. This eliminates tombstones
+// and restores optimal probe chain lengths.
+//
+// Called during Commit when bucket_tombstones/bucket_count > rehashThreshold.
+func (w *writer) rehashBuckets(highwater uint64) {
+	// Step 1: Clear all buckets to EMPTY (slot_plus_one = 0).
+	for i := range w.cache.bucketCount {
+		bucketOffset := w.cache.bucketsOffset + i*16
+		binary.LittleEndian.PutUint64(w.cache.data[bucketOffset:], 0)   // clear hash field
+		binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], 0) // clear to EMPTY state
+	}
+
+	// Step 2: Re-insert bucket entries for all live slots.
+	mask := w.cache.bucketCount - 1
+
+	for slotID := range highwater {
+		slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
+
+		// Check if slot is live (USED bit set).
+		meta := binary.LittleEndian.Uint64(w.cache.data[slotOffset:])
+		if (meta & slotMetaUsed) == 0 {
+			continue // tombstoned slot, skip
+		}
+
+		// Read key and compute hash.
+		key := w.cache.data[slotOffset+8 : slotOffset+8+uint64(w.cache.keySize)]
+		hash := fnv1a64(key)
+		startIdx := hash & mask
+
+		// Linear probe to find an empty bucket.
+		for probeCount := range w.cache.bucketCount {
+			idx := (startIdx + probeCount) & mask
+			bucketOffset := w.cache.bucketsOffset + idx*16
+
+			slotPlusOne := binary.LittleEndian.Uint64(w.cache.data[bucketOffset+8:])
+			if slotPlusOne == 0 {
+				// EMPTY - insert here.
+				binary.LittleEndian.PutUint64(w.cache.data[bucketOffset:], hash)
+				binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], slotID+1)
+
+				break
+			}
+			// Note: We just cleared all buckets, so we should never see tombstones
+			// or existing entries. This loop will always find an empty bucket.
+		}
+	}
+
+	// Step 3: Update header - reset bucket_tombstones to 0.
+	binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], 0)
 }
 func (w *writer) closeByCommit() {
 	w.isClosed = true
