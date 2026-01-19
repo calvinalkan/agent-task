@@ -5,7 +5,7 @@ MAKEFLAGS += --warn-undefined-variables --no-builtin-rules -j
 .DELETE_ON_ERROR:
 .DEFAULT_GOAL := build
 
-.PHONY: build test lint clean install vet install-tools check modernize bench fmt
+.PHONY: build test lint clean install vet install-tools check modernize bench fmt fuzz fuzz-slotcache fuzz-cli fuzz-fs
 
 BINARY := tk
 GO := go
@@ -50,3 +50,38 @@ install-tools:
 	@echo "Install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"
 
 check: vet lint test
+
+# Fuzz testing - Go can only run one fuzz test at a time
+# Usage:
+#   make fuzz                    # run all fuzz tests (10s each)
+#   make fuzz-slotcache          # run slotcache fuzz tests only
+#   make fuzz-cli                # run cli fuzz tests only
+#   make fuzz-fs                 # run fs fuzz tests only
+#   make fuzz FUZZ_TIME=30s      # run all fuzz tests (30s each)
+#   make fuzz FUZZ_TARGET=FuzzBehavior_ModelVsReal  # run specific test
+
+FUZZ_TIME ?= 10s
+FUZZ_TARGET ?=
+
+define run_fuzz_tests
+	@if [ -n "$(FUZZ_TARGET)" ]; then \
+		echo "==> Fuzzing $(FUZZ_TARGET) in $(1) for $(FUZZ_TIME)"; \
+		$(GO) test -fuzz="^$(FUZZ_TARGET)$$" -fuzztime=$(FUZZ_TIME) $(1) || exit 1; \
+	else \
+		for test in $$(grep -h "^func Fuzz" $(2) 2>/dev/null | sed 's/func \(Fuzz[^(]*\).*/\1/'); do \
+			echo "==> Fuzzing $$test in $(1) for $(FUZZ_TIME)"; \
+			$(GO) test -fuzz="^$$test$$" -fuzztime=$(FUZZ_TIME) $(1) || exit 1; \
+		done; \
+	fi
+endef
+
+fuzz-slotcache:
+	$(call run_fuzz_tests,./pkg/slotcache,./pkg/slotcache/*_test.go)
+
+fuzz-cli:
+	$(call run_fuzz_tests,./internal/cli,./internal/cli/*_test.go)
+
+fuzz-fs:
+	$(call run_fuzz_tests,./pkg/fs,./pkg/fs/*_test.go)
+
+fuzz: fuzz-slotcache fuzz-cli fuzz-fs
