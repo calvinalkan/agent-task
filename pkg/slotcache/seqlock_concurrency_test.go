@@ -133,6 +133,98 @@ func Test_Open_Returns_ErrCorrupt_When_Generation_Odd_And_No_Writer_Lock_Held(t 
 	}
 }
 
+func Test_Open_Returns_ErrBusy_When_Creating_New_File_And_WriterLock_Held(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "create_busy.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: 64,
+	}
+
+	// Ensure the cache file does not exist so Open() must take the create path.
+	_ = os.Remove(path)
+
+	lockFile := lockFileExclusive(t, path)
+
+	defer func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}()
+
+	c, err := slotcache.Open(opts)
+	if err == nil {
+		_ = c.Close()
+
+		t.Fatal("Open() must return ErrBusy when creating a missing cache file while the writer lock is held; got nil")
+	}
+
+	if !errors.Is(err, slotcache.ErrBusy) {
+		t.Fatalf("Open() must return ErrBusy when creating a missing cache file while the writer lock is held; got %v", err)
+	}
+
+	// With locking enabled, Open() must not create/replace the cache file when the lock is busy.
+	_, statErr := os.Stat(path)
+	if !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected cache file to not be created while lock is held; statErr=%v", statErr)
+	}
+}
+
+func Test_Open_Returns_ErrBusy_When_Initializing_ZeroByte_File_And_WriterLock_Held(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "zerobyte_busy.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: 64,
+	}
+
+	// Pre-create a 0-byte file so Open() must take the "initialize in place" path.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("create 0-byte file: %v", err)
+	}
+
+	_ = f.Close()
+
+	lockFile := lockFileExclusive(t, path)
+
+	defer func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}()
+
+	c, openErr := slotcache.Open(opts)
+	if openErr == nil {
+		_ = c.Close()
+
+		t.Fatal("Open() must return ErrBusy when initializing a 0-byte cache file while the writer lock is held; got nil")
+	}
+
+	if !errors.Is(openErr, slotcache.ErrBusy) {
+		t.Fatalf("Open() must return ErrBusy when initializing a 0-byte cache file while the writer lock is held; got %v", openErr)
+	}
+
+	st, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("stat 0-byte file: %v", statErr)
+	}
+
+	if st.Size() != 0 {
+		t.Fatalf("expected cache file to remain 0 bytes while lock is held; got size=%d", st.Size())
+	}
+}
+
 func Test_Seqlock_CrossProcess_Get_Does_Not_Observe_Torn_Updates_When_Writer_Commits_Concurrently(t *testing.T) {
 	t.Parallel()
 

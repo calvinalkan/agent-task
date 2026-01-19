@@ -199,8 +199,13 @@ func Open(opts Options) (Cache, error) {
 		if !errors.Is(err, syscall.ENOENT) {
 			return nil, fmt.Errorf("open file: %w", err)
 		}
-		// File doesn't exist - create it.
-		return createNewCache(opts)
+
+		// File doesn't exist. With locking enabled, serialize creation under the writer lock.
+		if opts.DisableLocking {
+			return createNewCache(opts)
+		}
+
+		return openCreateOrInitWithWriterLock(opts)
 	}
 
 	// File exists - check size and validate.
@@ -218,7 +223,11 @@ func Open(opts Options) (Cache, error) {
 		// Empty file - initialize in place.
 		_ = syscall.Close(fd)
 
-		return initializeEmptyFile(opts)
+		if opts.DisableLocking {
+			return initializeEmptyFile(opts)
+		}
+
+		return openCreateOrInitWithWriterLock(opts)
 	}
 
 	if size < slc1HeaderSize {
@@ -242,6 +251,72 @@ func Open(opts Options) (Cache, error) {
 		_ = syscall.Close(fd)
 
 		return nil, err
+	}
+
+	return c, nil
+}
+
+// openCreateOrInitWithWriterLock serializes cache creation and 0-byte initialization
+// under the writer lock when locking is enabled.
+//
+// This is used to prevent concurrent processes from racing on temp+rename creation
+// or in-place initialization, which could otherwise result in different processes
+// operating on different inodes for the same path.
+func openCreateOrInitWithWriterLock(opts Options) (Cache, error) {
+	lock, err := acquireWriterLock(opts.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseWriterLock(lock)
+
+	fd, openErr := syscall.Open(opts.Path, syscall.O_RDWR, 0)
+	if openErr != nil {
+		if errors.Is(openErr, syscall.ENOENT) {
+			// Still missing under the lock: create new file.
+			return createNewCache(opts)
+		}
+
+		return nil, fmt.Errorf("open file: %w", openErr)
+	}
+
+	var stat syscall.Stat_t
+
+	statErr := syscall.Fstat(fd, &stat)
+	if statErr != nil {
+		_ = syscall.Close(fd)
+
+		return nil, fmt.Errorf("stat file: %w", statErr)
+	}
+
+	size := stat.Size
+	if size == 0 {
+		// 0-byte file under lock: initialize in place.
+		_ = syscall.Close(fd)
+
+		return initializeEmptyFile(opts)
+	}
+
+	// File is non-empty under lock. Proceed with the normal open/validate path.
+	if size < slc1HeaderSize {
+		_ = syscall.Close(fd)
+
+		return nil, fmt.Errorf("file size %d is less than header size %d: %w", size, slc1HeaderSize, ErrCorrupt)
+	}
+
+	headerBuf := make([]byte, slc1HeaderSize)
+
+	n, readErr := syscall.Pread(fd, headerBuf, 0)
+	if readErr != nil || n != slc1HeaderSize {
+		_ = syscall.Close(fd)
+
+		return nil, ErrCorrupt
+	}
+
+	c, validateErr := validateAndOpenExisting(fd, headerBuf, size, opts)
+	if validateErr != nil {
+		_ = syscall.Close(fd)
+
+		return nil, validateErr
 	}
 
 	return c, nil
