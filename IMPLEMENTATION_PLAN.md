@@ -108,9 +108,7 @@
   - Added `collectRangeEntries()` and `doCollectRange()` methods that use binary search + sequential scan.
   - Early termination: stops scanning when key >= end bound (keys are sorted in ordered mode).
   - `ScanRange` now uses O(log n + k) instead of O(n), where k is the number of results.
-- [ ] Optional extra corruption detection:
-  - sample-check buckets at Open
-  - stricter invariant checks during reads (return `ErrCorrupt` under stable even generation)
+
 - [ ] Allocation reductions in scans (without violating "returned slices are caller-owned").
 
 ---
@@ -131,7 +129,11 @@ Additional recommended checks (spec hardening):
 
 ### P3 — Cleanup
 
-- [ ] Replace `writer_lock.go` with `pkg/fs.Locker` - use it directly with a real FS inside `slotcache.go`.
+- [x] Replace `writer_lock.go` with `pkg/fs.Locker` - use it directly with a real FS inside `slotcache.go`. ✅ (2026-01-19)
+  - Deleted `writer_lock.go` and moved locking to `slotcache.go` using `pkg/fs.Locker`.
+  - Created package-level `pkgLocker = fs.NewLocker(fs.NewReal())` for cross-process writer coordination.
+  - Changed `writer.lockFile *os.File` to `writer.lock *fs.Lock`.
+  - Benefits: inode verification (protects against file replacement during lock), proper EINTR handling, code deduplication.
 - [x] Wrap sentinel errors with helpful context in `slotcache.go` and `writer.go`. ✅ (2026-01-19)
   - Used `fmt.Errorf("useful context: %w", ErrFoo)` - include relevant data (keys, sizes, counts, etc.)
   - `errors.Is` still works but users get actionable diagnostics

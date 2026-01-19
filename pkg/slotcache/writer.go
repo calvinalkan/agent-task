@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"os"
 	"slices"
 	"sort"
+
+	"github.com/calvinalkan/agent-task/pkg/fs"
 )
 
 // rehashThreshold is the ratio of bucket_tombstones/bucket_count above which
@@ -33,7 +34,7 @@ type writer struct {
 	bufferedOps    []bufferedOp
 	isClosed       bool
 	closedByCommit bool
-	lockFile       *os.File
+	lock           *fs.Lock
 }
 
 // Put buffers a put operation for the given key.
@@ -284,8 +285,8 @@ func (w *writer) Close() error {
 	w.cache.registry.mu.Unlock()
 
 	// Release file lock.
-	releaseWriterLock(w.lockFile)
-	w.lockFile = nil
+	releaseWriterLock(w.lock)
+	w.lock = nil
 
 	return nil
 }
@@ -465,8 +466,8 @@ func (w *writer) closeByCommit() {
 	w.cache.registry.mu.Unlock()
 
 	// Release file lock.
-	releaseWriterLock(w.lockFile)
-	w.lockFile = nil
+	releaseWriterLock(w.lock)
+	w.lock = nil
 }
 
 // finalOps returns the last operation per key, in original order.

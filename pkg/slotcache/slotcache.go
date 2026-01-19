@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/calvinalkan/agent-task/pkg/fs"
 )
 
 // Compile-time interface satisfaction checks.
@@ -73,6 +75,37 @@ type fileRegistryEntry struct {
 
 // globalRegistry maps file identities to their entries.
 var globalRegistry sync.Map // map[fileIdentity]*fileRegistryEntry
+
+// pkgLocker is the package-level file locker for cross-process writer coordination.
+// Uses fs.Real for production use with proper inode verification and EINTR handling.
+var pkgLocker = fs.NewLocker(fs.NewReal())
+
+// acquireWriterLock acquires an exclusive, non-blocking lock on the lock file.
+// Returns the lock on success. On lock contention, returns ErrBusy.
+func acquireWriterLock(cachePath string) (*fs.Lock, error) {
+	lockPath := cachePath + ".lock"
+
+	lock, err := pkgLocker.TryLock(lockPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrWouldBlock) {
+			return nil, ErrBusy
+		}
+
+		return nil, fmt.Errorf("acquire writer lock: %w", err)
+	}
+
+	return lock, nil
+}
+
+// releaseWriterLock releases the lock. Safe to call with nil.
+// Does NOT delete the lock file (per spec: lock file persists).
+func releaseWriterLock(lock *fs.Lock) {
+	if lock == nil {
+		return
+	}
+
+	_ = lock.Close()
+}
 
 // getFileIdentity returns the device and inode for a file.
 func getFileIdentity(fd int) (fileIdentity, error) {
@@ -396,7 +429,7 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		// With locking enabled, attempt to acquire the writer lock non-blocking.
 		// - If the lock is busy: an active writer is present -> ErrBusy.
 		// - If we can acquire the lock: no active writer -> likely crashed writer.
-		lockFile, lockErr := tryAcquireWriterLock(opts.Path)
+		lock, lockErr := acquireWriterLock(opts.Path)
 		if lockErr != nil {
 			// We treat lock contention as busy. Unexpected lock errors are returned as-is.
 			if errors.Is(lockErr, ErrBusy) {
@@ -413,14 +446,14 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 
 		n, readErr := syscall.Pread(fd, fresh, 0)
 		if readErr != nil || n != slc1HeaderSize {
-			releaseWriterLock(lockFile)
+			releaseWriterLock(lock)
 
 			return nil, ErrCorrupt
 		}
 
 		freshGen := binary.LittleEndian.Uint64(fresh[offGeneration:])
 
-		releaseWriterLock(lockFile)
+		releaseWriterLock(lock)
 
 		if freshGen%2 == 1 {
 			return nil, ErrCorrupt
@@ -569,7 +602,7 @@ func handleCRCFailure(fd int, originalGen uint64, opts Options) (*cache, error) 
 		}
 
 		// With locking, check if writer is still active.
-		lockFile, lockErr := tryAcquireWriterLock(opts.Path)
+		lock, lockErr := acquireWriterLock(opts.Path)
 		if lockErr != nil {
 			if errors.Is(lockErr, ErrBusy) {
 				return nil, ErrBusy
@@ -581,14 +614,14 @@ func handleCRCFailure(fd int, originalGen uint64, opts Options) (*cache, error) 
 		// Lock acquired - no active writer. Re-read generation under lock.
 		n, readErr := syscall.Pread(fd, genBuf, offGeneration)
 		if readErr != nil || n != 8 {
-			releaseWriterLock(lockFile)
+			releaseWriterLock(lock)
 
 			return nil, ErrCorrupt
 		}
 
 		freshGen := binary.LittleEndian.Uint64(genBuf)
 
-		releaseWriterLock(lockFile)
+		releaseWriterLock(lock)
 
 		if freshGen%2 == 1 {
 			// Still odd with no active writer - crashed writer.
@@ -875,12 +908,12 @@ func (c *cache) BeginWrite() (Writer, error) {
 	c.registry.mu.Unlock()
 
 	// Acquire cross-process lock if enabled.
-	var lockFile *os.File
+	var lock *fs.Lock
 
 	if !c.disableLocking {
 		var err error
 
-		lockFile, err = acquireWriterLock(c.path)
+		lock, err = acquireWriterLock(c.path)
 		if err != nil {
 			c.registry.mu.Lock()
 			c.registry.writerActive = false
@@ -894,7 +927,7 @@ func (c *cache) BeginWrite() (Writer, error) {
 		cache:       c,
 		bufferedOps: nil,
 		isClosed:    false,
-		lockFile:    lockFile,
+		lock:        lock,
 	}
 	c.activeWriter = wr
 
