@@ -60,8 +60,15 @@
   - Updated all mmap-based slot `revision` reads/writes to use `atomicLoadInt64()`/`atomicStoreInt64()`.
   - Note: `index` remains non-atomic and is protected by seqlock stability.
 
-- [ ] **Regression tests**
-  - Keep/extend the deterministic seqlock overlap tests so that incorrect publication/orderings are caught.
+- [x] **Regression tests** ✅ (2026-01-19)
+  - Added `seqlock_overlap_deterministic_test.go` with 9 deterministic tests covering:
+    - `checkInvariantViolation()` correctly distinguishes overlap (generation changed/odd) from corruption
+    - Bucket→tombstoned slot detection: returns `ErrBusy` when generation odd, `ErrCorrupt` when stable
+    - Slot beyond highwater detection: returns `ErrBusy` when generation odd, `ErrCorrupt` when stable
+    - Read operations (`Get`, `Len`, `Scan`) return `ErrBusy` when generation is odd
+    - Generation counter properly increments and remains even after commits
+  - These tests inject specific file states to deterministically verify overlap vs corruption classification,
+    complementing the stress-style tests in `seqlock_concurrency_test.go` and `seqlock_torn_bytes_test.go`.
 
 ---
 
