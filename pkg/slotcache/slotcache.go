@@ -68,7 +68,16 @@ type fileIdentity struct {
 type fileRegistryEntry struct {
 	mu           sync.RWMutex // protects mmap reads vs writes
 	writerActive bool         // in-process writer guard
+
+	// refCount tracks the number of open cache handles for this file.
+	// Protected by registryMu, not by mu.
+	refCount int
 }
+
+// registryMu protects refCount modifications and registry pruning.
+// We use a separate mutex rather than fileRegistryEntry.mu to avoid
+// potential deadlocks during Close() when registry pruning is needed.
+var registryMu sync.Mutex
 
 // globalRegistry maps file identities to their entries.
 var globalRegistry sync.Map // map[fileIdentity]*fileRegistryEntry
@@ -116,23 +125,56 @@ func getFileIdentity(fd int) (fileIdentity, error) {
 	return fileIdentity{dev: stat.Dev, ino: stat.Ino}, nil
 }
 
-// getOrCreateRegistryEntry gets or creates a registry entry for the given identity.
+// getOrCreateRegistryEntry gets or creates a registry entry for the given identity,
+// incrementing its reference count. Callers must call releaseRegistryEntry when done.
 func getOrCreateRegistryEntry(id fileIdentity) *fileRegistryEntry {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
 	if val, ok := globalRegistry.Load(id); ok {
 		if entry, typeOk := val.(*fileRegistryEntry); typeOk {
+			entry.refCount++
+
 			return entry
 		}
 	}
 
-	entry := &fileRegistryEntry{}
-	actual, _ := globalRegistry.LoadOrStore(id, entry)
+	entry := &fileRegistryEntry{refCount: 1}
+	actual, loaded := globalRegistry.LoadOrStore(id, entry)
 
-	if resultEntry, typeOk := actual.(*fileRegistryEntry); typeOk {
-		return resultEntry
+	if loaded {
+		// Another goroutine created the entry first.
+		if resultEntry, typeOk := actual.(*fileRegistryEntry); typeOk {
+			resultEntry.refCount++
+
+			return resultEntry
+		}
 	}
 
-	// Fallback: should never happen if we're consistent.
+	// We stored our new entry.
 	return entry
+}
+
+// releaseRegistryEntry decrements the reference count for a registry entry
+// and removes it from the global registry when the count reaches zero.
+func releaseRegistryEntry(id fileIdentity) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	val, ok := globalRegistry.Load(id)
+	if !ok {
+		return
+	}
+
+	entry, typeOk := val.(*fileRegistryEntry)
+	if !typeOk {
+		return
+	}
+
+	entry.refCount--
+	if entry.refCount <= 0 {
+		globalRegistry.Delete(id)
+	}
 }
 
 // cache is the concrete implementation of Cache.
@@ -921,6 +963,10 @@ func (c *cache) Close() error {
 		_ = syscall.Close(c.fd)
 		c.fd = -1
 	}
+
+	// Release our reference to the registry entry, allowing it to be
+	// pruned from globalRegistry when the last handle for this file closes.
+	releaseRegistryEntry(c.identity)
 
 	return nil
 }
