@@ -140,24 +140,24 @@ type cache struct {
 func Open(opts Options) (Cache, error) {
 	// Validate options.
 	if opts.Path == "" {
-		return nil, ErrInvalidInput
+		return nil, fmt.Errorf("path is required: %w", ErrInvalidInput)
 	}
 
 	if opts.KeySize < 1 {
-		return nil, ErrInvalidInput
+		return nil, fmt.Errorf("key_size must be >= 1, got %d: %w", opts.KeySize, ErrInvalidInput)
 	}
 
 	if opts.IndexSize < 0 {
-		return nil, ErrInvalidInput
+		return nil, fmt.Errorf("index_size must be >= 0, got %d: %w", opts.IndexSize, ErrInvalidInput)
 	}
 
 	if opts.SlotCapacity < 1 {
-		return nil, ErrInvalidInput
+		return nil, fmt.Errorf("slot_capacity must be >= 1, got %d: %w", opts.SlotCapacity, ErrInvalidInput)
 	}
 
 	const maxSlotCapacity = uint64(0xFFFFFFFFFFFFFFFE)
 	if opts.SlotCapacity > maxSlotCapacity {
-		return nil, ErrInvalidInput
+		return nil, fmt.Errorf("slot_capacity %d exceeds maximum %d: %w", opts.SlotCapacity, maxSlotCapacity, ErrInvalidInput)
 	}
 
 	// Try to open existing file.
@@ -191,7 +191,7 @@ func Open(opts Options) (Cache, error) {
 	if size < slc1HeaderSize {
 		_ = syscall.Close(fd)
 
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("file size %d is less than header size %d: %w", size, slc1HeaderSize, ErrCorrupt)
 	}
 
 	// Read and validate header.
@@ -343,41 +343,41 @@ func initializeEmptyFile(opts Options) (Cache, error) {
 func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options) (*cache, error) {
 	// Check magic.
 	if !bytes.Equal(headerBuf[offMagic:offMagic+4], []byte("SLC1")) {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("invalid magic %q, expected SLC1: %w", headerBuf[offMagic:offMagic+4], ErrIncompatible)
 	}
 
 	// Check version.
 	version := binary.LittleEndian.Uint32(headerBuf[offVersion:])
 	if version != slc1Version {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("unsupported version %d, expected %d: %w", version, slc1Version, ErrIncompatible)
 	}
 
 	// Check header size.
 	headerSize := binary.LittleEndian.Uint32(headerBuf[offHeaderSize:])
 	if headerSize != slc1HeaderSize {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("unsupported header_size %d, expected %d: %w", headerSize, slc1HeaderSize, ErrIncompatible)
 	}
 
 	// Check hash algorithm.
 	hashAlg := binary.LittleEndian.Uint32(headerBuf[offHashAlg:])
 	if hashAlg != slc1HashAlgFNV1a64 {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("unsupported hash_alg %d, expected %d (FNV-1a): %w", hashAlg, slc1HashAlgFNV1a64, ErrIncompatible)
 	}
 
 	// Check for unknown flags.
 	flags := binary.LittleEndian.Uint32(headerBuf[offFlags:])
 	if flags&^slc1FlagOrderedKeys != 0 {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("unknown flags 0x%08x: %w", flags&^slc1FlagOrderedKeys, ErrIncompatible)
 	}
 
 	// Check reserved bytes.
 	reservedU32 := binary.LittleEndian.Uint32(headerBuf[offReservedU32:])
 	if reservedU32 != 0 {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("reserved_u32 is non-zero: %w", ErrIncompatible)
 	}
 
 	if hasReservedBytesSet(headerBuf) {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("reserved bytes are non-zero: %w", ErrIncompatible)
 	}
 
 	// If generation is odd, a writer is in progress or a previous writer crashed.
@@ -436,7 +436,12 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		// CRC mismatch could be due to a concurrent writer that started after our initial
 		// read. To avoid misclassifying transient state as corruption, check if generation
 		// changed or if a writer is now active.
-		return handleCRCFailure(fd, generation, opts)
+		_, err := handleCRCFailure(fd, generation, opts)
+		if errors.Is(err, ErrCorrupt) {
+			return nil, fmt.Errorf("header CRC mismatch: %w", ErrCorrupt)
+		}
+
+		return nil, err
 	}
 
 	// Read config fields.
@@ -456,65 +461,65 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 
 	// Check config compatibility.
 	if int(keySize) != opts.KeySize {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("key_size mismatch: file has %d, expected %d: %w", keySize, opts.KeySize, ErrIncompatible)
 	}
 
 	if int(indexSize) != opts.IndexSize {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("index_size mismatch: file has %d, expected %d: %w", indexSize, opts.IndexSize, ErrIncompatible)
 	}
 
 	if userVersion != opts.UserVersion {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("user_version mismatch: file has %d, expected %d: %w", userVersion, opts.UserVersion, ErrIncompatible)
 	}
 
 	if slotCapacity != opts.SlotCapacity {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("slot_capacity mismatch: file has %d, expected %d: %w", slotCapacity, opts.SlotCapacity, ErrIncompatible)
 	}
 
 	if orderedKeys != opts.OrderedKeys {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("ordered_keys mismatch: file has %v, expected %v: %w", orderedKeys, opts.OrderedKeys, ErrIncompatible)
 	}
 
 	// Validate derived slot size.
 	expectedSlotSize := computeSlotSize(keySize, indexSize)
 	if slotSize != expectedSlotSize {
-		return nil, ErrIncompatible
+		return nil, fmt.Errorf("slot_size mismatch: file has %d, expected %d: %w", slotSize, expectedSlotSize, ErrIncompatible)
 	}
 
 	// Structural integrity checks.
 	if slotsOffset != slc1HeaderSize {
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("slots_offset %d != header_size %d: %w", slotsOffset, slc1HeaderSize, ErrCorrupt)
 	}
 
 	expectedBucketsOffset := slotsOffset + slotCapacity*uint64(slotSize)
 	if bucketsOffset != expectedBucketsOffset {
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("buckets_offset %d != expected %d: %w", bucketsOffset, expectedBucketsOffset, ErrCorrupt)
 	}
 
 	expectedMinSize := safeUint64ToInt64(bucketsOffset + bucketCount*16)
 	if size < expectedMinSize {
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("file size %d < minimum required %d: %w", size, expectedMinSize, ErrCorrupt)
 	}
 
 	if slotHighwater > slotCapacity {
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("slot_highwater %d > slot_capacity %d: %w", slotHighwater, slotCapacity, ErrCorrupt)
 	}
 
 	if liveCount > slotHighwater {
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("live_count %d > slot_highwater %d: %w", liveCount, slotHighwater, ErrCorrupt)
 	}
 
 	// bucket_count must be power of two >= 2.
 	if bucketCount < 2 || (bucketCount&(bucketCount-1)) != 0 {
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("bucket_count %d is not a power of two >= 2: %w", bucketCount, ErrCorrupt)
 	}
 
 	if bucketUsed+bucketTombstones >= bucketCount {
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("bucket_used (%d) + bucket_tombstones (%d) >= bucket_count (%d): %w", bucketUsed, bucketTombstones, bucketCount, ErrCorrupt)
 	}
 
 	if bucketUsed != liveCount {
-		return nil, ErrCorrupt
+		return nil, fmt.Errorf("bucket_used %d != live_count %d: %w", bucketUsed, liveCount, ErrCorrupt)
 	}
 
 	// Build header struct for mmapAndCreateCache.
@@ -717,7 +722,7 @@ func (c *cache) Get(key []byte) (Entry, bool, error) {
 	c.mu.Unlock()
 
 	if len(key) != int(c.keySize) {
-		return Entry{}, false, ErrInvalidInput
+		return Entry{}, false, fmt.Errorf("key length %d != key_size %d: %w", len(key), c.keySize, ErrInvalidInput)
 	}
 
 	for attempt := range readMaxRetries {
@@ -768,8 +773,12 @@ func (c *cache) Scan(opts ScanOptions) ([]Entry, error) {
 
 	c.mu.Unlock()
 
-	if opts.Offset < 0 || opts.Limit < 0 {
-		return nil, ErrInvalidInput
+	if opts.Offset < 0 {
+		return nil, fmt.Errorf("offset must be >= 0, got %d: %w", opts.Offset, ErrInvalidInput)
+	}
+
+	if opts.Limit < 0 {
+		return nil, fmt.Errorf("limit must be >= 0, got %d: %w", opts.Limit, ErrInvalidInput)
 	}
 
 	return c.collectEntries(opts, func(_ []byte) bool { return true })
@@ -792,8 +801,12 @@ func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error) {
 
 	c.mu.Unlock()
 
-	if opts.Offset < 0 || opts.Limit < 0 {
-		return nil, ErrInvalidInput
+	if opts.Offset < 0 {
+		return nil, fmt.Errorf("offset must be >= 0, got %d: %w", opts.Offset, ErrInvalidInput)
+	}
+
+	if opts.Limit < 0 {
+		return nil, fmt.Errorf("limit must be >= 0, got %d: %w", opts.Limit, ErrInvalidInput)
 	}
 
 	validationErr := c.validatePrefixSpec(spec)
@@ -821,11 +834,15 @@ func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) 
 	c.mu.Unlock()
 
 	if !c.orderedKeys {
-		return nil, ErrUnordered
+		return nil, fmt.Errorf("ScanRange requires ordered_keys mode: %w", ErrUnordered)
 	}
 
-	if opts.Offset < 0 || opts.Limit < 0 {
-		return nil, ErrInvalidInput
+	if opts.Offset < 0 {
+		return nil, fmt.Errorf("offset must be >= 0, got %d: %w", opts.Offset, ErrInvalidInput)
+	}
+
+	if opts.Limit < 0 {
+		return nil, fmt.Errorf("limit must be >= 0, got %d: %w", opts.Limit, ErrInvalidInput)
 	}
 
 	startPadded, endPadded, err := c.normalizeRangeBounds(start, end)
@@ -1258,21 +1275,25 @@ func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, e
 }
 
 func (c *cache) validatePrefixSpec(spec Prefix) error {
-	if spec.Offset < 0 || spec.Offset >= int(c.keySize) {
-		return ErrInvalidInput
+	if spec.Offset < 0 {
+		return fmt.Errorf("prefix offset %d must be >= 0: %w", spec.Offset, ErrInvalidInput)
+	}
+
+	if spec.Offset >= int(c.keySize) {
+		return fmt.Errorf("prefix offset %d >= key_size %d: %w", spec.Offset, c.keySize, ErrInvalidInput)
 	}
 
 	if spec.Bits < 0 {
-		return ErrInvalidInput
+		return fmt.Errorf("prefix bits %d must be >= 0: %w", spec.Bits, ErrInvalidInput)
 	}
 
 	if spec.Bits == 0 {
 		if len(spec.Bytes) == 0 {
-			return ErrInvalidInput
+			return fmt.Errorf("prefix bytes is empty with bits=0: %w", ErrInvalidInput)
 		}
 
 		if spec.Offset+len(spec.Bytes) > int(c.keySize) {
-			return ErrInvalidInput
+			return fmt.Errorf("prefix offset (%d) + len(bytes) (%d) > key_size (%d): %w", spec.Offset, len(spec.Bytes), c.keySize, ErrInvalidInput)
 		}
 
 		return nil
@@ -1280,45 +1301,49 @@ func (c *cache) validatePrefixSpec(spec Prefix) error {
 
 	needBytes := (spec.Bits + 7) / 8
 	if needBytes == 0 {
-		return ErrInvalidInput
+		return fmt.Errorf("prefix bits %d requires 0 bytes (invalid): %w", spec.Bits, ErrInvalidInput)
 	}
 
 	if len(spec.Bytes) != needBytes {
-		return ErrInvalidInput
+		return fmt.Errorf("prefix bytes length %d != required %d for %d bits: %w", len(spec.Bytes), needBytes, spec.Bits, ErrInvalidInput)
 	}
 
 	if spec.Offset+needBytes > int(c.keySize) {
-		return ErrInvalidInput
+		return fmt.Errorf("prefix offset (%d) + needBytes (%d) > key_size (%d): %w", spec.Offset, needBytes, c.keySize, ErrInvalidInput)
 	}
 
 	return nil
 }
 
 func (c *cache) normalizeRangeBounds(start, end []byte) ([]byte, []byte, error) {
-	startPadded, err := c.normalizeRangeBound(start)
+	startPadded, err := c.normalizeRangeBound(start, "start")
 	if err != nil {
 		return nil, nil, err
 	}
 
-	endPadded, err := c.normalizeRangeBound(end)
+	endPadded, err := c.normalizeRangeBound(end, "end")
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if startPadded != nil && endPadded != nil && bytes.Compare(startPadded, endPadded) > 0 {
-		return nil, nil, ErrInvalidInput
+		return nil, nil, fmt.Errorf("start bound > end bound: %w", ErrInvalidInput)
 	}
 
 	return startPadded, endPadded, nil
 }
 
-func (c *cache) normalizeRangeBound(bound []byte) ([]byte, error) {
+func (c *cache) normalizeRangeBound(bound []byte, name string) ([]byte, error) {
 	if bound == nil {
 		return nil, nil
 	}
 
-	if len(bound) == 0 || len(bound) > int(c.keySize) {
-		return nil, ErrInvalidInput
+	if len(bound) == 0 {
+		return nil, fmt.Errorf("%s bound is empty (use nil for unbounded): %w", name, ErrInvalidInput)
+	}
+
+	if len(bound) > int(c.keySize) {
+		return nil, fmt.Errorf("%s bound length %d > key_size %d: %w", name, len(bound), c.keySize, ErrInvalidInput)
 	}
 
 	if len(bound) == int(c.keySize) {

@@ -3,6 +3,7 @@ package slotcache
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"slices"
 	"sort"
@@ -45,11 +46,11 @@ func (w *writer) Put(key []byte, revision int64, index []byte) error {
 	}
 
 	if len(key) != int(w.cache.keySize) {
-		return ErrInvalidInput
+		return fmt.Errorf("key length %d != key_size %d: %w", len(key), w.cache.keySize, ErrInvalidInput)
 	}
 
 	if len(index) != int(w.cache.indexSize) {
-		return ErrInvalidInput
+		return fmt.Errorf("index length %d != index_size %d: %w", len(index), w.cache.indexSize, ErrInvalidInput)
 	}
 
 	// Copy key and index to avoid external mutation.
@@ -79,7 +80,7 @@ func (w *writer) Delete(key []byte) (bool, error) {
 	}
 
 	if len(key) != int(w.cache.keySize) {
-		return false, ErrInvalidInput
+		return false, fmt.Errorf("key length %d != key_size %d: %w", len(key), w.cache.keySize, ErrInvalidInput)
 	}
 
 	keyCopy := make([]byte, len(key))
@@ -130,7 +131,8 @@ func (w *writer) Commit() error {
 	if highwater+newInserts > w.cache.slotCapacity {
 		w.closeByCommit()
 
-		return ErrFull
+		return fmt.Errorf("slot_highwater (%d) + new_inserts (%d) > slot_capacity (%d): %w",
+			highwater, newInserts, w.cache.slotCapacity, ErrFull)
 	}
 
 	// Ordered mode check.
@@ -150,7 +152,8 @@ func (w *writer) Commit() error {
 			if bytes.Compare(minNewKey, tailKey) < 0 {
 				w.closeByCommit()
 
-				return ErrOutOfOrderInsert
+				return fmt.Errorf("new key %x < tail key %x at slot %d: %w",
+					minNewKey, tailKey, highwater-1, ErrOutOfOrderInsert)
 			}
 		}
 	}

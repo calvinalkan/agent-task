@@ -125,11 +125,14 @@
 - [x] `go test ./pkg/slotcache -fuzz=FuzzBehavior_ModelVsReal_OrderedKeys -fuzztime=30s` runs without failures. ✅ (2026-01-18)
 
 Additional recommended checks (spec hardening):
-- [ ] `go test ./pkg/slotcache -run Seqlock -slotcache.concurrency-stress=5s` passes reliably.
+- [x] `go test ./pkg/slotcache -run Seqlock -slotcache.concurrency-stress=5s` passes reliably. ✅ (2026-01-19)
 
 ---
 
 ### P3 — Cleanup
 
 - [ ] Replace `writer_lock.go` with `pkg/fs.Locker` - use it directly with a real FS inside `slotcache.go`.
-- [ ] Wrap sentinel errors with helpful context in `slotcache.go` and `writer.go`. Use `fmt.Errorf("useful context: %w", ErrFoo)` - include relevant data (keys, sizes, counts, etc.) as appropriate per call site. `errors.Is` still works but users get actionable diagnostics. Sentinels: `ErrCorrupt`, `ErrIncompatible`, `ErrBusy`, `ErrFull`, `ErrClosed`, `ErrWriteback`, `ErrInvalidInput`, `ErrUnordered`, `ErrOutOfOrderInsert`.
+- [x] Wrap sentinel errors with helpful context in `slotcache.go` and `writer.go`. ✅ (2026-01-19)
+  - Used `fmt.Errorf("useful context: %w", ErrFoo)` - include relevant data (keys, sizes, counts, etc.)
+  - `errors.Is` still works but users get actionable diagnostics
+  - Covered: Open validation, Get/Scan input validation, Writer Put/Delete validation, Commit errors
