@@ -72,6 +72,7 @@ Decision:
 
 - Bucket sizing: `bucket_count = nextPow2(slot_capacity * 2)` (load factor ≤ 0.5).
 - Rehash threshold: trigger rebuild when `bucket_tombstones / bucket_count > 0.25` (during commit).
+  - **Note:** The benefit of rehashing is limited since slotcache doesn't resize. Rehashing only eliminates bucket tombstones to reduce probe chain length during lookups. Slot tombstones remain (append-only design), and file size is unchanged. For severe fragmentation, rebuilding the entire cache from source of truth is the recommended approach.
 - Read retry/backoff: bounded exponential backoff; must eventually return `ErrBusy` (never infinite spin).
 
 ---

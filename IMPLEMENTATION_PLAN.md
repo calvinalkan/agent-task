@@ -85,6 +85,8 @@
   - Called during Commit after all operations are applied, before CRC recomputation.
   - Resets `bucket_tombstones` to 0 after rehash.
   - Added behavioral tests in `rehash_test.go` verifying correctness through public API.
+  - **Note:** Benefit is limited without resizing - only reduces probe chain length for lookups.
+    Slot tombstones remain (append-only). For severe fragmentation, rebuild from source of truth.
 - [x] Implement bounded point-read retries with backoff; return `ErrBusy` after exhausting retries. ✅ (2026-01-19)
   - Added `readMaxRetries=10`, `readInitialBackoff=50µs`, `readMaxBackoff=1ms` constants.
   - Exponential backoff schedule: 0, 50µs, 100µs, 200µs, 400µs, 800µs, 1ms (capped).

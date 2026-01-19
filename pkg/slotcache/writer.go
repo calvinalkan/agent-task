@@ -10,6 +10,12 @@ import (
 
 // rehashThreshold is the ratio of bucket_tombstones/bucket_count above which
 // we rebuild the hash table during Commit. Per TECHNICAL_DECISIONS.md §5.
+//
+// Note: The benefit of rehashing is limited since slotcache doesn't resize.
+// Rehashing only eliminates tombstones to reduce probe chain length during
+// lookups - it doesn't reclaim slots or reduce file size. If the cache
+// becomes slow due to fragmentation, rebuilding from source of truth is
+// the intended solution for this "throwaway cache" design.
 const rehashThreshold = 0.25
 
 // bufferedOp represents a buffered Put or Delete operation.
@@ -391,6 +397,11 @@ func (w *writer) insertSlot(key []byte, revision int64, index []byte) {
 // rehashBuckets rebuilds the bucket index by clearing all buckets and
 // re-inserting entries for all live slots. This eliminates tombstones
 // and restores optimal probe chain lengths.
+//
+// Note: Since slotcache doesn't resize, the benefit is limited to reducing
+// probe iterations during lookups. Slot tombstones remain (append-only),
+// and file size is unchanged. For severe fragmentation, rebuilding the
+// entire cache from source of truth is the recommended approach.
 //
 // Called during Commit when bucket_tombstones/bucket_count > rehashThreshold.
 func (w *writer) rehashBuckets(highwater uint64) {
