@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"sync/atomic"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -411,6 +413,44 @@ func getInt64LE(buf []byte) int64 {
 		int64(buf[5])<<40 |
 		int64(buf[6])<<48 |
 		int64(buf[7])<<56
+}
+
+// atomicLoadUint64 performs an atomic 64-bit load from an 8-byte-aligned
+// position in the buffer. The spec requires generation reads to be atomic
+// with acquire semantics to ensure proper seqlock operation across processes.
+//
+// Preconditions:
+//   - buf must be at least 8 bytes
+//   - buf[0] must be 8-byte aligned (enforced by SLC1 format: generation is at offset 0x40)
+//
+// Go's sync/atomic operations provide sequential consistency (stronger than
+// acquire/release), which satisfies the spec requirements.
+func atomicLoadUint64(buf []byte) uint64 {
+	// Bounds check.
+	_ = buf[7]
+
+	// SAFETY: The SLC1 format places generation at offset 0x40 (64 bytes),
+	// which is 8-byte aligned. The mmap'd buffer starts at the file beginning,
+	// so &buf[0] is 8-byte aligned for the generation field.
+	return atomic.LoadUint64((*uint64)(unsafe.Pointer(&buf[0])))
+}
+
+// atomicStoreUint64 performs an atomic 64-bit store to an 8-byte-aligned
+// position in the buffer. The spec requires generation writes to be atomic
+// with release semantics to ensure readers observe all prior data writes.
+//
+// Preconditions:
+//   - buf must be at least 8 bytes
+//   - buf[0] must be 8-byte aligned (enforced by SLC1 format: generation is at offset 0x40)
+//
+// Go's sync/atomic operations provide sequential consistency (stronger than
+// acquire/release), which satisfies the spec requirements.
+func atomicStoreUint64(buf []byte, val uint64) {
+	// Bounds check.
+	_ = buf[7]
+
+	// SAFETY: Same alignment guarantees as atomicLoadUint64.
+	atomic.StoreUint64((*uint64)(unsafe.Pointer(&buf[0])), val)
 }
 
 // pageSize is the system page size, used for aligning msync ranges.

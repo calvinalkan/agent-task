@@ -154,9 +154,10 @@ func (w *writer) Commit() error {
 	w.cache.registry.mu.Lock()
 
 	// Step 1: Publish odd generation.
+	// Uses atomic store per spec requirement for cross-process seqlock.
 	oldGen := w.cache.readGeneration()
 	newOddGen := oldGen + 1
-	binary.LittleEndian.PutUint64(w.cache.data[offGeneration:], newOddGen)
+	atomicStoreUint64(w.cache.data[offGeneration:], newOddGen)
 
 	// Step 2 (WritebackSync): msync header to ensure odd generation is on disk
 	// before data modifications.
@@ -220,8 +221,9 @@ func (w *writer) Commit() error {
 	}
 
 	// Step 6: Publish even generation.
+	// Uses atomic store per spec requirement for cross-process seqlock.
 	newEvenGen := newOddGen + 1
-	binary.LittleEndian.PutUint64(w.cache.data[offGeneration:], newEvenGen)
+	atomicStoreUint64(w.cache.data[offGeneration:], newEvenGen)
 
 	// Step 7 (WritebackSync): msync header to ensure even generation is on disk.
 	if syncMode {

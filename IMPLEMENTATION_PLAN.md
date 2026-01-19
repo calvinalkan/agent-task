@@ -38,10 +38,11 @@
 
 ### P0 — Spec conformance hardening (seqlock + Open correctness)
 
-- [ ] **Make `generation` atomic across processes**
-  - Replace `binary.LittleEndian` generation loads/stores with `sync/atomic` + `unsafe` on an 8-byte-aligned `*uint64`.
-  - Use acquire/release (Go atomics are seq-cst, which is fine).
-  - Ensure both readers and writer commit publish use the atomic helpers.
+- [x] **Make `generation` atomic across processes** ✅ (2026-01-19)
+  - Added `atomicLoadUint64()` and `atomicStoreUint64()` helpers in format.go using `sync/atomic` + `unsafe`.
+  - Updated `readGeneration()` in slotcache.go to use atomic load.
+  - Updated `Writer.Commit()` in writer.go to use atomic store for both odd and even generation publishes.
+  - Go atomics provide seq-cst ordering which satisfies the spec's acquire/release requirement.
 
 - [ ] **Fix `Open()` behavior under concurrent commits**
   - Avoid returning `ErrCorrupt` due to transient header CRC mismatch while a writer is active.

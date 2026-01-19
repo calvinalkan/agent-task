@@ -297,6 +297,12 @@ linters:
         text: "G204:"
         linters:
           - gosec
+      # Atomic operations on mmap'd memory require unsafe - this is intentional
+      # and necessary for cross-process seqlock correctness per spec.
+      - path: pkg/slotcache/format\.go
+        text: "G103:"
+        linters:
+          - gosec
       - path: sandbox\.go
         text: "G204:" # sandbox executes bwrap by design
         linters:

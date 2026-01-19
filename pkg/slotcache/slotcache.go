@@ -799,8 +799,9 @@ func (c *cache) BeginWrite() (Writer, error) {
 }
 
 // readGeneration reads the generation counter atomically.
+// Uses atomic 64-bit load per spec requirement for cross-process seqlock.
 func (c *cache) readGeneration() uint64 {
-	return binary.LittleEndian.Uint64(c.data[offGeneration:])
+	return atomicLoadUint64(c.data[offGeneration:])
 }
 
 // readLiveCount reads the live_count from header.
