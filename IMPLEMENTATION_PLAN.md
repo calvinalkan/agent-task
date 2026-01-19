@@ -45,10 +45,14 @@
   - When locking enabled: tries to acquire lock to distinguish active writer vs crashed writer.
   - Removed dead code (redundant second odd-generation check that was unreachable).
 
-- [ ] **Treat "impossible invariants" as overlap unless generation is stable**
-  - For cases like bucket→tombstoned slot, slot_id out of range, etc:
-    - re-read generation; if changed/odd → overlap → retry/ErrBusy
-    - if same even generation → real corruption → `ErrCorrupt`
+- [x] **Treat "impossible invariants" as overlap unless generation is stable** ✅ (2026-01-19)
+  - Added `checkInvariantViolation()` helper that re-reads generation when impossible invariants are detected.
+  - Updated `lookupKey()` to accept expected generation parameter and call helper for:
+    - bucket→tombstoned slot
+    - slot_id out of range (beyond highwater)
+    - probed all buckets without finding EMPTY
+  - If generation changed/odd → returns internal `errOverlap` → caller retries
+  - If same even generation → returns `ErrCorrupt` (real corruption)
 
 - [x] **Make slot `meta` and `revision` atomic (spec strictness)** ✅ (2026-01-19)
   - Added `atomicLoadInt64()` and `atomicStoreInt64()` helpers in format.go using `sync/atomic` + `unsafe`.

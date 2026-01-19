@@ -19,6 +19,12 @@ var (
 	_ Writer = (*writer)(nil)
 )
 
+// errOverlap is an internal sentinel indicating that an impossible invariant was
+// detected but generation changed (or became odd), meaning the read overlapped with
+// a concurrent write. Callers should retry. This is not exported; callers see ErrBusy
+// after retry exhaustion.
+var errOverlap = errors.New("internal: read overlapped with concurrent write")
+
 // Default load factor for bucket sizing.
 const defaultLoadFactor = 0.5
 
@@ -693,7 +699,7 @@ func (c *cache) Get(key []byte) (Entry, bool, error) {
 			continue
 		}
 
-		entry, found, err := c.lookupKey(key)
+		entry, found, err := c.lookupKey(key, g1)
 		g2 := c.readGeneration()
 		c.registry.mu.RUnlock()
 
@@ -702,6 +708,12 @@ func (c *cache) Get(key []byte) (Entry, bool, error) {
 		}
 
 		if err != nil {
+			// errOverlap means we detected an impossible invariant but generation
+			// changed mid-read - treat as overlap and retry.
+			if errors.Is(err, errOverlap) {
+				continue
+			}
+
 			return Entry{}, false, err
 		}
 
@@ -853,6 +865,27 @@ func (c *cache) readGeneration() uint64 {
 	return atomicLoadUint64(c.data[offGeneration:])
 }
 
+// checkInvariantViolation is called when an impossible invariant is detected during
+// a read operation. Per the spec's reader coherence rule (step 4), we must re-read
+// generation to determine if the violation is due to overlap with a concurrent write
+// or due to real corruption.
+//
+// Parameters:
+//   - expectedGen: the generation (g1) we read at the start of the operation
+//
+// Returns:
+//   - errOverlap if generation changed or is now odd (caller should retry)
+//   - ErrCorrupt if generation is still the same even value (real corruption)
+func (c *cache) checkInvariantViolation(expectedGen uint64) error {
+	gx := c.readGeneration()
+	if gx != expectedGen || gx%2 == 1 {
+		// Generation changed or is odd - read overlapped with a concurrent write.
+		return errOverlap
+	}
+	// Generation is stable and even - this is real corruption.
+	return ErrCorrupt
+}
+
 // readLiveCount reads the live_count from header.
 func (c *cache) readLiveCount() uint64 {
 	return binary.LittleEndian.Uint64(c.data[offLiveCount:])
@@ -865,7 +898,12 @@ func (c *cache) readSlotHighwater() uint64 {
 
 // lookupKey finds a key in the bucket index and returns the entry.
 // Must be called with registry.mu.RLock held.
-func (c *cache) lookupKey(key []byte) (Entry, bool, error) {
+//
+// The expectedGen parameter is the generation read at the start of the operation.
+// When an impossible invariant is detected, we re-check generation to distinguish
+// overlap (errOverlap) from real corruption (ErrCorrupt) per the spec's reader
+// coherence rule.
+func (c *cache) lookupKey(key []byte, expectedGen uint64) (Entry, bool, error) {
 	hash := fnv1a64(key)
 	mask := c.bucketCount - 1
 	startIdx := hash & mask
@@ -891,7 +929,9 @@ func (c *cache) lookupKey(key []byte) (Entry, bool, error) {
 		// FULL bucket.
 		slotID := slotPlusOne - 1
 		if slotID >= highwater {
-			return Entry{}, false, ErrCorrupt
+			// Impossible invariant: bucket references slot beyond highwater.
+			// This could be overlap with concurrent write or real corruption.
+			return Entry{}, false, c.checkInvariantViolation(expectedGen)
 		}
 
 		if storedHash != hash {
@@ -910,8 +950,9 @@ func (c *cache) lookupKey(key []byte) (Entry, bool, error) {
 		// Use atomic load for meta to avoid torn reads during concurrent writes.
 		meta := atomicLoadUint64(c.data[slotOffset:])
 		if (meta & slotMetaUsed) == 0 {
-			// Slot is tombstoned but bucket points to it - corruption.
-			return Entry{}, false, ErrCorrupt
+			// Impossible invariant: bucket points to tombstoned slot.
+			// This could be overlap with concurrent write or real corruption.
+			return Entry{}, false, c.checkInvariantViolation(expectedGen)
 		}
 
 		// Read entry data.
@@ -938,8 +979,10 @@ func (c *cache) lookupKey(key []byte) (Entry, bool, error) {
 		}, true, nil
 	}
 
-	// Probed all buckets - no EMPTY found - corruption.
-	return Entry{}, false, ErrCorrupt
+	// Impossible invariant: probed all buckets without finding EMPTY.
+	// Hash table should never be completely full (bucket_used + bucket_tombstones < bucket_count).
+	// This could be overlap with concurrent write or real corruption.
+	return Entry{}, false, c.checkInvariantViolation(expectedGen)
 }
 
 // collectEntries collects entries matching the predicate with seqlock retry.
