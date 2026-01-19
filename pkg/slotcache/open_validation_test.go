@@ -177,3 +177,89 @@ func Test_Open_Returns_ErrInvalidInput_When_SlotCapacity_Exceeds_BucketSizingLim
 		t.Fatalf("Open(overflow capacity) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
 	}
 }
+
+func Test_Open_Returns_ErrInvalidInput_When_KeySize_Exceeds_Uint32Max(t *testing.T) {
+	t.Parallel()
+
+	// This test only makes sense on 64-bit systems where int can exceed uint32.
+	// On 32-bit systems, int max = uint32 max, so this condition can never occur.
+	const maxUint32 = int(^uint32(0))
+	if maxUint32 == int(^uint(0)>>1) {
+		t.Skip("skipping on 32-bit systems where int cannot exceed uint32")
+	}
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_keysize_overflow.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      maxUint32 + 1, // exceeds uint32
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: 64,
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(keysize overflow) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}
+
+func Test_Open_Returns_ErrInvalidInput_When_IndexSize_Exceeds_Uint32Max(t *testing.T) {
+	t.Parallel()
+
+	// This test only makes sense on 64-bit systems where int can exceed uint32.
+	const maxUint32 = int(^uint32(0))
+	if maxUint32 == int(^uint(0)>>1) {
+		t.Skip("skipping on 32-bit systems where int cannot exceed uint32")
+	}
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_indexsize_overflow.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    maxUint32 + 1, // exceeds uint32
+		UserVersion:  1,
+		SlotCapacity: 64,
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(indexsize overflow) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}
+
+func Test_Open_Returns_ErrInvalidInput_When_FileLayout_Exceeds_Int64Max(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_filesize_overflow.slc")
+
+	// Create a configuration where slot_capacity * slot_size would overflow int64.
+	// slot_size for key_size=8, index_size=8 is: align8(8 + 8 + 0 + 8 + 8) = 32 bytes
+	// To overflow int64 (max ~9.2e18), we need capacity > maxInt64 / slot_size
+	// But we also have the bucket sizing limit (slot_capacity <= maxUint64/2).
+	// So we need to find values where the file layout overflows int64.
+	//
+	// With slot_capacity = maxUint64/2, slot_size = 32:
+	// slots_section = (maxUint64/2) * 32 = 16 * maxUint64 which overflows.
+	//
+	// Let's use a smaller but still overflowing configuration:
+	// maxInt64 / 32 ≈ 2.88e17, so capacity > 2.88e17 with slot_size=32 would overflow.
+	// bucket_sizing_limit = maxUint64/2 ≈ 9.2e18, so we can use capacity = 3e17.
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    8,
+		UserVersion:  1,
+		SlotCapacity: 300_000_000_000_000_000, // 3e17 - with slot_size 32, exceeds int64
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(file layout overflow) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}

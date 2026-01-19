@@ -10,8 +10,7 @@ This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant wit
 
 ## P1 — Spec alignment / robustness
 
-- [ ] **Replace "clamping" integer conversions with explicit validation**
-  - Today `safeIntToUint32` / `safeUint64ToInt64` clamp. Instead, reject impossible configurations with `ErrInvalidInput` (e.g. key/index sizes that don't fit in `u32`, computed file layout that doesn't fit in `int64`/`int`).
+- (none currently)
 
 ## P2 — Optional hardening / performance
 
@@ -25,6 +24,13 @@ This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant wit
   - Sample-check a small number of bucket entries for obvious out-of-range slot IDs to fail-fast on common corruptions without scanning the full table.
 
 ## Completed
+
+- [x] **Replace "clamping" integer conversions with explicit validation**
+  - Replaced `safeIntToUint32` / `safeUint64ToInt64` / `safeUint64ToInt` clamping functions with checked versions (`intToUint32Checked`, `uint64ToInt64Checked`, `uint64ToIntChecked`) that return `(value, ok)`.
+  - Added upfront validation in `Open()` for KeySize and IndexSize to fit in uint32.
+  - Added `validateFileLayoutFitsInt64()` to reject configurations where computed file size would overflow int64 (required for mmap/ftruncate).
+  - Added validation in `validateAndOpenExisting()` for computed file size overflow.
+  - Added tests: `Test_Open_Returns_ErrInvalidInput_When_KeySize_Exceeds_Uint32Max`, `Test_Open_Returns_ErrInvalidInput_When_IndexSize_Exceeds_Uint32Max`, `Test_Open_Returns_ErrInvalidInput_When_FileLayout_Exceeds_Int64Max`.
 
 - [x] **Align bucket sizing logic with the spec/tech decisions**
   - Replaced the float-based `computeBucketCount(slotCapacity, loadFactor)` with the integer formula: `bucket_count = nextPow2(slot_capacity * 2)`.

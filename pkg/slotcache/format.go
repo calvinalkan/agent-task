@@ -33,46 +33,53 @@ const (
 
 // Safe integer conversion constants.
 const (
-	maxInt   = int(^uint(0) >> 1)
-	maxInt64 = int64(^uint64(0) >> 1)
+	maxInt    = int(^uint(0) >> 1)
+	maxInt64  = int64(^uint64(0) >> 1)
+	maxUint32 = ^uint32(0)
+	maxUint64 = ^uint64(0)
 )
 
-// safeIntToUint32 converts int to uint32, clamping to valid range.
-// Returns 0 if negative, maxUint32 if too large.
-func safeIntToUint32(v int) uint32 {
+// intToUint32Checked converts a non-negative int to uint32.
+// Returns (result, true) on success, (0, false) if the value doesn't fit.
+//
+// Callers should validate inputs upfront via Open() and reject with ErrInvalidInput
+// if this returns false. This function exists to avoid unsafe silent truncation.
+func intToUint32Checked(v int) (uint32, bool) {
 	if v < 0 {
-		return 0
+		return 0, false
 	}
 
 	// Convert through uint64 to avoid gosec G115 warning.
-	// The range check ensures this is safe.
 	u64 := uint64(v)
 
-	const maxUint32Val = uint64(^uint32(0))
-	if u64 > maxUint32Val {
-		return ^uint32(0)
+	if u64 > uint64(maxUint32) {
+		return 0, false
 	}
 
-	return uint32(u64)
+	return uint32(u64), true
 }
 
-// safeUint64ToInt64 converts uint64 to int64, clamping to maxInt64 if overflow.
-// For file sizes, this is safe as files can't exceed int64 max.
-func safeUint64ToInt64(v uint64) int64 {
+// uint64ToInt64Checked converts uint64 to int64.
+// Returns (result, true) on success, (0, false) if the value exceeds maxInt64.
+//
+// Used for file sizes and offsets. Callers should validate configurations upfront
+// to ensure computed sizes fit in int64.
+func uint64ToInt64Checked(v uint64) (int64, bool) {
 	if v > uint64(maxInt64) {
-		return maxInt64
+		return 0, false
 	}
 
-	return int64(v)
+	return int64(v), true
 }
 
-// safeUint64ToInt converts uint64 to int, clamping to maxInt if overflow.
-func safeUint64ToInt(v uint64) int {
+// uint64ToIntChecked converts uint64 to int.
+// Returns (result, true) on success, (0, false) if the value exceeds maxInt.
+func uint64ToIntChecked(v uint64) (int, bool) {
 	if v > uint64(maxInt) {
-		return maxInt
+		return 0, false
 	}
 
-	return int(v)
+	return int(v), true
 }
 
 // fnv1a64 computes the FNV-1a 64-bit hash over key bytes.

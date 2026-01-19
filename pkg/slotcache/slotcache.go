@@ -166,6 +166,47 @@ type cache struct {
 	writeback      WritebackMode
 }
 
+// validateFileLayoutFitsInt64 checks that the computed file layout for the given
+// options will fit in int64 (required for mmap, ftruncate, and file size operations).
+func validateFileLayoutFitsInt64(opts Options) error {
+	// Convert sizes (already validated to fit in uint32).
+	keySize32, _ := intToUint32Checked(opts.KeySize)
+	indexSize32, _ := intToUint32Checked(opts.IndexSize)
+
+	slotSize := uint64(computeSlotSize(keySize32, indexSize32))
+	bucketCount := computeBucketCount(opts.SlotCapacity)
+
+	// Check slots section: header_size + slot_capacity * slot_size
+	slotsSection := opts.SlotCapacity * slotSize
+	if slotSize > 0 && slotsSection/slotSize != opts.SlotCapacity {
+		return fmt.Errorf("slots section size overflows uint64: %w", ErrInvalidInput)
+	}
+
+	bucketsOffset := uint64(slc1HeaderSize) + slotsSection
+	if bucketsOffset < uint64(slc1HeaderSize) {
+		return fmt.Errorf("buckets offset overflows uint64: %w", ErrInvalidInput)
+	}
+
+	// Check buckets section: bucket_count * 16
+	bucketsSection := bucketCount * 16
+	if bucketsSection/16 != bucketCount {
+		return fmt.Errorf("buckets section size overflows uint64: %w", ErrInvalidInput)
+	}
+
+	// Check total file size
+	fileSize := bucketsOffset + bucketsSection
+	if fileSize < bucketsOffset {
+		return fmt.Errorf("file size overflows uint64: %w", ErrInvalidInput)
+	}
+
+	// Finally check it fits in int64
+	if _, ok := uint64ToInt64Checked(fileSize); !ok {
+		return fmt.Errorf("file size %d exceeds int64 max: %w", fileSize, ErrInvalidInput)
+	}
+
+	return nil
+}
+
 // Open creates or opens a cache file with the given options.
 func Open(opts Options) (Cache, error) {
 	// Validate options.
@@ -181,6 +222,15 @@ func Open(opts Options) (Cache, error) {
 		return nil, fmt.Errorf("index_size must be >= 0, got %d: %w", opts.IndexSize, ErrInvalidInput)
 	}
 
+	// Validate KeySize and IndexSize fit in uint32 (on-disk format constraint).
+	if _, ok := intToUint32Checked(opts.KeySize); !ok {
+		return nil, fmt.Errorf("key_size %d exceeds uint32 max: %w", opts.KeySize, ErrInvalidInput)
+	}
+
+	if _, ok := intToUint32Checked(opts.IndexSize); !ok {
+		return nil, fmt.Errorf("index_size %d exceeds uint32 max: %w", opts.IndexSize, ErrInvalidInput)
+	}
+
 	if opts.SlotCapacity < 1 {
 		return nil, fmt.Errorf("slot_capacity must be >= 1, got %d: %w", opts.SlotCapacity, ErrInvalidInput)
 	}
@@ -194,6 +244,12 @@ func Open(opts Options) (Cache, error) {
 	const maxBucketSizingCapacity = ^uint64(0) >> 1 // maxUint64 / 2
 	if opts.SlotCapacity > maxBucketSizingCapacity {
 		return nil, fmt.Errorf("slot_capacity %d exceeds bucket sizing limit %d: %w", opts.SlotCapacity, maxBucketSizingCapacity, ErrInvalidInput)
+	}
+
+	// Validate computed file layout fits in int64 (required for mmap/ftruncate).
+	layoutErr := validateFileLayoutFitsInt64(opts)
+	if layoutErr != nil {
+		return nil, layoutErr
 	}
 
 	// Try to open existing file.
@@ -349,14 +405,20 @@ func createNewCache(opts Options) (Cache, error) {
 	}
 
 	// Calculate file size.
+	// KeySize and IndexSize already validated in Open() to fit in uint32.
+	keySize32, _ := intToUint32Checked(opts.KeySize)
+	indexSize32, _ := intToUint32Checked(opts.IndexSize)
+
 	header := newHeader(
-		safeIntToUint32(opts.KeySize),
-		safeIntToUint32(opts.IndexSize),
+		keySize32,
+		indexSize32,
 		opts.SlotCapacity,
 		opts.UserVersion,
 		opts.OrderedKeys,
 	)
-	fileSize := safeUint64ToInt64(header.BucketsOffset + header.BucketCount*16)
+
+	// File size validated in Open() via computeFileSize.
+	fileSize, _ := uint64ToInt64Checked(header.BucketsOffset + header.BucketCount*16)
 
 	// Truncate to full size (sparse file).
 	truncErr := syscall.Ftruncate(fd, fileSize)
@@ -413,14 +475,20 @@ func initializeEmptyFile(opts Options) (Cache, error) {
 		return nil, fmt.Errorf("open empty file: %w", openErr)
 	}
 
+	// KeySize and IndexSize already validated in Open() to fit in uint32.
+	keySize32, _ := intToUint32Checked(opts.KeySize)
+	indexSize32, _ := intToUint32Checked(opts.IndexSize)
+
 	header := newHeader(
-		safeIntToUint32(opts.KeySize),
-		safeIntToUint32(opts.IndexSize),
+		keySize32,
+		indexSize32,
 		opts.SlotCapacity,
 		opts.UserVersion,
 		opts.OrderedKeys,
 	)
-	fileSize := safeUint64ToInt64(header.BucketsOffset + header.BucketCount*16)
+
+	// File size validated in Open() via computeFileSize.
+	fileSize, _ := uint64ToInt64Checked(header.BucketsOffset + header.BucketCount*16)
 
 	truncErr := syscall.Ftruncate(fd, fileSize)
 	if truncErr != nil {
@@ -605,7 +673,11 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		return nil, fmt.Errorf("buckets_offset %d != expected %d: %w", bucketsOffset, expectedBucketsOffset, ErrCorrupt)
 	}
 
-	expectedMinSize := safeUint64ToInt64(bucketsOffset + bucketCount*16)
+	expectedMinSize, ok := uint64ToInt64Checked(bucketsOffset + bucketCount*16)
+	if !ok {
+		return nil, fmt.Errorf("computed file size overflows int64: %w", ErrCorrupt)
+	}
+
 	if size < expectedMinSize {
 		return nil, fmt.Errorf("file size %d < minimum required %d: %w", size, expectedMinSize, ErrCorrupt)
 	}
@@ -811,7 +883,11 @@ func (c *cache) Len() (int, error) {
 		c.registry.mu.RUnlock()
 
 		if g1 == g2 {
-			return safeUint64ToInt(count), nil
+			// count is always <= slot_highwater <= slot_capacity which fits in int
+			// (validated at Open time), so this conversion is safe.
+			result, _ := uint64ToIntChecked(count)
+
+			return result, nil
 		}
 	}
 
