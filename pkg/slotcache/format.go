@@ -227,16 +227,27 @@ func align8(x uint32) uint32 {
 	return (x + 7) &^ 7
 }
 
-// computeBucketCount calculates the bucket count for a given slot capacity and load factor.
-// bucket_count = nextPow2( ceil(slot_capacity / load_factor) )
+// computeBucketCount calculates the bucket count for a given slot capacity.
+// bucket_count = nextPow2(slot_capacity * 2)
 // bucket_count must be >= 2 and a power of two.
-func computeBucketCount(slotCapacity uint64, loadFactor float64) uint64 {
-	if slotCapacity == 0 || loadFactor <= 0 || loadFactor >= 1 {
+//
+// Per spec: "Implementations SHOULD size bucket_count = nextPowerOfTwo(slot_capacity * 2)
+// to maintain load factor ≤ 0.5."
+//
+// Returns 0 if slot_capacity * 2 would overflow.
+func computeBucketCount(slotCapacity uint64) uint64 {
+	if slotCapacity == 0 {
 		return 2 // minimum valid bucket count
 	}
 
-	// Calculate ceiling of capacity divided by load factor.
-	needed := max(uint64(float64(slotCapacity)/loadFactor+0.999999999), 2)
+	// Check for overflow: slot_capacity * 2 > maxUint64
+	// Equivalent to: slot_capacity > maxUint64 / 2
+	const maxSafeCapacity = ^uint64(0) >> 1 // maxUint64 / 2
+	if slotCapacity > maxSafeCapacity {
+		return 0 // overflow
+	}
+
+	needed := max(slotCapacity*2, 2)
 
 	return nextPow2(needed)
 }
@@ -346,9 +357,9 @@ func decodeSlot(buf []byte, keySize, indexSize uint32) decodedSlot {
 }
 
 // newHeader creates a header for a new cache file with the given options.
-func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, loadFactor float64, orderedKeys bool) slc1Header {
+func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, orderedKeys bool) slc1Header {
 	slotSize := computeSlotSize(keySize, indexSize)
-	bucketCount := computeBucketCount(slotCapacity, loadFactor)
+	bucketCount := computeBucketCount(slotCapacity)
 	slotsOffset := uint64(slc1HeaderSize)
 	bucketsOffset := slotsOffset + slotCapacity*uint64(slotSize)
 

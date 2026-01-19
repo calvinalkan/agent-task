@@ -58,9 +58,6 @@ func readBackoff(attempt int) time.Duration {
 	return backoff
 }
 
-// Default load factor for bucket sizing.
-const defaultLoadFactor = 0.5
-
 // fileIdentity uniquely identifies a file by device and inode.
 type fileIdentity struct {
 	dev uint64
@@ -191,6 +188,12 @@ func Open(opts Options) (Cache, error) {
 	const maxSlotCapacity = uint64(0xFFFFFFFFFFFFFFFE)
 	if opts.SlotCapacity > maxSlotCapacity {
 		return nil, fmt.Errorf("slot_capacity %d exceeds maximum %d: %w", opts.SlotCapacity, maxSlotCapacity, ErrInvalidInput)
+	}
+
+	// Bucket sizing uses slot_capacity * 2. Reject capacities that would overflow.
+	const maxBucketSizingCapacity = ^uint64(0) >> 1 // maxUint64 / 2
+	if opts.SlotCapacity > maxBucketSizingCapacity {
+		return nil, fmt.Errorf("slot_capacity %d exceeds bucket sizing limit %d: %w", opts.SlotCapacity, maxBucketSizingCapacity, ErrInvalidInput)
 	}
 
 	// Try to open existing file.
@@ -351,7 +354,6 @@ func createNewCache(opts Options) (Cache, error) {
 		safeIntToUint32(opts.IndexSize),
 		opts.SlotCapacity,
 		opts.UserVersion,
-		defaultLoadFactor,
 		opts.OrderedKeys,
 	)
 	fileSize := safeUint64ToInt64(header.BucketsOffset + header.BucketCount*16)
@@ -416,7 +418,6 @@ func initializeEmptyFile(opts Options) (Cache, error) {
 		safeIntToUint32(opts.IndexSize),
 		opts.SlotCapacity,
 		opts.UserVersion,
-		defaultLoadFactor,
 		opts.OrderedKeys,
 	)
 	fileSize := safeUint64ToInt64(header.BucketsOffset + header.BucketCount*16)

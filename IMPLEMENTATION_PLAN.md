@@ -1,6 +1,6 @@
 # IMPLEMENTATION_PLAN.md
 
-Last updated: 2026-01-19 (Open create/init lock serialization fixed)
+Last updated: 2026-01-19 (Bucket sizing aligned with spec)
 
 This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant with the SLC1 spec in `pkg/slotcache/specs/*`.
 
@@ -10,12 +10,8 @@ This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant wit
 
 ## P1 — Spec alignment / robustness
 
-- [ ] **Align bucket sizing logic with the spec/tech decisions**
-  - Replace the float-based sizing helper with the integer formula: `bucket_count = nextPow2(slot_capacity * 2)`.
-  - Add overflow checks for `slot_capacity * 2`.
-
-- [ ] **Replace “clamping” integer conversions with explicit validation**
-  - Today `safeIntToUint32` / `safeUint64ToInt64` clamp. Instead, reject impossible configurations with `ErrInvalidInput` (e.g. key/index sizes that don’t fit in `u32`, computed file layout that doesn’t fit in `int64`/`int`).
+- [ ] **Replace "clamping" integer conversions with explicit validation**
+  - Today `safeIntToUint32` / `safeUint64ToInt64` clamp. Instead, reject impossible configurations with `ErrInvalidInput` (e.g. key/index sizes that don't fit in `u32`, computed file layout that doesn't fit in `int64`/`int`).
 
 ## P2 — Optional hardening / performance
 
@@ -30,8 +26,14 @@ This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant wit
 
 ## Completed
 
+- [x] **Align bucket sizing logic with the spec/tech decisions**
+  - Replaced the float-based `computeBucketCount(slotCapacity, loadFactor)` with the integer formula: `bucket_count = nextPow2(slot_capacity * 2)`.
+  - Added overflow checks for `slot_capacity * 2` in `Open()` — rejects capacities > maxUint64/2 with `ErrInvalidInput`.
+  - Removed the unused `defaultLoadFactor` constant.
+  - Updated tests in `format_test.go` and `open_validation_test.go`.
+
 - [x] **Serialize cache file creation/0-byte initialization when locking is enabled**
-  - Fixed in `pkg/slotcache/slotcache.go` by routing the “missing file create” and “0-byte init” paths through `openCreateOrInitWithWriterLock()` when `DisableLocking == false`.
+  - Fixed in `pkg/slotcache/slotcache.go` by routing the "missing file create" and "0-byte init" paths through `openCreateOrInitWithWriterLock()` when `DisableLocking == false`.
   - Added regression tests in `pkg/slotcache/seqlock_concurrency_test.go`:
     - `Test_Open_Returns_ErrBusy_When_Creating_New_File_And_WriterLock_Held`
     - `Test_Open_Returns_ErrBusy_When_Initializing_ZeroByte_File_And_WriterLock_Held`

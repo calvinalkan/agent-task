@@ -153,3 +153,27 @@ func Test_Open_Returns_ErrIncompatible_When_OrderedKeys_Changes_TrueToFalse(t *t
 		t.Fatalf("Open(mutated) error mismatch: got=%v want=%v", err, slotcache.ErrIncompatible)
 	}
 }
+
+func Test_Open_Returns_ErrInvalidInput_When_SlotCapacity_Exceeds_BucketSizingLimit(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_overflow.slc")
+
+	// slot_capacity * 2 would overflow uint64.
+	// maxUint64 / 2 + 1 = 0x8000000000000000
+	const overflowCapacity = (^uint64(0) >> 1) + 1
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: overflowCapacity,
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(overflow capacity) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}

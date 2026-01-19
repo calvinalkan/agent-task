@@ -223,7 +223,7 @@ func Test_EncodeSlot_Aligns_Revision_To_EightBytes_When_KeySize_Varies(t *testin
 func Test_HeaderCRC_Validates_Correctly_When_Header_Is_Fresh_Or_Corrupted(t *testing.T) {
 	t.Parallel()
 
-	h := newHeader(16, 8, 1000, 1, 0.75, false)
+	h := newHeader(16, 8, 1000, 1, false)
 	buf := encodeHeader(&h)
 
 	// Validate CRC
@@ -241,7 +241,7 @@ func Test_HeaderCRC_Validates_Correctly_When_Header_Is_Fresh_Or_Corrupted(t *tes
 func Test_HeaderCRC_Remains_Unchanged_When_Generation_Changes(t *testing.T) {
 	t.Parallel()
 
-	h := newHeader(16, 8, 1000, 1, 0.75, false)
+	h := newHeader(16, 8, 1000, 1, false)
 
 	// Encode with generation=0
 	h.Generation = 0
@@ -259,25 +259,39 @@ func Test_HeaderCRC_Remains_Unchanged_When_Generation_Changes(t *testing.T) {
 	}
 }
 
-func Test_ComputeBucketCount_Returns_Power_Of_Two_When_Given_Capacity_And_LoadFactor(t *testing.T) {
+func Test_ComputeBucketCount_Returns_Power_Of_Two_When_Given_Capacity(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		slotCapacity uint64
-		loadFactor   float64
 		want         uint64
 	}{
-		{slotCapacity: 100, loadFactor: 0.75, want: 256},   // ceil(100/0.75)=134, nextPow2=256
-		{slotCapacity: 1000, loadFactor: 0.75, want: 2048}, // ceil(1000/0.75)=1334, nextPow2=2048
-		{slotCapacity: 1, loadFactor: 0.75, want: 2},       // minimum bucket count
-		{slotCapacity: 0, loadFactor: 0.75, want: 2},       // edge case
+		{slotCapacity: 100, want: 256},   // 100*2=200, nextPow2=256
+		{slotCapacity: 1000, want: 2048}, // 1000*2=2000, nextPow2=2048
+		{slotCapacity: 1, want: 2},       // 1*2=2, nextPow2=2, minimum bucket count
+		{slotCapacity: 0, want: 2},       // edge case, minimum bucket count
+		{slotCapacity: 64, want: 128},    // 64*2=128, nextPow2=128
+		{slotCapacity: 65, want: 256},    // 65*2=130, nextPow2=256
 	}
 
 	for _, tt := range tests {
-		got := computeBucketCount(tt.slotCapacity, tt.loadFactor)
+		got := computeBucketCount(tt.slotCapacity)
 		if got != tt.want {
-			t.Errorf("computeBucketCount(%d, %f) = %d, want %d", tt.slotCapacity, tt.loadFactor, got, tt.want)
+			t.Errorf("computeBucketCount(%d) = %d, want %d", tt.slotCapacity, got, tt.want)
 		}
+	}
+}
+
+func Test_ComputeBucketCount_Returns_Zero_When_Overflow(t *testing.T) {
+	t.Parallel()
+
+	// slot_capacity * 2 would overflow uint64
+	// maxUint64 / 2 + 1 = 9223372036854775808
+	const overflowCapacity = (^uint64(0) >> 1) + 1 // maxUint64/2 + 1
+
+	got := computeBucketCount(overflowCapacity)
+	if got != 0 {
+		t.Errorf("computeBucketCount(%d) = %d, want 0 (overflow)", overflowCapacity, got)
 	}
 }
 
@@ -313,7 +327,7 @@ func Test_HasReservedBytesSet_Returns_True_When_Reserved_Bytes_Are_Nonzero(t *te
 	t.Parallel()
 
 	// Clean header
-	h := newHeader(16, 0, 100, 1, 0.75, false)
+	h := newHeader(16, 0, 100, 1, false)
 
 	buf := encodeHeader(&h)
 	if hasReservedBytesSet(buf) {
