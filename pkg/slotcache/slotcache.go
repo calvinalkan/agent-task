@@ -988,6 +988,9 @@ func (c *cache) collectRangeEntries(startPadded, endPadded []byte, opts ScanOpti
 
 // doCollectRange performs range scan using binary search + sequential scan.
 // Must be called with registry.mu.RLock held.
+//
+// Allocation optimization: Same approach as doCollect - borrow mmap slices for
+// filter callbacks, only allocate owned copies for entries that pass the filter.
 func (c *cache) doCollectRange(startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
 	highwater := c.readSlotHighwater()
 
@@ -1004,6 +1007,7 @@ func (c *cache) doCollectRange(startPadded, endPadded []byte, opts ScanOptions) 
 	// If no start bound, startSlot remains 0.
 
 	entries := make([]Entry, 0)
+	keyPad := (8 - (c.keySize % 8)) % 8
 
 	// Sequential scan from startSlot.
 	for slotID := startSlot; slotID < highwater; slotID++ {
@@ -1023,28 +1027,29 @@ func (c *cache) doCollectRange(startPadded, endPadded []byte, opts ScanOptions) 
 		}
 
 		// Read entry data.
-		keyPad := (8 - (c.keySize % 8)) % 8
 		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
 		// Use atomic load for revision to avoid torn reads during concurrent writes.
 		revision := atomicLoadInt64(c.data[revOffset:])
 
-		var index []byte
+		// Apply filter if present, using borrowed mmap slices.
+		if opts.Filter != nil {
+			var borrowedIndex []byte
 
-		if c.indexSize > 0 {
-			idxOffset := revOffset + 8
-			index = make([]byte, c.indexSize)
-			copy(index, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
-		}
+			if c.indexSize > 0 {
+				idxOffset := revOffset + 8
+				// Borrow directly from mmap - no allocation needed for filter.
+				borrowedIndex = c.data[idxOffset : idxOffset+uint64(c.indexSize)]
+			}
 
-		// Create borrowed entry for filter.
-		borrowed := Entry{
-			Key:      key,
-			Revision: revision,
-			Index:    index,
-		}
+			borrowed := Entry{
+				Key:      key,
+				Revision: revision,
+				Index:    borrowedIndex,
+			}
 
-		if opts.Filter != nil && !opts.Filter(borrowed) {
-			continue
+			if !opts.Filter(borrowed) {
+				continue
+			}
 		}
 
 		// Create owned copies for result.
@@ -1052,9 +1057,11 @@ func (c *cache) doCollectRange(startPadded, endPadded []byte, opts ScanOptions) 
 		copy(keyCopy, key)
 
 		var indexCopy []byte
+
 		if c.indexSize > 0 {
+			idxOffset := revOffset + 8
 			indexCopy = make([]byte, c.indexSize)
-			copy(indexCopy, c.data[revOffset+8:revOffset+8+uint64(c.indexSize)])
+			copy(indexCopy, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
 		}
 
 		entries = append(entries, Entry{
@@ -1234,9 +1241,16 @@ func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Ent
 
 // doCollect performs the actual slot scan.
 // Must be called with registry.mu.RLock held.
+//
+// Allocation optimization: We minimize allocations by:
+// 1. Borrowing mmap slices directly for filter callbacks (API contract allows this)
+// 2. Only allocating owned copies for entries that pass the filter
+// 3. Skipping borrowed entry construction entirely when no filter is set.
 func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
 	highwater := c.readSlotHighwater()
 	entries := make([]Entry, 0)
+
+	keyPad := (8 - (c.keySize % 8)) % 8
 
 	for slotID := range highwater {
 		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
@@ -1252,28 +1266,30 @@ func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, e
 			continue
 		}
 
-		keyPad := (8 - (c.keySize % 8)) % 8
 		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
 		// Use atomic load for revision to avoid torn reads during concurrent writes.
 		revision := atomicLoadInt64(c.data[revOffset:])
 
-		var index []byte
+		// Apply filter if present, using borrowed mmap slices.
+		// The API contract states filter receives borrowed slices valid only during the call.
+		if opts.Filter != nil {
+			var borrowedIndex []byte
 
-		if c.indexSize > 0 {
-			idxOffset := revOffset + 8
-			index = make([]byte, c.indexSize)
-			copy(index, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
-		}
+			if c.indexSize > 0 {
+				idxOffset := revOffset + 8
+				// Borrow directly from mmap - no allocation needed for filter.
+				borrowedIndex = c.data[idxOffset : idxOffset+uint64(c.indexSize)]
+			}
 
-		// Create borrowed entry for filter.
-		borrowed := Entry{
-			Key:      key,
-			Revision: revision,
-			Index:    index,
-		}
+			borrowed := Entry{
+				Key:      key,
+				Revision: revision,
+				Index:    borrowedIndex,
+			}
 
-		if opts.Filter != nil && !opts.Filter(borrowed) {
-			continue
+			if !opts.Filter(borrowed) {
+				continue
+			}
 		}
 
 		// Create owned copies for result.
@@ -1281,9 +1297,11 @@ func (c *cache) doCollect(opts ScanOptions, match func([]byte) bool) ([]Entry, e
 		copy(keyCopy, key)
 
 		var indexCopy []byte
+
 		if c.indexSize > 0 {
+			idxOffset := revOffset + 8
 			indexCopy = make([]byte, c.indexSize)
-			copy(indexCopy, c.data[revOffset+8:revOffset+8+uint64(c.indexSize)])
+			copy(indexCopy, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
 		}
 
 		entries = append(entries, Entry{
