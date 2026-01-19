@@ -949,15 +949,45 @@ func (c *cache) Len() (int, error) {
 			continue
 		}
 
+		highwater, hwErr := c.safeSlotHighwater(g1)
+		if hwErr != nil {
+			c.registry.mu.RUnlock()
+
+			if errors.Is(hwErr, errOverlap) {
+				continue
+			}
+
+			return 0, hwErr
+		}
+
 		count := c.readLiveCount()
+		if count > highwater {
+			invErr := c.checkInvariantViolation(g1)
+			c.registry.mu.RUnlock()
+
+			if errors.Is(invErr, errOverlap) {
+				continue
+			}
+
+			return 0, invErr
+		}
+
+		result, ok := uint64ToIntChecked(count)
+		if !ok {
+			invErr := c.checkInvariantViolation(g1)
+			c.registry.mu.RUnlock()
+
+			if errors.Is(invErr, errOverlap) {
+				continue
+			}
+
+			return 0, invErr
+		}
+
 		g2 := c.readGeneration()
 		c.registry.mu.RUnlock()
 
 		if g1 == g2 {
-			// count is always <= slot_highwater <= slot_capacity which fits in int
-			// (validated at Open time), so this conversion is safe.
-			result, _ := uint64ToIntChecked(count)
-
 			return result, nil
 		}
 	}
@@ -1219,7 +1249,10 @@ func (c *cache) collectRangeEntries(startPadded, endPadded []byte, opts ScanOpti
 // Allocation optimization: Same approach as doCollect - borrow mmap slices for
 // filter callbacks, only allocate owned copies for entries that pass the filter.
 func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
-	highwater := c.readSlotHighwater()
+	highwater, hwErr := c.safeSlotHighwater(expectedGen)
+	if hwErr != nil {
+		return nil, hwErr
+	}
 
 	if highwater == 0 {
 		return []Entry{}, nil
@@ -1356,6 +1389,43 @@ func (c *cache) readSlotHighwater() uint64 {
 	return binary.LittleEndian.Uint64(c.data[offSlotHighwater:])
 }
 
+// safeSlotHighwater reads slot_highwater and validates it is safe to use as a
+// loop bound / for slot offset calculations.
+//
+// This exists for panic-proofing: under cross-process overlap, readers may
+// observe transient torn header values. We must never use such values to index
+// into the mmap or to run unbounded loops.
+//
+// Must be called while holding registry.mu.RLock.
+func (c *cache) safeSlotHighwater(expectedGen uint64) (uint64, error) {
+	highwater := c.readSlotHighwater()
+
+	// slot_highwater must never exceed slot_capacity.
+	if highwater > c.slotCapacity {
+		return 0, c.checkInvariantViolation(expectedGen)
+	}
+
+	slotSize := uint64(c.slotSize)
+
+	// Compute slots byte range: [slotsOffset, slotsOffset + highwater*slotSize).
+	// Guard multiplication + addition overflow and ensure it fits in the mapping.
+	slotsBytes := highwater * slotSize
+	if slotSize > 0 && slotsBytes/slotSize != highwater {
+		return 0, c.checkInvariantViolation(expectedGen)
+	}
+
+	slotsEnd := c.slotsOffset + slotsBytes
+	if slotsEnd < c.slotsOffset {
+		return 0, c.checkInvariantViolation(expectedGen)
+	}
+
+	if slotsEnd > uint64(len(c.data)) {
+		return 0, c.checkInvariantViolation(expectedGen)
+	}
+
+	return highwater, nil
+}
+
 // lookupKey finds a key in the bucket index and returns the entry.
 // Must be called with registry.mu.RLock held.
 //
@@ -1367,7 +1437,11 @@ func (c *cache) lookupKey(key []byte, expectedGen uint64) (Entry, bool, error) {
 	hash := fnv1a64(key)
 	mask := c.bucketCount - 1
 	startIdx := hash & mask
-	highwater := c.readSlotHighwater()
+
+	highwater, hwErr := c.safeSlotHighwater(expectedGen)
+	if hwErr != nil {
+		return Entry{}, false, hwErr
+	}
 
 	for probeCount := range c.bucketCount {
 		idx := (startIdx + probeCount) & mask
@@ -1492,7 +1566,11 @@ func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Ent
 // 2. Only allocating owned copies for entries that pass the filter
 // 3. Skipping borrowed entry construction entirely when no filter is set.
 func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
-	highwater := c.readSlotHighwater()
+	highwater, hwErr := c.safeSlotHighwater(expectedGen)
+	if hwErr != nil {
+		return nil, hwErr
+	}
+
 	entries := make([]Entry, 0)
 
 	keyPad := (8 - (c.keySize % 8)) % 8

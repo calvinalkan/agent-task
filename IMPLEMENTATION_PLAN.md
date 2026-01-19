@@ -27,6 +27,10 @@ This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant wit
   - Returns `ErrCorrupt` if any sampled bucket references an out-of-range slot ID.
   - Tests in `bucket_sampling_test.go` verify detection at various sampled positions.
 
+- [x] **Panic-proof read paths under cross-process overlap (bounds-check first)**
+  - Added `safeSlotHighwater()` and used it before iterating slots / indexing into the slots region (Len/Get/Scan/ScanRange).
+  - On any derived-bound violation, uses `checkInvariantViolation(g1)` to classify overlap (`ErrBusy` after retries) vs stable corruption (`ErrCorrupt`).
+
 ## Completed
 
 - [x] **Reduce allocation/overhead in read retry backoff**
