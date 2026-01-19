@@ -103,3 +103,10 @@
 
 Additional recommended checks (spec hardening):
 - [ ] `go test ./pkg/slotcache -run Seqlock -slotcache.concurrency-stress=5s` passes reliably.
+
+---
+
+### P3 — Cleanup
+
+- [ ] Replace `writer_lock.go` with `pkg/fs.Locker` - use it directly with a real FS inside `slotcache.go`.
+- [ ] Wrap sentinel errors with helpful context in `slotcache.go` and `writer.go`. Use `fmt.Errorf("useful context: %w", ErrFoo)` - include relevant data (keys, sizes, counts, etc.) as appropriate per call site. `errors.Is` still works but users get actionable diagnostics. Sentinels: `ErrCorrupt`, `ErrIncompatible`, `ErrBusy`, `ErrFull`, `ErrClosed`, `ErrWriteback`, `ErrInvalidInput`, `ErrUnordered`, `ErrOutOfOrderInsert`.

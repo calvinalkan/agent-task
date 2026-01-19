@@ -1,15 +1,3 @@
-// File format correctness: fuzz testing
-//
-// Oracle: spec_oracle (internal/testutil/spec_oracle.go)
-// Technique: coverage-guided fuzzing (go test -fuzz)
-//
-// These tests drive the API with fuzz-derived operations, then validate
-// the on-disk file format. The spec_oracle independently parses the file and
-// checks all format invariants (header CRC, slot layout, bucket integrity,
-// probe sequences).
-//
-// Failures here mean: "the file format violates the spec".
-
 package slotcache_test
 
 import (
@@ -21,23 +9,22 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil"
 )
 
-// FuzzSpec_GenerativeUsage drives the real API using fuzz-derived operations
-// under a fixed, common configuration.
-func FuzzSpec_GenerativeUsage(f *testing.F) {
+// FuzzSpec_GenerativeUsage_FuzzOptions is like FuzzSpec_GenerativeUsage, but
+// derives slotcache.Options from the fuzz input so we exercise:
+//   - key padding/alignment (KeySize != 8)
+//   - IndexSize == 0
+//   - tiny capacities (ErrFull, probe chains, tombstones)
+//   - ordered/unordered mode
+func FuzzSpec_GenerativeUsage_FuzzOptions(f *testing.F) {
 	f.Add([]byte{})
-	f.Add([]byte("commit"))
-	f.Add(make([]byte, 64))
+	f.Add([]byte{7, 4, 0, 15, 0, 0x80, 0x80, 0x80}) // common-ish options + some actions
+	f.Add([]byte{0, 0, 0, 0, 1, 0x80, 0x80, 0x80})  // tiny options + ordered
 
 	f.Fuzz(func(t *testing.T, fuzzBytes []byte) {
 		tmpDir := t.TempDir()
-		cacheFilePath := filepath.Join(tmpDir, "spec_gen_fuzz.slc")
-		options := slotcache.Options{
-			Path:         cacheFilePath,
-			KeySize:      8,
-			IndexSize:    4,
-			UserVersion:  1,
-			SlotCapacity: 64,
-		}
+		cacheFilePath := filepath.Join(tmpDir, "spec_gen_fuzz_opts.slc")
+
+		options, rest := testutil.DeriveFuzzOptions(fuzzBytes, cacheFilePath)
 
 		cache, openErr := slotcache.Open(options)
 		if openErr != nil {
@@ -46,23 +33,22 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 
 		defer func() { _ = cache.Close() }()
 
-		decoder := testutil.NewFuzzDecoder(fuzzBytes, options)
+		decoder := testutil.NewFuzzDecoder(rest, options)
 
 		var (
 			writer slotcache.Writer
 			seen   [][]byte
 		)
 
-		const maximumSteps = 300
+		const maximumSteps = 250
 
 		for stepIndex := 0; stepIndex < maximumSteps && decoder.HasMore(); stepIndex++ {
 			actionByte := decoder.NextByte()
 
-			// ~3%: try a close/reopen cycle.
+			// Occasionally close/reopen; on successful reopen the file must validate.
 			if actionByte%100 < 3 {
 				closeErr := cache.Close()
 				if errors.Is(closeErr, slotcache.ErrBusy) {
-					// Writer still active: spec says Close must be non-blocking and return ErrBusy.
 					continue
 				}
 
@@ -70,11 +56,9 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 
 				cache, reopenErr = slotcache.Open(options)
 				if reopenErr != nil {
-					// If reopen fails, the fuzzer will minimize. Treat as a bug.
 					t.Fatalf("reopen failed: %v", reopenErr)
 				}
 
-				// If we successfully reopened, the file on disk must be valid.
 				validationErr := testutil.ValidateFile(cacheFilePath, options)
 				if validationErr != nil {
 					t.Fatalf("speccheck failed after reopen: %s", testutil.DescribeSpecOracleError(validationErr))
@@ -85,16 +69,14 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 				continue
 			}
 
-			writerIsActive := writer != nil
-
-			if !writerIsActive {
-				// No writer: pick BeginWrite or read-only ops.
+			if writer == nil {
+				// No writer.
 				switch actionByte % 100 {
 				case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24:
-					var beginErr error
-
-					writer, beginErr = cache.BeginWrite()
-					_ = beginErr // ErrBusy/ErrClosed is fine
+					w, err := cache.BeginWrite()
+					if err == nil {
+						writer = w
+					}
 				case 25, 26, 27, 28, 29, 30, 31, 32, 33, 34:
 					_, _ = cache.Len()
 				case 35, 36, 37, 38, 39, 40, 41, 42, 43, 44:
@@ -110,7 +92,7 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 				continue
 			}
 
-			// Writer is active: choose Put/Delete/Commit/Close, with more weight on Put.
+			// Writer active.
 			switch actionByte % 100 {
 			case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
 				10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
@@ -133,15 +115,12 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 				_, _ = writer.Delete(key)
 
 			case 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78:
-				// Snapshot committed state before commit so we can verify failed commits
-				// don't partially publish changes.
 				beforeLen, beforeLenErr := cache.Len()
 				beforeScan, beforeScanErr := cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
 
 				commitErr := writer.Commit()
 				writer = nil
 
-				// Validate file format after ANY commit attempt that should not corrupt.
 				if commitErr == nil ||
 					errors.Is(commitErr, slotcache.ErrWriteback) ||
 					errors.Is(commitErr, slotcache.ErrFull) ||
@@ -152,7 +131,6 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 					}
 				}
 
-				// Stronger check: ErrFull / ErrOutOfOrderInsert must not partially publish.
 				if errors.Is(commitErr, slotcache.ErrFull) || errors.Is(commitErr, slotcache.ErrOutOfOrderInsert) {
 					afterLen, afterLenErr := cache.Len()
 					afterScan, afterScanErr := cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
@@ -169,7 +147,6 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 				}
 
 			case 79, 80, 81, 82, 83, 84, 85, 86:
-				// Abort: file must remain valid and state unchanged.
 				beforeLen, beforeLenErr := cache.Len()
 				beforeScan, beforeScanErr := cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
 
@@ -195,12 +172,10 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 				}
 
 			default:
-				// Mix in a few reads while writer active; they should observe committed state.
 				_, _ = cache.Len()
 			}
 		}
 
-		// If the fuzzer left a writer open, abort it.
 		if writer != nil {
 			_ = writer.Close()
 		}

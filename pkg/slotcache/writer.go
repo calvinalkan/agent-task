@@ -169,8 +169,6 @@ func (w *writer) Commit() error {
 	}
 
 	// Step 3: Apply buffered ops to slots, buckets, and header counters.
-
-	// Apply updates.
 	for _, op := range updates {
 		slotID, found := w.findLiveSlotLocked(op.key)
 		if found {

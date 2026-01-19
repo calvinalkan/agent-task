@@ -19,7 +19,7 @@ package slotcache_test
 //  4. ScanPrefix with FilterAll
 var seedBehaviorFilteredScans = []byte{
 	// --- Insert test data ---
-	0x80, 0x06, // roulette=0x80 (>=26), choice=6 -> BeginWrite
+	0x80, 0x06, // roulette=0x80 (>=26), choice=0x06 (<20) -> BeginWrite
 
 	0x80, 0x00, // roulette=0x80, choice=0 -> Put
 	0xFF,                                           // key mode: new valid key
@@ -35,10 +35,10 @@ var seedBehaviorFilteredScans = []byte{
 	0xFF,
 	0x10, 0x01, 0x00, 0x00, // index (0x10 in first byte)
 
-	0x80, 0x02, // Commit
+	0x80, 0x3C, // Commit (writer-active choice=60 -> Commit)
 
 	// --- Scan with FilterRevisionMask(mask=1, want=0) -> even revisions ---
-	0x80, 0x02, // roulette=0x80, choice=2 -> Scan
+	0x80, 0x1E, // roulette=0x80, choice=0x1E (30) -> Scan
 	0x02, // nextFilterSpec: 0x02 % 10 = 2 < 3 -> get filter
 	0x02, // kind: 0x02 % 5 = 2 -> FilterRevisionMask
 	0x00, // mask selector: 0x00 % 4 = 0 -> mask=1
@@ -49,7 +49,7 @@ var seedBehaviorFilteredScans = []byte{
 	0x00, // reverse=false
 
 	// --- Scan with FilterIndexByteEq(offset=0, byte=0x10) ---
-	0x80, 0x02, // Scan
+	0x80, 0x1E, // Scan
 	0x01, // nextFilterSpec: 0x01 % 10 = 1 < 3 -> get filter
 	0x03, // kind: 0x03 % 5 = 3 -> FilterIndexByteEq
 	0x00, // offset: 0x00 % 4 = 0
@@ -58,12 +58,12 @@ var seedBehaviorFilteredScans = []byte{
 	0x00, 0x00, 0x00,
 
 	// --- ScanPrefix with FilterAll ---
-	0x80, 0x03, // roulette=0x80, choice=3 -> ScanPrefix
+	0x80, 0x32, // roulette=0x80, choice=0x32 (50) -> ScanPrefix
 	0xFF, // prefix mode: valid (>=52)
 	0x00, // select key index (no keys seen yet in this context, so random)
 	0x00, // prefixLen byte
 	0x00, // nextFilterSpec: 0x00 % 10 = 0 < 3 -> get filter
-	0x00, // kind: 0x00 % 5 = 0 -> FilterAll (actually FilterNone, but 0 maps to FilterNone)
+	0x00, // kind: 0x00 % 5 = 0 -> FilterAll
 	0x80, // scanOpts valid
 	0x00, 0x00, 0x00,
 }
@@ -75,7 +75,7 @@ var seedBehaviorFilteredScans = []byte{
 //  2. Scan with FilterRevisionMask + Offset=1, Limit=1
 var seedBehaviorFilterPagination = []byte{
 	// --- Insert 4 entries ---
-	0x80, 0x06, // BeginWrite
+	0x80, 0x06, // BeginWrite (choice=0x06 < 20)
 
 	0x80, 0x00, // Put key1, rev=1
 	0xFF,
@@ -101,11 +101,11 @@ var seedBehaviorFilterPagination = []byte{
 	0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0xFF, 0xD0, 0x00, 0x00, 0x00,
 
-	0x80, 0x02, // Commit
+	0x80, 0x3C, // Commit (writer-active choice=60 -> Commit)
 
 	// --- Scan with FilterRevisionMask(mask=1, want=0) + pagination ---
 	// This filters to even revisions (2, 4), then applies offset=1, limit=1
-	0x80, 0x02, // Scan
+	0x80, 0x1E, // Scan
 	0x00, // nextFilterSpec: get filter
 	0x02, // FilterRevisionMask
 	0x00, // mask=1

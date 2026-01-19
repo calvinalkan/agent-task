@@ -34,6 +34,19 @@ func (decoder *FuzzDecoder) HasMore() bool {
 	return decoder.cursor < len(decoder.rawBytes)
 }
 
+// NextKey generates a key (sometimes invalid, sometimes reused, sometimes new).
+//
+// This is exported so non-harness fuzz tests can reuse the same key-generation
+// distribution as the behavior harness.
+func (decoder *FuzzDecoder) NextKey(previouslySeenKeys [][]byte) []byte {
+	return decoder.genKey(decoder.options.KeySize, previouslySeenKeys)
+}
+
+// NextIndex generates an index (sometimes invalid length).
+func (decoder *FuzzDecoder) NextIndex() []byte {
+	return decoder.genIndex(decoder.options.IndexSize)
+}
+
 // NextByte returns the next byte in the stream (0 if exhausted).
 func (decoder *FuzzDecoder) NextByte() byte {
 	if decoder.cursor >= len(decoder.rawBytes) {
@@ -119,86 +132,87 @@ func (decoder *FuzzDecoder) NextOp(testHarness *Harness, previouslySeenKeys [][]
 	}
 
 	if !writerIsActive {
-		choice := int(decoder.NextByte() % 7)
+		// Bias toward opening write sessions and producing more inserts.
+		choice := decoder.NextByte() % 100
 
-		switch choice {
-		case 1:
-			return OpGet{Key: decoder.nextKey(testHarness.Options.KeySize, previouslySeenKeys)}
-		case 2:
+		switch {
+		case choice < 20:
+			return OpBeginWrite{}
+		case choice < 30:
+			return OpGet{Key: decoder.genKey(testHarness.Options.KeySize, previouslySeenKeys)}
+		case choice < 50:
 			return OpScan{
 				Filter:  decoder.nextFilterSpec(testHarness.Options.KeySize, testHarness.Options.IndexSize, previouslySeenKeys),
 				Options: decoder.nextScanOpts(),
 			}
-		case 3:
+		case choice < 65:
 			return OpScanPrefix{
 				Prefix:  decoder.derivePrefixFromKeys(testHarness.Options.KeySize, previouslySeenKeys),
 				Filter:  decoder.nextFilterSpec(testHarness.Options.KeySize, testHarness.Options.IndexSize, previouslySeenKeys),
 				Options: decoder.nextScanOpts(),
 			}
-		case 4:
+		case choice < 80:
 			return OpScanMatch{
 				Spec:    decoder.nextPrefixSpec(testHarness.Options.KeySize, previouslySeenKeys),
 				Filter:  decoder.nextFilterSpec(testHarness.Options.KeySize, testHarness.Options.IndexSize, previouslySeenKeys),
 				Options: decoder.nextScanOpts(),
 			}
-		case 5:
+		case choice < 90:
 			return OpScanRange{
 				Start:   decoder.nextRangeBound(testHarness.Options.KeySize, previouslySeenKeys),
 				End:     decoder.nextRangeBound(testHarness.Options.KeySize, previouslySeenKeys),
 				Filter:  decoder.nextFilterSpec(testHarness.Options.KeySize, testHarness.Options.IndexSize, previouslySeenKeys),
 				Options: decoder.nextScanOpts(),
 			}
-		case 6:
-			return OpBeginWrite{}
 		default:
 			return OpLen{}
 		}
 	}
 
 	// Writer is active.
-	choice := int(decoder.NextByte() % 10)
+	// Strongly bias toward Put/Delete so we exercise slot allocation, bucket probe
+	// chains, tombstones, ErrFull, and (in ordered mode) ordering checks.
+	choice := decoder.NextByte() % 100
 
-	switch choice {
-	case 0:
+	switch {
+	case choice < 45:
 		return OpPut{
-			Key:      decoder.nextKey(testHarness.Options.KeySize, previouslySeenKeys),
+			Key:      decoder.genKey(testHarness.Options.KeySize, previouslySeenKeys),
 			Revision: decoder.NextInt64(),
-			Index:    decoder.nextIndex(testHarness.Options.IndexSize),
+			Index:    decoder.genIndex(testHarness.Options.IndexSize),
 		}
-	case 1:
-		return OpDelete{Key: decoder.nextKey(testHarness.Options.KeySize, previouslySeenKeys)}
-	case 2:
+	case choice < 60:
+		return OpDelete{Key: decoder.genKey(testHarness.Options.KeySize, previouslySeenKeys)}
+	case choice < 75:
 		return OpCommit{}
-	case 3:
+	case choice < 85:
 		return OpWriterClose{}
-	case 5:
-		return OpGet{Key: decoder.nextKey(testHarness.Options.KeySize, previouslySeenKeys)}
-	case 6:
+	case choice < 90:
+		return OpGet{Key: decoder.genKey(testHarness.Options.KeySize, previouslySeenKeys)}
+	case choice < 95:
 		return OpScan{
 			Filter:  decoder.nextFilterSpec(testHarness.Options.KeySize, testHarness.Options.IndexSize, previouslySeenKeys),
 			Options: decoder.nextScanOpts(),
 		}
-	case 7:
+	case choice < 98:
 		return OpScanPrefix{
 			Prefix:  decoder.derivePrefixFromKeys(testHarness.Options.KeySize, previouslySeenKeys),
 			Filter:  decoder.nextFilterSpec(testHarness.Options.KeySize, testHarness.Options.IndexSize, previouslySeenKeys),
 			Options: decoder.nextScanOpts(),
 		}
-	case 8:
+	case choice < 99:
 		return OpScanMatch{
 			Spec:    decoder.nextPrefixSpec(testHarness.Options.KeySize, previouslySeenKeys),
 			Filter:  decoder.nextFilterSpec(testHarness.Options.KeySize, testHarness.Options.IndexSize, previouslySeenKeys),
 			Options: decoder.nextScanOpts(),
 		}
-	case 9:
+	default:
 		return OpScanRange{
 			Start:   decoder.nextRangeBound(testHarness.Options.KeySize, previouslySeenKeys),
 			End:     decoder.nextRangeBound(testHarness.Options.KeySize, previouslySeenKeys),
 			Filter:  decoder.nextFilterSpec(testHarness.Options.KeySize, testHarness.Options.IndexSize, previouslySeenKeys),
 			Options: decoder.nextScanOpts(),
 		}
-	default:
-		return OpLen{}
 	}
 }
 
@@ -206,14 +220,14 @@ func (decoder *FuzzDecoder) nextBool() bool {
 	return (decoder.NextByte() & 0x01) == 1
 }
 
-func (decoder *FuzzDecoder) nextKey(keySize int, previouslySeenKeys [][]byte) []byte {
-	// Match the property test distribution:
-	// - 15% invalid (nil or wrong length)
-	// - 60% reuse an existing key
-	// - otherwise generate a new key
+func (decoder *FuzzDecoder) genKey(keySize int, previouslySeenKeys [][]byte) []byte {
+	// Key generation tries to balance:
+	//  - invalid inputs (exercise ErrInvalidInput paths)
+	//  - key reuse (exercise update/delete paths)
+	//  - new keys (exercise slot allocation, bucket probe chains, ErrFull)
 	mode := decoder.NextByte()
 
-	// ~15%
+	// ~15% invalid (nil or wrong length).
 	if mode < 38 {
 		if decoder.nextBool() {
 			return nil
@@ -228,8 +242,18 @@ func (decoder *FuzzDecoder) nextKey(keySize int, previouslySeenKeys [][]byte) []
 		return decoder.NextBytes(wrongLength)
 	}
 
-	// ~60% (when we have seen keys)
-	if len(previouslySeenKeys) > 0 && mode < 192 {
+	// Reuse rate depends on how many keys we have seen.
+	// Early on, prefer new keys to build up state; later, reuse more often.
+	reuseThreshold := byte(160) // ~48% reuse
+	if len(previouslySeenKeys) < 4 {
+		reuseThreshold = 96 // ~23% reuse
+	}
+
+	if len(previouslySeenKeys) > 32 {
+		reuseThreshold = 208 // ~66% reuse
+	}
+
+	if len(previouslySeenKeys) > 0 && mode < reuseThreshold {
 		selectedIndex := int(decoder.NextByte()) % len(previouslySeenKeys)
 		selectedKey := previouslySeenKeys[selectedIndex]
 
@@ -310,7 +334,7 @@ func (decoder *FuzzDecoder) nextNonMonotonicOrderedKey(keySize int) []byte {
 	return key
 }
 
-func (decoder *FuzzDecoder) nextIndex(indexSize int) []byte {
+func (decoder *FuzzDecoder) genIndex(indexSize int) []byte {
 	// Match property test distribution: 10% invalid length.
 	mode := decoder.NextByte()
 

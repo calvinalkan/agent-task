@@ -334,6 +334,7 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 	var (
 		countedFullBuckets      uint64
 		countedTombstoneBuckets uint64
+		sawEmpty                bool
 	)
 
 	// Each live slot must appear exactly once in buckets.
@@ -346,6 +347,8 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 		slotPlusOne := binary.LittleEndian.Uint64(fileBytes[bucketOffset+8 : bucketOffset+16])
 
 		if slotPlusOne == 0 {
+			sawEmpty = true
+
 			continue // EMPTY
 		}
 
@@ -359,17 +362,45 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 		slotID := slotPlusOne - 1
 
 		if slotID >= slotHighwater {
-			return fmt.Errorf("speccheck: bucket %d points to slot %d, but slot_highwater=%d", bucketIndex, slotID, slotHighwater)
+			return &SpecError{
+				Kind:          SpecErrBucketSlotOutOfRange,
+				BucketIndex:   bucketIndex,
+				BucketCount:   bucketCount,
+				SlotID:        slotID,
+				SlotHighwater: slotHighwater,
+			}
 		}
 
 		keyBytes, isLive := liveSlotKeysBySlotID[slotID]
 		if !isLive {
-			return fmt.Errorf("speccheck: bucket %d points to non-live slot %d", bucketIndex, slotID)
+			// For targeted probing, we also capture the slot key bytes from disk.
+			slotKey := readSlotKey(fileBytes, slotsOffset, slotSizeBytes, keySizeBytes, slotID)
+			computedHash := fnv1a64(slotKey)
+
+			return &SpecError{
+				Kind:          SpecErrBucketPointsToNonLiveSlot,
+				BucketIndex:   bucketIndex,
+				BucketCount:   bucketCount,
+				SlotID:        slotID,
+				SlotHighwater: slotHighwater,
+				Key:           slotKey,
+				StoredHash:    storedHash,
+				ComputedHash:  computedHash,
+			}
 		}
 
 		computedHash := fnv1a64(keyBytes)
 		if computedHash != storedHash {
-			return fmt.Errorf("speccheck: bucket %d hash mismatch for slot %d: computed=0x%016X stored=0x%016X", bucketIndex, slotID, computedHash, storedHash)
+			return &SpecError{
+				Kind:          SpecErrBucketHashMismatchForSlot,
+				BucketIndex:   bucketIndex,
+				BucketCount:   bucketCount,
+				SlotID:        slotID,
+				SlotHighwater: slotHighwater,
+				Key:           append([]byte(nil), keyBytes...),
+				StoredHash:    storedHash,
+				ComputedHash:  computedHash,
+			}
 		}
 
 		if slotIDsReferencedByBuckets[slotID] {
@@ -407,7 +438,24 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 		}
 
 		if !found {
-			return fmt.Errorf("speccheck: key not findable via probe sequence (slot %d, key %x)", slotID, keyBytes)
+			return &SpecError{
+				Kind:        SpecErrKeyNotFindable,
+				BucketCount: bucketCount,
+				SlotID:      slotID,
+				Key:         append([]byte(nil), keyBytes...),
+			}
+		}
+	}
+
+	// If the bucket table has no EMPTY buckets, any Get() miss must probe the
+	// full bucket_count range. The runtime detects this as an impossible
+	// invariant and returns ErrCorrupt.
+	if !sawEmpty {
+		return &SpecError{
+			Kind:             SpecErrNoEmptyBuckets,
+			BucketCount:      bucketCount,
+			BucketFull:       countedFullBuckets,
+			BucketTombstones: countedTombstoneBuckets,
 		}
 	}
 

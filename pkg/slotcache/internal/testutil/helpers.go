@@ -234,6 +234,21 @@ func DiffEntry(leftEntry, rightEntry slotcache.Entry) string {
 func CompareState(tb testing.TB, harness *Harness) {
 	tb.Helper()
 
+	sliceByOffsetLimit := func(base []slotcache.Entry, opts slotcache.ScanOptions) []slotcache.Entry {
+		if opts.Offset < 0 || opts.Limit < 0 {
+			return nil
+		}
+
+		start := min(opts.Offset, len(base))
+
+		end := len(base)
+		if opts.Limit > 0 && start+opts.Limit < end {
+			end = start + opts.Limit
+		}
+
+		return base[start:end]
+	}
+
 	// Compare Len().
 	mLen, mLenErr := harness.Model.Cache.Len()
 	rLen, rLenErr := harness.Real.Cache.Len()
@@ -355,6 +370,38 @@ func CompareState(tb testing.TB, harness *Harness) {
 				tb.Fatalf("real: Scan(filter=%s) != ScanPrefix(%x):\n%s", spec.String(), prefix, diff)
 			}
 		}
+
+		// Metamorphic check: paging after filtering must equal slicing the full filtered result.
+		pagedFiltered := filteredOpts
+		pagedFiltered.Offset = 1
+		pagedFiltered.Limit = 2
+
+		harness.Scratch.modelTmp2 = ensureEntriesCapacity(harness.Scratch.modelTmp2, expectedEntries)
+		harness.Scratch.realTmp2 = ensureEntriesCapacity(harness.Scratch.realTmp2, expectedEntries)
+
+		mPaged, mPagedErr := scanModelInto(tb, harness.Model.Cache, pagedFiltered, harness.Scratch.modelTmp2)
+		rPaged, rPagedErr := scanRealInto(tb, harness.Real.Cache, pagedFiltered, harness.Scratch.realTmp2)
+
+		harness.Scratch.modelTmp2 = mPaged
+		harness.Scratch.realTmp2 = rPaged
+
+		if !errorsMatch(mPagedErr, rPagedErr) {
+			tb.Fatalf("Scan(filter=%s,%+v) error mismatch\nmodel=%v\nreal=%v", spec.String(), pagedFiltered, mPagedErr, rPagedErr)
+		}
+
+		if mFilteredErr == nil && mPagedErr == nil {
+			expected := sliceByOffsetLimit(mFiltered, pagedFiltered)
+			if diff := DiffEntries(expected, mPaged); diff != "" {
+				tb.Fatalf("model: Scan(filter=%s,%+v) != slice(Scan(filter=%s,%+v)):\n%s", spec.String(), pagedFiltered, spec.String(), filteredOpts, diff)
+			}
+		}
+
+		if rFilteredErr == nil && rPagedErr == nil {
+			expected := sliceByOffsetLimit(rFiltered, pagedFiltered)
+			if diff := DiffEntries(expected, rPaged); diff != "" {
+				tb.Fatalf("real: Scan(filter=%s,%+v) != slice(Scan(filter=%s,%+v)):\n%s", spec.String(), pagedFiltered, spec.String(), filteredOpts, diff)
+			}
+		}
 	}
 
 	// Compare some paging variants.
@@ -380,6 +427,31 @@ func CompareState(tb testing.TB, harness *Harness) {
 
 		if diff := DiffEntries(mPage, rPage); diff != "" {
 			tb.Fatalf("Scan(%+v) entries mismatch (-model +real):\n%s", opts, diff)
+		}
+
+		// Metamorphic check: paged Scan() must equal slicing the unpaged Scan().
+		if mPageErr == nil {
+			base := mFwd
+			if opts.Reverse {
+				base = mRev
+			}
+
+			expected := sliceByOffsetLimit(base, opts)
+			if diff := DiffEntries(expected, mPage); diff != "" {
+				tb.Fatalf("model: Scan(%+v) != slice(Scan(%+v)):\n%s", opts, fwdOpts, diff)
+			}
+		}
+
+		if rPageErr == nil {
+			base := rFwd
+			if opts.Reverse {
+				base = rRev
+			}
+
+			expected := sliceByOffsetLimit(base, opts)
+			if diff := DiffEntries(expected, rPage); diff != "" {
+				tb.Fatalf("real: Scan(%+v) != slice(Scan(%+v)):\n%s", opts, fwdOpts, diff)
+			}
 		}
 	}
 
@@ -571,6 +643,74 @@ func CompareState(tb testing.TB, harness *Harness) {
 
 			if diff := DiffEntries(expected, rHeadEntries); diff != "" {
 				tb.Fatalf("real: ScanRange(nil,%x) mismatch with filtered Scan():\n%s", end, diff)
+			}
+		}
+	}
+
+	// Copy/ownership semantics: callers own returned slices.
+	//
+	// slotcache promises that Entry slices returned from Get/Scan are copies.
+	// Mutating them must not mutate cache state or other returned entries.
+	if rFwdErr == nil && len(rFwd) > 0 {
+		// Use an entry that is known to be live.
+		origKey := append([]byte(nil), rFwd[0].Key...)
+		origIndex := append([]byte(nil), rFwd[0].Index...)
+		origRevision := rFwd[0].Revision
+
+		// Mutate the scan result in-place.
+		// If Scan accidentally returns borrowed slices, this can corrupt internal state.
+		rFwd[0].Key[0] ^= 0xFF
+		if len(rFwd[0].Index) > 0 {
+			rFwd[0].Index[0] ^= 0xFF
+		}
+
+		reGot, reOk, reErr := harness.Real.Cache.Get(origKey)
+		if reErr != nil {
+			tb.Fatalf("copy semantics check: Get(%x) failed after mutating Scan result: %v", origKey, reErr)
+		}
+
+		if !reOk {
+			tb.Fatalf("copy semantics check: Get(%x) missing after mutating Scan result", origKey)
+		}
+
+		if reGot.Revision != origRevision || !bytes.Equal(reGot.Key, origKey) || !bytes.Equal(reGot.Index, origIndex) {
+			tb.Fatalf("copy semantics check: mutating Scan result affected cache state")
+		}
+
+		// Get() must return fresh copies per call (caller may retain and mutate).
+		e1, ok1, err1 := harness.Real.Cache.Get(origKey)
+
+		e2, ok2, err2 := harness.Real.Cache.Get(origKey)
+		if err1 == nil && err2 == nil && ok1 && ok2 {
+			if len(e1.Key) > 0 && len(e2.Key) > 0 {
+				if &e1.Key[0] == &e2.Key[0] {
+					tb.Fatalf("copy semantics check: Get(%x) returned aliased Key buffers across calls", origKey)
+				}
+			}
+
+			if len(e1.Index) > 0 && len(e2.Index) > 0 {
+				if &e1.Index[0] == &e2.Index[0] {
+					tb.Fatalf("copy semantics check: Get(%x) returned aliased Index buffers across calls", origKey)
+				}
+			}
+
+			// Mutate one result and ensure a fresh Get observes the original.
+			e1.Revision ^= 0x55
+			if len(e1.Key) > 0 {
+				e1.Key[0] ^= 0xAA
+			}
+
+			if len(e1.Index) > 0 {
+				e1.Index[0] ^= 0xAA
+			}
+
+			e3, ok3, err3 := harness.Real.Cache.Get(origKey)
+			if err3 != nil || !ok3 {
+				tb.Fatalf("copy semantics check: Get(%x) failed after mutating previous Get result: ok=%v err=%v", origKey, ok3, err3)
+			}
+
+			if e3.Revision != origRevision || !bytes.Equal(e3.Key, origKey) || !bytes.Equal(e3.Index, origIndex) {
+				tb.Fatalf("copy semantics check: mutating previous Get result affected cache state")
 			}
 		}
 	}
