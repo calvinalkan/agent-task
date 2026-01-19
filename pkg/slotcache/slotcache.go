@@ -703,6 +703,15 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		return nil, fmt.Errorf("bucket_used %d != live_count %d: %w", bucketUsed, liveCount, ErrCorrupt)
 	}
 
+	// Optional: sample-check a small number of buckets for out-of-range slot IDs.
+	// This is a cheap O(1) check that fails-fast on common corruptions without scanning
+	// the full bucket table. Per spec: "Implementations MAY sample-check a small number
+	// of buckets for out-of-range slot IDs."
+	err := sampleBucketsForCorruption(fd, bucketsOffset, bucketCount, slotHighwater)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build header struct for mmapAndCreateCache.
 	header := slc1Header{
 		KeySize:       keySize,
@@ -782,6 +791,68 @@ func handleCRCFailure(fd int, originalGen uint64, opts Options) (*cache, error) 
 
 	// Generation is same even value - real corruption.
 	return nil, ErrCorrupt
+}
+
+// bucketSampleCount is the number of buckets to sample during Open validation.
+// Small enough to be O(1) regardless of cache size, large enough to catch common
+// corruptions with high probability.
+const bucketSampleCount = 8
+
+// sampleBucketsForCorruption performs a spot-check of bucket entries to detect
+// obvious corruptions without scanning the entire bucket table.
+//
+// This is a cheap O(1) check that samples evenly-distributed buckets and verifies
+// that FULL entries reference valid slot IDs (< slotHighwater). If a bucket
+// references an out-of-range slot ID, the file is corrupt.
+//
+// Why sample instead of full scan: The spec allows O(1) validation at open time.
+// Sampling catches random corruptions (bit flips, truncation) with high probability
+// while keeping open time constant regardless of cache size.
+func sampleBucketsForCorruption(fd int, bucketsOffset, bucketCount, slotHighwater uint64) error {
+	if bucketCount == 0 {
+		return nil
+	}
+
+	// Calculate step size to distribute samples evenly across the bucket table.
+	// For small bucket counts, we may sample fewer than bucketSampleCount buckets.
+	step := bucketCount / bucketSampleCount
+	if step == 0 {
+		step = 1
+	}
+
+	// Each bucket is 16 bytes: hash64 (8) + slot_plus1 (8).
+	bucketBuf := make([]byte, 16)
+
+	for i := uint64(0); i < bucketCount; i += step {
+		offsetU64 := bucketsOffset + i*16
+
+		offset, ok := uint64ToInt64Checked(offsetU64)
+		if !ok {
+			// Should never happen: file layout was already validated.
+			return fmt.Errorf("bucket offset overflows int64: %w", ErrCorrupt)
+		}
+
+		n, err := syscall.Pread(fd, bucketBuf, offset)
+		if err != nil || n != 16 {
+			return fmt.Errorf("failed to read bucket %d: %w", i, ErrCorrupt)
+		}
+
+		slotPlusOne := binary.LittleEndian.Uint64(bucketBuf[8:])
+
+		// Skip EMPTY (0) and TOMBSTONE (0xFFFFFFFFFFFFFFFF) buckets.
+		if slotPlusOne == 0 || slotPlusOne == ^uint64(0) {
+			continue
+		}
+
+		// FULL bucket: verify slot_id is in range.
+		slotID := slotPlusOne - 1
+		if slotID >= slotHighwater {
+			return fmt.Errorf("bucket %d references out-of-range slot_id %d (highwater=%d): %w",
+				i, slotID, slotHighwater, ErrCorrupt)
+		}
+	}
+
+	return nil
 }
 
 // mmapAndCreateCache mmaps the file and creates a cache instance.

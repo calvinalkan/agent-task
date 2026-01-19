@@ -20,8 +20,12 @@ This plan tracks remaining work to ensure `pkg/slotcache` is fully compliant wit
   - Added `slotMetaReservedMask` constant for clarity.
   - Tests in `slot_meta_corruption_test.go` verify ErrCorrupt for Get/Scan/ScanRange with reserved bits set.
 
-- [ ] **Optional Open-time bucket sampling** (spec says MAY)
+- [x] **Optional Open-time bucket sampling** (spec says MAY)
   - Sample-check a small number of bucket entries for obvious out-of-range slot IDs to fail-fast on common corruptions without scanning the full table.
+  - Implemented `sampleBucketsForCorruption()` in `slotcache.go` that samples 8 buckets evenly distributed across the bucket table.
+  - For each FULL bucket (slot_plus1 != 0 and != tombstone), validates slot_id < slot_highwater.
+  - Returns `ErrCorrupt` if any sampled bucket references an out-of-range slot ID.
+  - Tests in `bucket_sampling_test.go` verify detection at various sampled positions.
 
 ## Completed
 
