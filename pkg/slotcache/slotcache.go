@@ -396,7 +396,10 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 
 	// Validate CRC (only after we have a stable even generation snapshot).
 	if !validateHeaderCRC(headerBuf) {
-		return nil, ErrCorrupt
+		// CRC mismatch could be due to a concurrent writer that started after our initial
+		// read. To avoid misclassifying transient state as corruption, check if generation
+		// changed or if a writer is now active.
+		return handleCRCFailure(fd, generation, opts)
 	}
 
 	// Read config fields.
@@ -477,25 +480,6 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		return nil, ErrCorrupt
 	}
 
-	// Check generation.
-	if generation%2 == 1 {
-		// Odd generation - check if we can prove crashed writer.
-		if !opts.DisableLocking {
-			// Try to acquire lock.
-			lockFile, err := tryAcquireWriterLock(opts.Path)
-			if err == nil {
-				// Lock acquired - crashed writer.
-				releaseWriterLock(lockFile)
-
-				return nil, ErrCorrupt
-			}
-			// Lock busy - active writer.
-			return nil, ErrBusy
-		}
-		// Locking disabled - can't distinguish.
-		return nil, ErrBusy
-	}
-
 	// Build header struct for mmapAndCreateCache.
 	header := slc1Header{
 		KeySize:       keySize,
@@ -510,6 +494,71 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 	}
 
 	return mmapAndCreateCache(fd, size, &header, opts)
+}
+
+// handleCRCFailure is called when header CRC validation fails.
+// It attempts to distinguish between real corruption and transient state due to
+// a concurrent writer by re-reading the generation counter.
+//
+// Why this matters: A reader may observe a CRC mismatch if it reads the header
+// while a writer is mid-commit (torn read where generation appears even but other
+// fields have been partially updated). Returning ErrCorrupt in this case is wrong;
+// ErrBusy is the correct response so the caller can retry.
+func handleCRCFailure(fd int, originalGen uint64, opts Options) (*cache, error) {
+	// Re-read just the generation field to check if a writer became active.
+	genBuf := make([]byte, 8)
+
+	n, err := syscall.Pread(fd, genBuf, offGeneration)
+	if err != nil || n != 8 {
+		return nil, ErrCorrupt
+	}
+
+	currentGen := binary.LittleEndian.Uint64(genBuf)
+
+	// If generation changed, the header we read overlapped with a commit.
+	if currentGen != originalGen {
+		return nil, ErrBusy
+	}
+
+	// Generation is same. If it's odd now, a writer was active during our read.
+	if currentGen%2 == 1 {
+		if opts.DisableLocking {
+			return nil, ErrBusy
+		}
+
+		// With locking, check if writer is still active.
+		lockFile, lockErr := tryAcquireWriterLock(opts.Path)
+		if lockErr != nil {
+			if errors.Is(lockErr, ErrBusy) {
+				return nil, ErrBusy
+			}
+
+			return nil, lockErr
+		}
+
+		// Lock acquired - no active writer. Re-read generation under lock.
+		n, readErr := syscall.Pread(fd, genBuf, offGeneration)
+		if readErr != nil || n != 8 {
+			releaseWriterLock(lockFile)
+
+			return nil, ErrCorrupt
+		}
+
+		freshGen := binary.LittleEndian.Uint64(genBuf)
+
+		releaseWriterLock(lockFile)
+
+		if freshGen%2 == 1 {
+			// Still odd with no active writer - crashed writer.
+			return nil, ErrCorrupt
+		}
+
+		// Writer finished between our reads - should retry Open.
+		return nil, ErrBusy
+	}
+
+	// Generation is same even value - real corruption.
+	return nil, ErrCorrupt
 }
 
 // mmapAndCreateCache mmaps the file and creates a cache instance.

@@ -1,6 +1,6 @@
 # slotcache Implementation Plan (SLC1)
 
-## Current State (2026-01-18)
+## Current State (2026-01-19)
 
 - `pkg/slotcache/slotcache.go` + `pkg/slotcache/writer.go` implement the **real SLC1 mmap-backed format**.
 - `make test` **passes** - all behavioral tests, model parity, and spec-oracle validation pass.
@@ -8,11 +8,6 @@
 
 **Important:** There are still spec-conformance gaps that are not reliably caught by the current test suite:
 
-- **Seqlock atomicity:** `generation` is currently read/written via `binary.LittleEndian` helpers, not atomic 64-bit ops.
-  - Spec requires cross-process atomic 64-bit load/store with acquire/release ordering.
-- **Open() vs concurrent commit:** `Open()` can misclassify in-progress commit windows.
-  - Example: observing a CRC mismatch while a writer is active should be `ErrBusy`, not `ErrCorrupt`.
-  - The "odd generation + can acquire lock" path should re-read generation while holding the lock to avoid false positives.
 - **Corruption vs overlap classification:** some read-path invariant failures should be treated as overlap (retry/ErrBusy) unless generation is proven stable and unchanged.
 
 ---
@@ -44,11 +39,11 @@
   - Updated `Writer.Commit()` in writer.go to use atomic store for both odd and even generation publishes.
   - Go atomics provide seq-cst ordering which satisfies the spec's acquire/release requirement.
 
-- [ ] **Fix `Open()` behavior under concurrent commits**
-  - Avoid returning `ErrCorrupt` due to transient header CRC mismatch while a writer is active.
-  - When generation is odd and locking is enabled:
-    - if lock is busy → `ErrBusy`
-    - if lock is acquired → re-read generation while holding lock; only treat as crashed writer (`ErrCorrupt`) if it is still odd.
+- [x] **Fix `Open()` behavior under concurrent commits** ✅ (2026-01-19)
+  - Added `handleCRCFailure()` helper that re-reads generation when CRC validation fails.
+  - If generation changed or is now odd, returns `ErrBusy` instead of `ErrCorrupt`.
+  - When locking enabled: tries to acquire lock to distinguish active writer vs crashed writer.
+  - Removed dead code (redundant second odd-generation check that was unreachable).
 
 - [ ] **Treat "impossible invariants" as overlap unless generation is stable**
   - For cases like bucket→tombstoned slot, slot_id out of range, etc:
