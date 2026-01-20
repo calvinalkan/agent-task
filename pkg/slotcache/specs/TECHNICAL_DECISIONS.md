@@ -123,7 +123,7 @@ The spec requires bounded retries with backoff for read operations (see **003-se
 - Attempt 5: 800µs
 - Attempt 6–9: 1ms (capped)
 
-**Total worst-case delay:** ~6.55ms (sum of all backoffs if all 10 attempts fail).
+**Total worst-case delay:** ~5.55ms (sum of all backoffs if all 10 attempts fail).
 
 **Why exponential backoff:** Starts fast to handle brief contention (writer finishing), then backs off to reduce CPU pressure during sustained contention (long commit). This balances latency for the common case (writer finishes quickly) against efficiency for the rare case (long commit or many retries).
 
