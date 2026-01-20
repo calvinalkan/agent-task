@@ -1408,6 +1408,12 @@ func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte
 			break
 		}
 
+		// Skip if key < start (corruption defense: binary search may land wrong
+		// if the ordered-keys invariant is violated by file corruption).
+		if startPadded != nil && bytes.Compare(key, startPadded) < 0 {
+			continue
+		}
+
 		// Check if live (not tombstoned).
 		// Use atomic load for meta to avoid torn reads during concurrent writes.
 		meta := atomicLoadUint64(c.data[slotOffset:])
