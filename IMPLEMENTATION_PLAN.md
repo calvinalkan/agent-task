@@ -90,27 +90,27 @@ Notes:
 
 ---
 
-## Phase 3 — Format plumbing + Open/validation updates
+## Phase 3 — Format plumbing + Open/validation updates ✓
 
 Files: `pkg/slotcache/format.go`, `pkg/slotcache/slotcache.go`
 
-- [ ] Update header offsets/constants:
-  - [ ] `offReservedU32` → `offState`
-  - [ ] Add `offUserFlags`, `offUserData`, and `offReservedTailStart` constants.
+- [x] Update header offsets/constants:
+  - [x] `offReservedU32` → `offState`
+  - [x] Add `offUserFlags`, `offUserData`, and `offReservedTailStart` constants.
 
-- [ ] Header encoding/creation:
-  - [ ] `newHeader(...)` sets `state=STATE_NORMAL` and zeroes user header + reserved tail.
-  - [ ] `encodeHeader()` writes state + user fields.
+- [x] Header encoding/creation:
+  - [x] `newHeader(...)` sets `state=STATE_NORMAL` and zeroes user header + reserved tail.
+  - [x] `encodeHeader()` writes state + user fields.
 
-- [ ] Reserved-byte helpers/tests:
-  - [ ] Update `hasReservedBytesSet` to only check `0x0C0..0x0FF`.
-  - [ ] Adjust `pkg/slotcache/format_test.go` to flip a tail byte instead of user header bytes.
+- [x] Reserved-byte helpers/tests:
+  - [x] Update `hasReservedBytesSet` to only check `0x0C0..0x0FF`.
+  - [x] Adjust `pkg/slotcache/format_test.go` to flip a tail byte instead of user header bytes.
 
-- [ ] Open/validation (`validateAndOpenExisting`):
-  - [ ] Preserve “odd generation” handling ordering (must not misclassify in-progress commits).
-  - [ ] Validate `state` is in {0,1}; reject unknown as `ErrIncompatible`.
-  - [ ] After CRC validation on a stable even snapshot, if `state==INVALIDATED` return `ErrInvalidated` (CRC failures stay `ErrBusy`/`ErrCorrupt`).
-  - [ ] Reserved bytes validation becomes:
+- [x] Open/validation (`validateAndOpenExisting`):
+  - [x] Preserve “odd generation” handling ordering (must not misclassify in-progress commits).
+  - [x] Validate `state` is in {0,1}; reject unknown as `ErrIncompatible`.
+  - [x] After CRC validation on a stable even snapshot, if `state==INVALIDATED` return `ErrInvalidated` (CRC failures stay `ErrBusy`/`ErrCorrupt`).
+  - [x] Reserved bytes validation becomes:
     - do NOT require `0x078..0x0BF` to be zero (caller-owned)
     - DO require `0x0C0..0x0FF` to be zero.
 

@@ -106,27 +106,37 @@ func fnv1a64(key []byte) uint64 {
 
 // Header field offsets (bytes from file start).
 const (
-	offMagic            = 0x000 // [4]byte
-	offVersion          = 0x004 // uint32
-	offHeaderSize       = 0x008 // uint32
-	offKeySize          = 0x00C // uint32
-	offIndexSize        = 0x010 // uint32
-	offSlotSize         = 0x014 // uint32
-	offHashAlg          = 0x018 // uint32
-	offFlags            = 0x01C // uint32
-	offSlotCapacity     = 0x020 // uint64
-	offSlotHighwater    = 0x028 // uint64
-	offLiveCount        = 0x030 // uint64
-	offUserVersion      = 0x038 // uint64
-	offGeneration       = 0x040 // uint64
-	offBucketCount      = 0x048 // uint64
-	offBucketUsed       = 0x050 // uint64
-	offBucketTombstones = 0x058 // uint64
-	offSlotsOffset      = 0x060 // uint64
-	offBucketsOffset    = 0x068 // uint64
-	offHeaderCRC32C     = 0x070 // uint32
-	offReservedU32      = 0x074 // uint32
-	offReservedStart    = 0x078 // reserved bytes through 0x0FF
+	offMagic             = 0x000 // [4]byte
+	offVersion           = 0x004 // uint32
+	offHeaderSize        = 0x008 // uint32
+	offKeySize           = 0x00C // uint32
+	offIndexSize         = 0x010 // uint32
+	offSlotSize          = 0x014 // uint32
+	offHashAlg           = 0x018 // uint32
+	offFlags             = 0x01C // uint32
+	offSlotCapacity      = 0x020 // uint64
+	offSlotHighwater     = 0x028 // uint64
+	offLiveCount         = 0x030 // uint64
+	offUserVersion       = 0x038 // uint64
+	offGeneration        = 0x040 // uint64
+	offBucketCount       = 0x048 // uint64
+	offBucketUsed        = 0x050 // uint64
+	offBucketTombstones  = 0x058 // uint64
+	offSlotsOffset       = 0x060 // uint64
+	offBucketsOffset     = 0x068 // uint64
+	offHeaderCRC32C      = 0x070 // uint32
+	offState             = 0x074 // uint32 (slotcache-owned state)
+	offUserFlags         = 0x078 // uint64 (caller-owned)
+	offUserData          = 0x080 // [64]byte (caller-owned)
+	offReservedTailStart = 0x0C0 // reserved bytes through 0x0FF (64 bytes)
+)
+
+// Cache state values (stored in the state field at offset 0x074).
+const (
+	// stateNormal indicates the cache is operational.
+	stateNormal uint32 = 0
+	// stateInvalidated indicates the cache has been explicitly invalidated (terminal).
+	stateInvalidated uint32 = 1
 )
 
 // slc1Header represents the 256-byte SLC1 file header.
@@ -150,8 +160,10 @@ type slc1Header struct {
 	SlotsOffset      uint64
 	BucketsOffset    uint64
 	HeaderCRC32C     uint32
-	ReservedU32      uint32
-	// Reserved bytes from 0x078 to 0x0FF (136 bytes) MUST be zero.
+	State            uint32             // slotcache-owned state (0=normal, 1=invalidated)
+	UserFlags        uint64             // caller-owned opaque flags
+	UserData         [UserDataSize]byte // caller-owned opaque data (64 bytes)
+	// Reserved bytes from 0x0C0 to 0x0FF (64 bytes) MUST be zero.
 }
 
 // encodeHeader serializes the header to a 256-byte slice.
@@ -181,8 +193,12 @@ func encodeHeader(header *slc1Header) []byte {
 	binary.LittleEndian.PutUint64(buf[offSlotsOffset:], header.SlotsOffset)
 	binary.LittleEndian.PutUint64(buf[offBucketsOffset:], header.BucketsOffset)
 
-	// Reserved fields are zero (already zero in the slice).
-	binary.LittleEndian.PutUint32(buf[offReservedU32:], header.ReservedU32)
+	// State field.
+	binary.LittleEndian.PutUint32(buf[offState:], header.State)
+
+	// User header fields (caller-owned).
+	binary.LittleEndian.PutUint64(buf[offUserFlags:], header.UserFlags)
+	copy(buf[offUserData:offUserData+UserDataSize], header.UserData[:])
 
 	// Compute CRC with generation and crc fields zeroed.
 	crc := computeHeaderCRC(buf)
@@ -219,9 +235,10 @@ func validateHeaderCRC(buf []byte) bool {
 	return storedCRC == computedCRC
 }
 
-// hasReservedBytesSet checks if any reserved bytes (0x078-0x0FF) are non-zero.
+// hasReservedBytesSet checks if any reserved tail bytes (0x0C0-0x0FF) are non-zero.
+// Note: User header bytes (0x078-0x0BF) are caller-owned and NOT checked here.
 func hasReservedBytesSet(buf []byte) bool {
-	for i := offReservedStart; i < slc1HeaderSize; i++ {
+	for i := offReservedTailStart; i < slc1HeaderSize; i++ {
 		if buf[i] != 0 {
 			return true
 		}
@@ -440,8 +457,10 @@ func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, orde
 		BucketTombstones: 0,
 		SlotsOffset:      slotsOffset,
 		BucketsOffset:    bucketsOffset,
-		HeaderCRC32C:     0, // computed during encode
-		ReservedU32:      0,
+		HeaderCRC32C:     0,                    // computed during encode
+		State:            stateNormal,          // cache is operational
+		UserFlags:        0,                    // caller-owned, default zero
+		UserData:         [UserDataSize]byte{}, // caller-owned, default zero
 	}
 }
 

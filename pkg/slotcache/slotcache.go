@@ -598,10 +598,17 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		return nil, fmt.Errorf("unknown flags 0x%08x: %w", flags&^slc1FlagOrderedKeys, ErrIncompatible)
 	}
 
-	// Check reserved bytes.
-	reservedU32 := binary.LittleEndian.Uint32(headerBuf[offReservedU32:])
-	if reservedU32 != 0 {
-		return nil, fmt.Errorf("reserved_u32 is non-zero: %w", ErrIncompatible)
+	// Check state field is a known value (0=normal, 1=invalidated).
+	// Unknown state values are rejected as incompatible format.
+	state := binary.LittleEndian.Uint32(headerBuf[offState:])
+	if state != stateNormal && state != stateInvalidated {
+		return nil, fmt.Errorf("unknown state value %d: %w", state, ErrIncompatible)
+	}
+
+	// Check reserved tail bytes (0x0C0-0x0FF) are zero.
+	// Note: User header bytes (0x078-0x0BF) are caller-owned and not checked.
+	if hasReservedBytesSet(headerBuf) {
+		return nil, fmt.Errorf("reserved bytes are non-zero: %w", ErrIncompatible)
 	}
 
 	// If generation is odd, a writer is in progress or a previous writer crashed.
@@ -666,6 +673,13 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		}
 
 		return nil, err
+	}
+
+	// After CRC validation on a stable even snapshot, check if cache is invalidated.
+	// We re-read state here because headerBuf may have been refreshed during odd-gen handling.
+	state = binary.LittleEndian.Uint32(headerBuf[offState:])
+	if state == stateInvalidated {
+		return nil, ErrInvalidated
 	}
 
 	// Read config fields.

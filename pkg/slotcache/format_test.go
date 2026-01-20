@@ -323,7 +323,7 @@ func Test_NextPow2_Returns_Smallest_Power_Of_Two_When_Given_Input(t *testing.T) 
 	}
 }
 
-func Test_HasReservedBytesSet_Returns_True_When_Reserved_Bytes_Are_Nonzero(t *testing.T) {
+func Test_HasReservedBytesSet_Returns_True_When_Reserved_Tail_Bytes_Are_Nonzero(t *testing.T) {
 	t.Parallel()
 
 	// Clean header
@@ -334,10 +334,19 @@ func Test_HasReservedBytesSet_Returns_True_When_Reserved_Bytes_Are_Nonzero(t *te
 		t.Error("hasReservedBytesSet returned true for clean header")
 	}
 
-	// Set a reserved byte
-	buf[offReservedStart] = 0xFF
+	// Set a reserved tail byte (0x0C0-0x0FF region)
+	buf[offReservedTailStart] = 0xFF
 	if !hasReservedBytesSet(buf) {
-		t.Error("hasReservedBytesSet returned false when reserved byte is set")
+		t.Error("hasReservedBytesSet returned false when reserved tail byte is set")
+	}
+
+	// Verify that user header bytes (0x078-0x0BF) are NOT checked by hasReservedBytesSet
+	buf2 := encodeHeader(&h)
+	buf2[offUserFlags] = 0xFF // Set a user flags byte
+
+	buf2[offUserData] = 0xFF // Set a user data byte
+	if hasReservedBytesSet(buf2) {
+		t.Error("hasReservedBytesSet incorrectly flagged user header bytes as reserved")
 	}
 }
 
