@@ -243,7 +243,7 @@ No changes to behavior-model harness unless we explicitly decide to model user h
 
 (From the approved ordered-scan optimization plan.)
 
-- [ ] Phase 10.1: Add early termination for `Limit` (and `Offset+Limit`) in forward scans.
+- [x] Phase 10.1: Add early termination for `Limit` (and `Offset+Limit`) in forward scans.
 - [ ] Phase 10.2: Implement reverse-iteration paths (avoid `slices.Reverse`) for ordered mode.
 - [ ] Phase 10.3: Ordered-mode order validation during scans (`prevKey <= key`), surfacing `ErrCorrupt`.
 - [ ] Phase 10.4: Ordered-mode prefix acceleration (`ScanPrefix`/`ScanMatch`) via binary search range.

@@ -1669,6 +1669,9 @@ func (c *cache) collectRangeEntries(startPadded, endPadded []byte, opts ScanOpti
 //
 // Allocation optimization: Same approach as doCollect - borrow mmap slices for
 // filter callbacks, only allocate owned copies for entries that pass the filter.
+//
+// Early termination optimization: For forward scans with Limit, we stop scanning
+// once we've collected Offset+Limit entries (enough to satisfy the request).
 func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
 	highwater, hwErr := c.safeSlotHighwater(expectedGen)
 	if hwErr != nil {
@@ -1689,6 +1692,15 @@ func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte
 
 	entries := make([]Entry, 0)
 	keyPad := (8 - (c.keySize % 8)) % 8
+
+	// Early termination: for forward scans with Limit, we only need Offset+Limit entries.
+	// For reverse scans, we need all entries since we reverse after collection.
+	canTerminateEarly := !opts.Reverse && opts.Limit > 0
+
+	needCount := 0
+	if canTerminateEarly {
+		needCount = opts.Offset + opts.Limit
+	}
 
 	// Sequential scan from startSlot.
 	for slotID := startSlot; slotID < highwater; slotID++ {
@@ -1763,6 +1775,11 @@ func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte
 			Revision: revision,
 			Index:    indexCopy,
 		})
+
+		// Early termination for forward scans with Limit.
+		if canTerminateEarly && len(entries) >= needCount {
+			break
+		}
 	}
 
 	if opts.Reverse {
@@ -2000,6 +2017,9 @@ func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Ent
 // 1. Borrowing mmap slices directly for filter callbacks (API contract allows this)
 // 2. Only allocating owned copies for entries that pass the filter
 // 3. Skipping borrowed entry construction entirely when no filter is set.
+//
+// Early termination optimization: For forward scans with Limit, we stop scanning
+// once we've collected Offset+Limit entries (enough to satisfy the request).
 func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
 	highwater, hwErr := c.safeSlotHighwater(expectedGen)
 	if hwErr != nil {
@@ -2009,6 +2029,15 @@ func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byt
 	entries := make([]Entry, 0)
 
 	keyPad := (8 - (c.keySize % 8)) % 8
+
+	// Early termination: for forward scans with Limit, we only need Offset+Limit entries.
+	// For reverse scans, we need all entries since we reverse after collection.
+	canTerminateEarly := !opts.Reverse && opts.Limit > 0
+
+	needCount := 0
+	if canTerminateEarly {
+		needCount = opts.Offset + opts.Limit
+	}
 
 	for slotID := range highwater {
 		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
@@ -2074,6 +2103,11 @@ func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byt
 			Revision: revision,
 			Index:    indexCopy,
 		})
+
+		// Early termination for forward scans with Limit.
+		if canTerminateEarly && len(entries) >= needCount {
+			break
+		}
 	}
 
 	if opts.Reverse {
