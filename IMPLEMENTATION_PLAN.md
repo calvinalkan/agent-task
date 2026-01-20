@@ -64,28 +64,29 @@ CRC rules remain unchanged:
 
 ---
 
-## Phase 2 — Public API surface
+## Phase 2 — Public API surface ✓
 
 File: `pkg/slotcache/api.go`
 
-- [ ] Add new sentinel error:
-  - [ ] `ErrInvalidated`
+- [x] Add new sentinel error:
+  - [x] `ErrInvalidated`
 
-- [ ] Extend `Cache` interface:
-  - [ ] `Invalidate() error`
-  - [ ] `UserHeader() (UserHeader, error)`
-  - [ ] `Generation() (uint64, error)`
+- [x] Extend `Cache` interface:
+  - [x] `Invalidate() error`
+  - [x] `UserHeader() (UserHeader, error)`
+  - [x] `Generation() (uint64, error)`
 
-- [ ] Extend `Writer` interface:
-  - [ ] `SetUserHeaderFlags(flags uint64) error`
-  - [ ] `SetUserHeaderData(data [UserDataSize]byte) error` (where `UserDataSize = 64`)
+- [x] Extend `Writer` interface:
+  - [x] `SetUserHeaderFlags(flags uint64) error`
+  - [x] `SetUserHeaderData(data [UserDataSize]byte) error` (where `UserDataSize = 64`)
 
-- [ ] Add exported types/constants:
-  - [ ] `const UserDataSize = 64`
-  - [ ] `type UserHeader struct { Flags uint64; Data [UserDataSize]byte }`
+- [x] Add exported types/constants:
+  - [x] `const UserDataSize = 64`
+  - [x] `type UserHeader struct { Flags uint64; Data [UserDataSize]byte }`
 
 Notes:
 - We intentionally do **not** add invalidation ops to the model-vs-real behavior harness (see Phase 6/7).
+- Stub implementations added in `slotcache.go` and `writer.go` (panic until Phase 4-6).
 
 ---
 

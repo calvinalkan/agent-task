@@ -395,6 +395,16 @@ func (w *writer) Close() error {
 	return nil
 }
 
+// SetUserHeaderFlags stages a change to the user header flags.
+func (*writer) SetUserHeaderFlags(_ uint64) error {
+	panic("slotcache: SetUserHeaderFlags not yet implemented")
+}
+
+// SetUserHeaderData stages a change to the user header data.
+func (*writer) SetUserHeaderData(_ [UserDataSize]byte) error {
+	panic("slotcache: SetUserHeaderData not yet implemented")
+}
+
 // resetDirtyTracking initializes dirty range tracking for a new commit.
 func (w *writer) resetDirtyTracking() {
 	w.minSlotOffset = -1

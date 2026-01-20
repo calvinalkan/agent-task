@@ -1332,6 +1332,21 @@ func (c *cache) BeginWrite() (Writer, error) {
 	return wr, nil
 }
 
+// Invalidate marks the cache as permanently unusable.
+func (*cache) Invalidate() error {
+	panic("slotcache: Invalidate not yet implemented")
+}
+
+// UserHeader returns the caller-owned header metadata.
+func (*cache) UserHeader() (UserHeader, error) {
+	panic("slotcache: UserHeader not yet implemented")
+}
+
+// Generation returns the current generation counter.
+func (*cache) Generation() (uint64, error) {
+	panic("slotcache: Generation not yet implemented")
+}
+
 // binarySearchSlotGE finds the first slot index where key >= target.
 // Returns highwater if all keys are less than target.
 // This works correctly with tombstones because they preserve their key bytes.

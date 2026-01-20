@@ -329,6 +329,10 @@ linters:
       - path: pkg/fs/fs\.go
         linters:
           - interfacebloat
+      # Cache API surface is intentionally rich (read ops + metadata + lifecycle)
+      - path: pkg/slotcache/api\.go
+        linters:
+          - interfacebloat
       - path: pkg/fs/lock_test\.go
         linters:
           - testpackage

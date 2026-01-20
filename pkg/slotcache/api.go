@@ -117,6 +117,14 @@ var (
 	//
 	// Deprecated: Use [ErrOutOfOrderInsert] instead.
 	ErrOutOfOrder = ErrOutOfOrderInsert
+
+	// ErrInvalidated indicates the cache has been explicitly invalidated.
+	//
+	// Once invalidated, all operations on the cache (reads, writes, new opens)
+	// return this error. Invalidation is terminal and cannot be undone.
+	//
+	// Recovery: delete and recreate the cache.
+	ErrInvalidated = errors.New("slotcache: invalidated")
 )
 
 // WritebackMode controls durability guarantees for [Writer.Commit].
@@ -135,6 +143,25 @@ const (
 	// as corrupt (triggering [ErrCorrupt] on next [Open]).
 	WritebackSync
 )
+
+// UserDataSize is the fixed size of the caller-owned data region in the header.
+const UserDataSize = 64
+
+// UserHeader contains caller-owned metadata stored in the cache file header.
+//
+// These fields are opaque to slotcache and reserved for caller use.
+// Changes to user header fields are published atomically with [Writer.Commit].
+type UserHeader struct {
+	// Flags is a caller-owned 64-bit field for arbitrary use.
+	//
+	// Common uses: feature flags, schema version, cache metadata.
+	Flags uint64
+
+	// Data is a caller-owned 64-byte region for arbitrary use.
+	//
+	// Common uses: checksums, timestamps, small metadata blobs.
+	Data [UserDataSize]byte
+}
 
 // Options configures opening or creating a cache file.
 type Options struct {
@@ -336,8 +363,38 @@ type Cache interface {
 	//
 	// Only one writer may be active at a time.
 	//
-	// Possible errors: [ErrClosed], [ErrBusy].
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrInvalidated].
 	BeginWrite() (Writer, error)
+
+	// Invalidate marks the cache as permanently unusable.
+	//
+	// After invalidation, all operations on this handle and any future
+	// [Open] calls on the same file return [ErrInvalidated].
+	// Invalidation is atomic and durable (in WritebackSync mode).
+	//
+	// Calling Invalidate on an already-invalidated cache is a no-op.
+	//
+	// Possible errors: [ErrClosed], [ErrBusy].
+	Invalidate() error
+
+	// UserHeader returns the caller-owned header metadata.
+	//
+	// The returned [UserHeader] is a snapshot; subsequent writes do not
+	// affect it. Use [Writer.SetUserHeaderFlags] and [Writer.SetUserHeaderData]
+	// to modify.
+	//
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrInvalidated].
+	UserHeader() (UserHeader, error)
+
+	// Generation returns the current generation counter.
+	//
+	// The generation is incremented on each successful commit. Callers can
+	// use this for cheap change detection without reading entry data.
+	//
+	// Returns a stable even generation (never an odd in-progress value).
+	//
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrInvalidated].
+	Generation() (uint64, error)
 }
 
 // Writer is a buffered write session for modifying the cache.
@@ -376,4 +433,22 @@ type Writer interface {
 	//
 	// Close is idempotent. Always call Close, even after [Writer.Commit].
 	Close() error
+
+	// SetUserHeaderFlags stages a change to the user header flags.
+	//
+	// The new value is published atomically on [Writer.Commit].
+	// If Commit fails (e.g., [ErrFull]), the change is discarded.
+	// Setting flags does not affect the user data bytes.
+	//
+	// Possible errors: [ErrClosed], [ErrInvalidated].
+	SetUserHeaderFlags(flags uint64) error
+
+	// SetUserHeaderData stages a change to the user header data.
+	//
+	// The new value is published atomically on [Writer.Commit].
+	// If Commit fails (e.g., [ErrFull]), the change is discarded.
+	// Setting data does not affect the user flags.
+	//
+	// Possible errors: [ErrClosed], [ErrInvalidated].
+	SetUserHeaderData(data [UserDataSize]byte) error
 }
