@@ -1710,10 +1710,20 @@ func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte
 		needCount = opts.Offset + opts.Limit
 	}
 
+	// Order validation for ordered-keys mode: track previous key to verify sorted invariant.
+	var prevKey []byte
+
 	// Sequential scan from startSlot.
 	for slotID := startSlot; slotID < highwater; slotID++ {
 		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
 		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+
+		// Order validation: keys must be non-decreasing in ordered-keys mode.
+		if prevKey != nil && bytes.Compare(key, prevKey) < 0 {
+			return nil, c.checkInvariantViolation(expectedGen)
+		}
+
+		prevKey = key
 
 		// Early termination: if key >= end, we're done (keys are sorted).
 		if endPadded != nil && bytes.Compare(key, endPadded) >= 0 {
@@ -1848,11 +1858,23 @@ func (c *cache) doCollectRangeReverse(expectedGen uint64, highwater uint64, star
 		needCount = opts.Offset + opts.Limit
 	}
 
+	// Order validation: track previous key to verify sorted invariant.
+	// When iterating backwards, keys should be non-increasing (current key <= prevKey).
+	var prevKey []byte
+
 	// Iterate from lastSlot down to 0.
 	for i := lastSlot + 1; i > 0; i-- {
 		slotID := i - 1
 		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
 		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+
+		// Order validation: when iterating backwards, keys should be non-increasing.
+		// Note: prevKey holds the key from the *higher* slot ID we saw earlier.
+		if prevKey != nil && bytes.Compare(key, prevKey) > 0 {
+			return nil, c.checkInvariantViolation(expectedGen)
+		}
+
+		prevKey = key
 
 		// Early termination: if key < start, we're done (keys are sorted).
 		if startPadded != nil && bytes.Compare(key, startPadded) < 0 {
@@ -2189,6 +2211,10 @@ func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byt
 		needCount = opts.Offset + opts.Limit
 	}
 
+	// Order validation for ordered-keys mode: track previous key to verify sorted invariant.
+	// Per spec: "For all allocated slot IDs i < j < slot_highwater, slot[i].key <= slot[j].key"
+	var prevKey []byte
+
 	for slotID := range highwater {
 		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
 
@@ -2206,6 +2232,15 @@ func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byt
 		}
 
 		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+
+		// Order validation: in ordered-keys mode, keys must be non-decreasing.
+		// This check validates the on-disk sorted invariant during scans.
+		if c.orderedKeys && prevKey != nil && bytes.Compare(key, prevKey) < 0 {
+			return nil, c.checkInvariantViolation(expectedGen)
+		}
+
+		prevKey = key
+
 		if !match(key) {
 			continue
 		}
@@ -2292,6 +2327,10 @@ func (c *cache) doCollectReverse(expectedGen uint64, highwater uint64, opts Scan
 		needCount = opts.Offset + opts.Limit
 	}
 
+	// Order validation for ordered-keys mode: track previous key to verify sorted invariant.
+	// When iterating backwards, keys should be non-increasing (current key <= prevKey).
+	var prevKey []byte
+
 	// Iterate from highwater-1 down to 0.
 	for i := highwater; i > 0; i-- {
 		slotID := i - 1
@@ -2310,6 +2349,16 @@ func (c *cache) doCollectReverse(expectedGen uint64, highwater uint64, opts Scan
 		}
 
 		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+
+		// Order validation: in ordered-keys mode, when iterating backwards,
+		// keys should be non-increasing (current key <= previous key seen).
+		// Note: prevKey holds the key from the *higher* slot ID we saw earlier.
+		if prevKey != nil && bytes.Compare(key, prevKey) > 0 {
+			return nil, c.checkInvariantViolation(expectedGen)
+		}
+
+		prevKey = key
+
 		if !match(key) {
 			continue
 		}

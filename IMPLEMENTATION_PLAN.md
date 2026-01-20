@@ -249,7 +249,11 @@ No changes to behavior-model harness unless we explicitly decide to model user h
   - `doCollectRange()`: For `Reverse`, uses `doCollectRangeReverse()` with binary search to find range end.
   - Both paths support early termination with `Offset+Limit`.
   - Tests added in `scan_reverse_test.go` covering tombstones, filters, and edge cases.
-- [ ] Phase 10.3: Ordered-mode order validation during scans (`prevKey <= key`), surfacing `ErrCorrupt`.
+- [x] Phase 10.3: Ordered-mode order validation during scans (`prevKey <= key`), surfacing `ErrCorrupt`.
+  - All scan paths (`doCollect`, `doCollectReverse`, `doCollectRange`, `doCollectRangeReverse`) track previous key.
+  - Forward scans validate `key >= prevKey`; reverse scans validate `key <= prevKey`.
+  - On order violation, uses `checkInvariantViolation()` to distinguish overlap from real corruption.
+  - Tests added in `scan_order_validation_test.go` covering forward/reverse scans, range scans, tombstones, prefix scans, and unordered mode (no validation).
 - [ ] Phase 10.4: Ordered-mode prefix acceleration (`ScanPrefix`/`ScanMatch`) via binary search range.
 
 - [ ] Tests/benchmarks:
