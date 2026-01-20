@@ -67,6 +67,10 @@ func (w *writer) Put(key []byte, revision int64, index []byte) error {
 		return fmt.Errorf("index length %d != index_size %d: %w", len(index), w.cache.indexSize, ErrInvalidInput)
 	}
 
+	if len(w.bufferedOps) >= maxBufferedOpsPerWriter {
+		return fmt.Errorf("too many buffered ops (%d), max %d: %w", len(w.bufferedOps), maxBufferedOpsPerWriter, ErrInvalidInput)
+	}
+
 	// Copy key and index to avoid external mutation.
 	keyCopy := make([]byte, len(key))
 	copy(keyCopy, key)
@@ -95,6 +99,10 @@ func (w *writer) Delete(key []byte) (bool, error) {
 
 	if len(key) != int(w.cache.keySize) {
 		return false, fmt.Errorf("key length %d != key_size %d: %w", len(key), w.cache.keySize, ErrInvalidInput)
+	}
+
+	if len(w.bufferedOps) >= maxBufferedOpsPerWriter {
+		return false, fmt.Errorf("too many buffered ops (%d), max %d: %w", len(w.bufferedOps), maxBufferedOpsPerWriter, ErrInvalidInput)
 	}
 
 	keyCopy := make([]byte, len(key))

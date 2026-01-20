@@ -140,7 +140,7 @@ type slc1Header struct {
 	BucketsOffset    uint64
 	HeaderCRC32C     uint32
 	ReservedU32      uint32
-	// Reserved bytes from 0x078 to 0x0FF (136 bytes) are implicitly zero.
+	// Reserved bytes from 0x078 to 0x0FF (136 bytes) MUST be zero.
 }
 
 // encodeHeader serializes the header to a 256-byte slice.
@@ -219,18 +219,48 @@ func hasReservedBytesSet(buf []byte) bool {
 	return false
 }
 
-// computeSlotSize calculates the slot size per spec:
+// computeSlotSizeChecked calculates the slot size per spec and enforces
+// implementation limits.
+//
 // slot_size = align8( meta(8) + key_size + key_pad + revision(8) + index_size )
 // where key_pad = (8 - (key_size % 8)) % 8.
-func computeSlotSize(keySize, indexSize uint32) uint32 {
+//
+// It returns ErrInvalidInput if the derived size cannot be represented safely.
+func computeSlotSizeChecked(keySize, indexSize uint32) (uint32, error) {
 	keyPad := (8 - (keySize % 8)) % 8
-	unaligned := 8 + keySize + keyPad + 8 + indexSize // meta + key + pad + revision + index
 
-	return align8(unaligned)
+	// Compute in uint64 to avoid uint32 wraparound.
+	unaligned := uint64(8) + uint64(keySize) + uint64(keyPad) + uint64(8) + uint64(indexSize)
+	aligned := align8U64(unaligned)
+
+	if aligned > uint64(maxUint32) {
+		return 0, fmt.Errorf("computed slot_size %d exceeds uint32 max: %w", aligned, ErrInvalidInput)
+	}
+
+	if aligned > uint64(maxSlotSizeBytes) {
+		return 0, fmt.Errorf("computed slot_size %d exceeds max slot size %d: %w", aligned, maxSlotSizeBytes, ErrInvalidInput)
+	}
+
+	return uint32(aligned), nil
 }
 
-// align8 rounds x up to the next multiple of 8.
-func align8(x uint32) uint32 {
+// computeSlotSize calculates slot size without validation.
+//
+// Callers MUST ensure keySize/indexSize have already been validated such that
+// the derived slot size fits in uint32 and within implementation limits.
+func computeSlotSize(keySize, indexSize uint32) uint32 {
+	size, err := computeSlotSizeChecked(keySize, indexSize)
+	if err != nil {
+		// This should be impossible if Open() validation is correct.
+		// Return 0 to fail fast on later invariants rather than silently wrapping.
+		return 0
+	}
+
+	return size
+}
+
+// align8U64 rounds x up to the next multiple of 8.
+func align8U64(x uint64) uint64 {
 	return (x + 7) &^ 7
 }
 

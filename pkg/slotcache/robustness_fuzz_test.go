@@ -348,3 +348,219 @@ func FuzzSpec_OpenAndReadRobustness(f *testing.F) {
 		}
 	})
 }
+
+// FuzzSpec_OpenAndReadRobustness_NearCapConfig is like FuzzSpec_OpenAndReadRobustness,
+// but uses a fixed, near-cap configuration (KeySize=512, IndexSize=16KiB).
+//
+// Why a separate fuzz target:
+//   - The default robustness fuzzer derives small options to keep mutation fuzzing fast.
+//   - Large record sizes stress different arithmetic/slicing paths (padding, offsets,
+//     large copies) that are easy to miss with tiny KeySize/IndexSize.
+//   - testutil.MutateBytes caps mutated blobs at 1MiB, so this target keeps the base
+//     file <= 1MiB by using a small SlotCapacity; otherwise many mutations would
+//     trivially truncate the file.
+func FuzzSpec_OpenAndReadRobustness_NearCapConfig(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte("near-cap-robust"))
+	f.Add([]byte{0x00, 0x01, 0x02, 0x03, 0x04})
+	f.Add([]byte("near-cap-corruption-seed"))
+
+	f.Fuzz(func(t *testing.T, fuzzBytes []byte) {
+		tmpDir := t.TempDir()
+		cacheFilePath := filepath.Join(tmpDir, "spec_mut_fuzz_nearcap.slc")
+
+		options := slotcache.Options{
+			Path:         cacheFilePath,
+			KeySize:      nearCapKeySize,
+			IndexSize:    nearCapIndexSize,
+			UserVersion:  1,
+			SlotCapacity: nearCapCapacity - 4, // keep base file <= 1MiB so MutateBytes doesn't always truncate
+		}
+
+		// -----------------------------------------------------------------
+		// 1) Create a valid base file in the chosen configuration.
+		// -----------------------------------------------------------------
+		cache, err := slotcache.Open(options)
+		if err != nil {
+			t.Fatalf("Open(valid base) failed unexpectedly: %v", err)
+		}
+
+		// Write a tiny committed state (and a tombstone) so the mutated file is
+		// more likely to reach deep parsing paths.
+		keys := make([][]byte, 0, 4)
+
+		w, beginErr := cache.BeginWrite()
+		if beginErr == nil {
+			for i := range 4 {
+				k := make([]byte, options.KeySize)
+				// Deterministic prefix so keys are distinct.
+				if options.KeySize >= 4 {
+					k[0] = 0
+					k[1] = 0
+					k[2] = 0
+					k[3] = byte(i + 1)
+				} else {
+					k[options.KeySize-1] = byte(i + 1)
+				}
+
+				idx := bytes.Repeat([]byte{byte(0xA0 + i)}, options.IndexSize)
+
+				_ = w.Put(k, int64(i+1), idx)
+				keys = append(keys, k)
+			}
+
+			_ = w.Commit()
+			_ = w.Close()
+		}
+
+		// Create a tombstone to exercise bucket tombstone handling.
+		if len(keys) > 0 {
+			w2, beginErr2 := cache.BeginWrite()
+			if beginErr2 == nil {
+				_, _ = w2.Delete(keys[0])
+				_ = w2.Commit()
+				_ = w2.Close()
+			}
+		}
+
+		_ = cache.Close()
+
+		baseBytes, readErr := os.ReadFile(cacheFilePath)
+		if readErr != nil {
+			t.Fatalf("ReadFile(valid base) failed: %v", readErr)
+		}
+
+		// -----------------------------------------------------------------
+		// 2) Mutate and write back.
+		// -----------------------------------------------------------------
+		mutated := testutil.MutateBytes(baseBytes, testutil.NewByteStream(fuzzBytes))
+
+		writeErr := os.WriteFile(cacheFilePath, mutated, 0o600)
+		if writeErr != nil {
+			t.Fatalf("WriteFile(mutated) failed: %v", writeErr)
+		}
+
+		// -----------------------------------------------------------------
+		// 3) Open mutated file (must not panic/hang).
+		// -----------------------------------------------------------------
+		cacheHandle, openErr := slotcache.Open(options)
+		if openErr != nil {
+			// Only allow classified errors.
+			if errors.Is(openErr, slotcache.ErrCorrupt) ||
+				errors.Is(openErr, slotcache.ErrIncompatible) ||
+				errors.Is(openErr, slotcache.ErrBusy) {
+				return
+			}
+
+			t.Fatalf("Open(mutated) returned unexpected error: %v", openErr)
+		}
+
+		defer func() { _ = cacheHandle.Close() }()
+
+		// Use spec_oracle as a classifier/hint.
+		oracleErr := testutil.ValidateFile(cacheFilePath, options)
+		oracleAccepted := oracleErr == nil
+
+		// -----------------------------------------------------------------
+		// 4) Basic API probes. Must not panic/hang.
+		// -----------------------------------------------------------------
+
+		lenVal, lenErr := cacheHandle.Len()
+		if lenErr != nil {
+			if oracleAccepted {
+				t.Fatalf("Len returned error but oracle accepted file: %v", lenErr)
+			}
+
+			if errors.Is(lenErr, slotcache.ErrCorrupt) || errors.Is(lenErr, slotcache.ErrBusy) {
+				return
+			}
+
+			t.Fatalf("Len returned unexpected error: %v", lenErr)
+		}
+
+		probeKey := make([]byte, options.KeySize)
+
+		_, _, getErr := cacheHandle.Get(probeKey)
+		if getErr != nil {
+			if oracleAccepted {
+				t.Fatalf("Get returned error but oracle accepted file: %v", getErr)
+			}
+
+			if errors.Is(getErr, slotcache.ErrCorrupt) || errors.Is(getErr, slotcache.ErrBusy) {
+				return
+			}
+
+			t.Fatalf("Get returned unexpected error: %v", getErr)
+		}
+
+		entries, scanErr := cacheHandle.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+		if scanErr != nil {
+			if oracleAccepted {
+				t.Fatalf("Scan returned error but oracle accepted file: %v", scanErr)
+			}
+
+			if errors.Is(scanErr, slotcache.ErrCorrupt) || errors.Is(scanErr, slotcache.ErrBusy) {
+				return
+			}
+
+			t.Fatalf("Scan returned unexpected error: %v", scanErr)
+		}
+
+		for _, e := range entries {
+			if len(e.Key) != options.KeySize {
+				t.Fatalf("Scan returned key with wrong size: got %d want %d", len(e.Key), options.KeySize)
+			}
+
+			if options.IndexSize > 0 && len(e.Index) != options.IndexSize {
+				t.Fatalf("Scan returned index with wrong size: got %d want %d", len(e.Index), options.IndexSize)
+			}
+		}
+
+		if oracleAccepted {
+			// On a valid file, Len and Scan must agree.
+			if lenVal != len(entries) {
+				t.Fatalf("oracle accepted file but Len=%d and Scan returned %d entries", lenVal, len(entries))
+			}
+
+			// On a valid file, Get must round-trip all scanned entries.
+			for _, e := range entries {
+				got, ok, err := cacheHandle.Get(e.Key)
+				if err != nil {
+					t.Fatalf("oracle accepted file but Get failed after Scan: %v", err)
+				}
+
+				if !ok {
+					t.Fatal("oracle accepted file but Get missing after Scan")
+				}
+
+				if got.Revision != e.Revision {
+					t.Fatal("oracle accepted file but Get revision mismatch after Scan")
+				}
+
+				if options.IndexSize > 0 && !bytes.Equal(got.Index, e.Index) {
+					t.Fatal("oracle accepted file but Get index mismatch after Scan")
+				}
+			}
+		}
+
+		// Simple prefix probe (must not panic/hang).
+		_, prefixErr := cacheHandle.ScanPrefix([]byte{0x00}, slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+		if prefixErr != nil {
+			if oracleAccepted {
+				t.Fatalf("ScanPrefix returned error but oracle accepted file: %v", prefixErr)
+			}
+
+			if errors.Is(prefixErr, slotcache.ErrCorrupt) ||
+				errors.Is(prefixErr, slotcache.ErrBusy) ||
+				errors.Is(prefixErr, slotcache.ErrInvalidInput) {
+				return
+			}
+
+			t.Fatalf("ScanPrefix returned unexpected error: %v", prefixErr)
+		}
+
+		// Also probe ScanMatch with a bit-prefix spec (exercise Prefix.Bits math).
+		bitSpec := slotcache.Prefix{Offset: 0, Bits: 9, Bytes: []byte{0x00, 0x00}}
+		_, _ = cacheHandle.ScanMatch(bitSpec, slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+	})
+}

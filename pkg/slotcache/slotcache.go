@@ -209,14 +209,26 @@ type cache struct {
 }
 
 // validateFileLayoutFitsInt64 checks that the computed file layout for the given
-// options will fit in int64 (required for mmap, ftruncate, and file size operations).
+// options is representable and within implementation limits.
+//
+// This is primarily used to fail fast on unsafe configurations before attempting
+// to create/truncate/mmap a file.
 func validateFileLayoutFitsInt64(opts Options) error {
 	// Convert sizes (already validated to fit in uint32).
 	keySize32, _ := intToUint32Checked(opts.KeySize)
 	indexSize32, _ := intToUint32Checked(opts.IndexSize)
 
-	slotSize := uint64(computeSlotSize(keySize32, indexSize32))
+	slotSize32, err := computeSlotSizeChecked(keySize32, indexSize32)
+	if err != nil {
+		return err
+	}
+
+	slotSize := uint64(slotSize32)
+
 	bucketCount := computeBucketCount(opts.SlotCapacity)
+	if bucketCount == 0 {
+		return fmt.Errorf("bucket_count overflows uint64: %w", ErrInvalidInput)
+	}
 
 	// Check slots section: header_size + slot_capacity * slot_size
 	slotsSection := opts.SlotCapacity * slotSize
@@ -241,9 +253,18 @@ func validateFileLayoutFitsInt64(opts Options) error {
 		return fmt.Errorf("file size overflows uint64: %w", ErrInvalidInput)
 	}
 
-	// Finally check it fits in int64
+	if fileSize > maxCacheFileSizeBytes {
+		return fmt.Errorf("file size %d exceeds max cache file size %d: %w", fileSize, maxCacheFileSizeBytes, ErrInvalidInput)
+	}
+
+	// Must fit in int64 for ftruncate/stat and friends.
 	if _, ok := uint64ToInt64Checked(fileSize); !ok {
 		return fmt.Errorf("file size %d exceeds int64 max: %w", fileSize, ErrInvalidInput)
+	}
+
+	// Must fit in int for mmap length and Go slice sizing.
+	if _, ok := uint64ToIntChecked(fileSize); !ok {
+		return fmt.Errorf("file size %d exceeds max int %d: %w", fileSize, maxInt, ErrInvalidInput)
 	}
 
 	return nil
@@ -260,8 +281,16 @@ func Open(opts Options) (Cache, error) {
 		return nil, fmt.Errorf("key_size must be >= 1, got %d: %w", opts.KeySize, ErrInvalidInput)
 	}
 
+	if opts.KeySize > maxKeySizeBytes {
+		return nil, fmt.Errorf("key_size %d exceeds max %d: %w", opts.KeySize, maxKeySizeBytes, ErrInvalidInput)
+	}
+
 	if opts.IndexSize < 0 {
 		return nil, fmt.Errorf("index_size must be >= 0, got %d: %w", opts.IndexSize, ErrInvalidInput)
+	}
+
+	if opts.IndexSize > maxIndexSizeBytes {
+		return nil, fmt.Errorf("index_size %d exceeds max %d: %w", opts.IndexSize, maxIndexSizeBytes, ErrInvalidInput)
 	}
 
 	// Validate KeySize and IndexSize fit in uint32 (on-disk format constraint).
@@ -273,13 +302,25 @@ func Open(opts Options) (Cache, error) {
 		return nil, fmt.Errorf("index_size %d exceeds uint32 max: %w", opts.IndexSize, ErrInvalidInput)
 	}
 
+	switch opts.Writeback {
+	case WritebackNone, WritebackSync:
+		// ok
+	default:
+		return nil, fmt.Errorf("unknown writeback mode %d: %w", opts.Writeback, ErrInvalidInput)
+	}
+
 	if opts.SlotCapacity < 1 {
 		return nil, fmt.Errorf("slot_capacity must be >= 1, got %d: %w", opts.SlotCapacity, ErrInvalidInput)
 	}
 
-	const maxSlotCapacity = uint64(0xFFFFFFFFFFFFFFFE)
 	if opts.SlotCapacity > maxSlotCapacity {
-		return nil, fmt.Errorf("slot_capacity %d exceeds maximum %d: %w", opts.SlotCapacity, maxSlotCapacity, ErrInvalidInput)
+		return nil, fmt.Errorf("slot_capacity %d exceeds max %d: %w", opts.SlotCapacity, maxSlotCapacity, ErrInvalidInput)
+	}
+
+	// Format constraint: slot_capacity must fit the slot_plus1 encoding.
+	const maxSlotCapacitySpec = uint64(0xFFFFFFFFFFFFFFFE)
+	if opts.SlotCapacity > maxSlotCapacitySpec {
+		return nil, fmt.Errorf("slot_capacity %d exceeds maximum %d: %w", opts.SlotCapacity, maxSlotCapacitySpec, ErrInvalidInput)
 	}
 
 	// Bucket sizing uses slot_capacity * 2. Reject capacities that would overflow.
@@ -560,6 +601,20 @@ func initializeEmptyFile(opts Options) (Cache, error) {
 
 // validateAndOpenExisting validates header and opens existing file.
 func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options) (*cache, error) {
+	// Safety checks: ensure the mapping size is within implementation limits and
+	// representable as a Go []byte length (int). This is required for syscall.Mmap.
+	if size < 0 {
+		return nil, fmt.Errorf("negative file size %d: %w", size, ErrCorrupt)
+	}
+
+	if uint64(size) > maxCacheFileSizeBytes {
+		return nil, fmt.Errorf("file size %d exceeds max cache file size %d: %w", size, maxCacheFileSizeBytes, ErrInvalidInput)
+	}
+
+	if size > int64(maxInt) {
+		return nil, fmt.Errorf("file size %d exceeds max int %d: %w", size, maxInt, ErrInvalidInput)
+	}
+
 	// Check magic.
 	if !bytes.Equal(headerBuf[offMagic:offMagic+4], []byte("SLC1")) {
 		return nil, fmt.Errorf("invalid magic %q, expected SLC1: %w", headerBuf[offMagic:offMagic+4], ErrIncompatible)
@@ -593,10 +648,6 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 	reservedU32 := binary.LittleEndian.Uint32(headerBuf[offReservedU32:])
 	if reservedU32 != 0 {
 		return nil, fmt.Errorf("reserved_u32 is non-zero: %w", ErrIncompatible)
-	}
-
-	if hasReservedBytesSet(headerBuf) {
-		return nil, fmt.Errorf("reserved bytes are non-zero: %w", ErrIncompatible)
 	}
 
 	// If generation is odd, a writer is in progress or a previous writer crashed.
@@ -1109,8 +1160,16 @@ func (c *cache) Scan(opts ScanOptions) ([]Entry, error) {
 		return nil, fmt.Errorf("offset must be >= 0, got %d: %w", opts.Offset, ErrInvalidInput)
 	}
 
+	if opts.Offset > maxScanOffset {
+		return nil, fmt.Errorf("offset %d exceeds max %d: %w", opts.Offset, maxScanOffset, ErrInvalidInput)
+	}
+
 	if opts.Limit < 0 {
 		return nil, fmt.Errorf("limit must be >= 0, got %d: %w", opts.Limit, ErrInvalidInput)
+	}
+
+	if opts.Limit > maxScanLimit {
+		return nil, fmt.Errorf("limit %d exceeds max %d: %w", opts.Limit, maxScanLimit, ErrInvalidInput)
 	}
 
 	return c.collectEntries(opts, func(_ []byte) bool { return true })
@@ -1137,8 +1196,16 @@ func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error) {
 		return nil, fmt.Errorf("offset must be >= 0, got %d: %w", opts.Offset, ErrInvalidInput)
 	}
 
+	if opts.Offset > maxScanOffset {
+		return nil, fmt.Errorf("offset %d exceeds max %d: %w", opts.Offset, maxScanOffset, ErrInvalidInput)
+	}
+
 	if opts.Limit < 0 {
 		return nil, fmt.Errorf("limit must be >= 0, got %d: %w", opts.Limit, ErrInvalidInput)
+	}
+
+	if opts.Limit > maxScanLimit {
+		return nil, fmt.Errorf("limit %d exceeds max %d: %w", opts.Limit, maxScanLimit, ErrInvalidInput)
 	}
 
 	validationErr := c.validatePrefixSpec(spec)
@@ -1173,8 +1240,16 @@ func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) 
 		return nil, fmt.Errorf("offset must be >= 0, got %d: %w", opts.Offset, ErrInvalidInput)
 	}
 
+	if opts.Offset > maxScanOffset {
+		return nil, fmt.Errorf("offset %d exceeds max %d: %w", opts.Offset, maxScanOffset, ErrInvalidInput)
+	}
+
 	if opts.Limit < 0 {
 		return nil, fmt.Errorf("limit must be >= 0, got %d: %w", opts.Limit, ErrInvalidInput)
+	}
+
+	if opts.Limit > maxScanLimit {
+		return nil, fmt.Errorf("limit %d exceeds max %d: %w", opts.Limit, maxScanLimit, ErrInvalidInput)
 	}
 
 	startPadded, endPadded, err := c.normalizeRangeBounds(start, end)
@@ -1712,6 +1787,14 @@ func (c *cache) validatePrefixSpec(spec Prefix) error {
 
 	if spec.Bits < 0 {
 		return fmt.Errorf("prefix bits %d must be >= 0: %w", spec.Bits, ErrInvalidInput)
+	}
+
+	// Hard safety cap: prevent int overflow in (Bits+7)/8 and ensure the prefix
+	// can fit within the remaining key bytes.
+	maxBits := (int(c.keySize) - spec.Offset) * 8
+	if spec.Bits > maxBits {
+		return fmt.Errorf("prefix bits %d exceeds max %d for offset %d and key_size %d: %w",
+			spec.Bits, maxBits, spec.Offset, c.keySize, ErrInvalidInput)
 	}
 
 	if spec.Bits == 0 {

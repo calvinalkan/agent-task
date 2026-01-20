@@ -231,6 +231,64 @@ func Test_Open_Returns_ErrInvalidInput_When_IndexSize_Exceeds_Uint32Max(t *testi
 	}
 }
 
+func Test_Open_Returns_ErrInvalidInput_When_Derived_SlotSize_Overflows_Uint32(t *testing.T) {
+	t.Parallel()
+
+	// This test only makes sense on 64-bit systems where int can represent uint32 max.
+	//
+	// Note: this is different from the existing "KeySize exceeds uint32" tests.
+	// Here KeySize/IndexSize are *within* uint32, but the derived slot_size implied by
+	// the SLC1 formula cannot fit in a u32 and must be rejected.
+	const maxUint32 = int(^uint32(0))
+	if maxUint32 == int(^uint(0)>>1) {
+		t.Skip("skipping on 32-bit systems where int cannot represent uint32 max")
+	}
+
+	tmpDir := t.TempDir()
+
+	cases := []struct {
+		name      string
+		keySize   int
+		indexSize int
+	}{
+		{
+			name:      "KeySizeMaxUint32",
+			keySize:   maxUint32,
+			indexSize: 0,
+		},
+		{
+			name:      "IndexSizeMaxUint32",
+			keySize:   1,
+			indexSize: maxUint32,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(tmpDir, "open_slotsize_overflow_"+tc.name+".slc")
+
+			opts := slotcache.Options{
+				Path:         path,
+				KeySize:      tc.keySize,
+				IndexSize:    tc.indexSize,
+				UserVersion:  1,
+				SlotCapacity: 1,
+			}
+
+			c, err := slotcache.Open(opts)
+			if err == nil {
+				_ = c.Close()
+			}
+
+			if !errors.Is(err, slotcache.ErrInvalidInput) {
+				t.Fatalf("Open(slot_size overflow) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+			}
+		})
+	}
+}
+
 func Test_Open_Returns_ErrInvalidInput_When_FileLayout_Exceeds_Int64Max(t *testing.T) {
 	t.Parallel()
 
@@ -261,5 +319,109 @@ func Test_Open_Returns_ErrInvalidInput_When_FileLayout_Exceeds_Int64Max(t *testi
 	_, err := slotcache.Open(opts)
 	if !errors.Is(err, slotcache.ErrInvalidInput) {
 		t.Fatalf("Open(file layout overflow) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}
+
+func Test_Open_Returns_ErrInvalidInput_When_KeySize_Exceeds_MaxKeySize(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_keysize_cap.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      513, // max is 512
+		IndexSize:    0,
+		UserVersion:  1,
+		SlotCapacity: 1,
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(keysize cap) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}
+
+func Test_Open_Returns_ErrInvalidInput_When_IndexSize_Exceeds_MaxIndexSize(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_indexsize_cap.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    (1 << 20) + 1, // max is 1 MiB
+		UserVersion:  1,
+		SlotCapacity: 1,
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(indexsize cap) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}
+
+func Test_Open_Returns_ErrInvalidInput_When_SlotCapacity_Exceeds_MaxSlotCapacity(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_slotcap_cap.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: 100_000_001, // max is 100,000,000
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(slotcapacity cap) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}
+
+func Test_Open_Returns_ErrInvalidInput_When_WritebackMode_Is_Unknown(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_writeback_unknown.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: 1,
+		Writeback:    slotcache.WritebackMode(123),
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(unknown writeback) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}
+
+func Test_Open_Returns_ErrInvalidInput_When_FileSize_Exceeds_MaxCacheFileSize(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_filesize_cap.slc")
+
+	// A configuration that would require a cache file > 1 TiB:
+	// IndexSize=1 MiB, KeySize=512 -> slot_size is a bit over 1 MiB.
+	// With SlotCapacity=2,000,000 the slots section alone exceeds 1 TiB.
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      512,
+		IndexSize:    1 << 20, // 1 MiB
+		UserVersion:  1,
+		SlotCapacity: 2_000_000,
+	}
+
+	_, err := slotcache.Open(opts)
+	if !errors.Is(err, slotcache.ErrInvalidInput) {
+		t.Fatalf("Open(file size cap) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
 	}
 }
