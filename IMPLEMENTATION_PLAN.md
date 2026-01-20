@@ -131,25 +131,25 @@ File: `pkg/slotcache/slotcache.go`
 
 ---
 
-## Phase 5 — Implement user header write APIs (Writer)
+## Phase 5 — Implement user header write APIs (Writer) ✓
 
 File: `pkg/slotcache/writer.go`
 
-- [ ] Add buffered fields to writer:
-  - [ ] `pendingUserFlags` + `userFlagsDirty`
-  - [ ] `pendingUserData` + `userDataDirty`
+- [x] Add buffered fields to writer:
+  - [x] `pendingUserFlags` + `userFlagsDirty`
+  - [x] `pendingUserData` + `userDataDirty`
 
-- [ ] Implement `Writer.SetUserHeaderFlags` and `Writer.SetUserHeaderData`:
-  - [ ] Validate closed/invalidated state.
-  - [ ] Mark only the corresponding field dirty.
+- [x] Implement `Writer.SetUserHeaderFlags` and `Writer.SetUserHeaderData`:
+  - [x] Validate closed/invalidated state.
+  - [x] Mark only the corresponding field dirty.
 
-- [ ] Apply header updates during `Writer.Commit()` publish window:
-  - [ ] Preserve untouched field:
+- [x] Apply header updates during `Writer.Commit()` publish window:
+  - [x] Preserve untouched field:
     - If only flags dirty, keep existing data bytes.
     - If only data dirty, keep existing flags.
-  - [ ] Ensure preflight failures (`ErrFull`, `ErrOutOfOrderInsert`) do **not** publish any header changes.
-  - [ ] CRC recompute must include updated header bytes.
-  - [ ] WritebackSync barriers: header msync already happens; ensure header changes are covered.
+  - [x] Ensure preflight failures (`ErrFull`, `ErrOutOfOrderInsert`) do **not** publish any header changes.
+  - [x] CRC recompute must include updated header bytes.
+  - [x] WritebackSync barriers: header msync already happens; ensure header changes are covered.
 
 ---
 

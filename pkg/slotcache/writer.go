@@ -36,6 +36,15 @@ type writer struct {
 	closedByCommit bool
 	lock           *fs.Lock
 
+	// User header staging fields.
+	// Changes are buffered here and only applied during Commit() if dirty.
+	// This ensures preflight failures (ErrFull, ErrOutOfOrderInsert) don't
+	// publish partial header changes.
+	pendingUserFlags uint64
+	userFlagsDirty   bool
+	pendingUserData  [UserDataSize]byte
+	userDataDirty    bool
+
 	// Dirty range tracking for WritebackSync optimization.
 	// Instead of msync'ing the entire file, we track which page ranges
 	// were modified and only sync those. The kernel usually skips clean
@@ -302,6 +311,18 @@ func (w *writer) Commit() error {
 		binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], 0)
 	}
 
+	// Step 3c: Apply buffered user header changes.
+	// Per spec: only dirty fields are updated; untouched fields preserve their values.
+	// This happens inside the publish window (odd generation) so readers either see
+	// the complete old state or the complete new state.
+	if w.userFlagsDirty {
+		binary.LittleEndian.PutUint64(w.cache.data[offUserFlags:], w.pendingUserFlags)
+	}
+
+	if w.userDataDirty {
+		copy(w.cache.data[offUserData:offUserData+UserDataSize], w.pendingUserData[:])
+	}
+
 	// Step 4: Recompute header CRC.
 	crc := computeHeaderCRC(w.cache.data[:slc1HeaderSize])
 	binary.LittleEndian.PutUint32(w.cache.data[offHeaderCRC32C:], crc)
@@ -396,13 +417,53 @@ func (w *writer) Close() error {
 }
 
 // SetUserHeaderFlags stages a change to the user header flags.
-func (*writer) SetUserHeaderFlags(_ uint64) error {
-	panic("slotcache: SetUserHeaderFlags not yet implemented")
+//
+// The new value is buffered and only published on successful Commit().
+// If Commit() fails (e.g., ErrFull, ErrOutOfOrderInsert), the change is discarded.
+// Setting flags does not affect the user data bytes.
+func (w *writer) SetUserHeaderFlags(flags uint64) error {
+	w.cache.mu.Lock()
+	defer w.cache.mu.Unlock()
+
+	if w.isClosed || w.cache.isClosed {
+		return ErrClosed
+	}
+
+	// Check if cache is invalidated.
+	state := binary.LittleEndian.Uint32(w.cache.data[offState:])
+	if state == stateInvalidated {
+		return ErrInvalidated
+	}
+
+	w.pendingUserFlags = flags
+	w.userFlagsDirty = true
+
+	return nil
 }
 
 // SetUserHeaderData stages a change to the user header data.
-func (*writer) SetUserHeaderData(_ [UserDataSize]byte) error {
-	panic("slotcache: SetUserHeaderData not yet implemented")
+//
+// The new value is buffered and only published on successful Commit().
+// If Commit() fails (e.g., ErrFull, ErrOutOfOrderInsert), the change is discarded.
+// Setting data does not affect the user flags.
+func (w *writer) SetUserHeaderData(data [UserDataSize]byte) error {
+	w.cache.mu.Lock()
+	defer w.cache.mu.Unlock()
+
+	if w.isClosed || w.cache.isClosed {
+		return ErrClosed
+	}
+
+	// Check if cache is invalidated.
+	state := binary.LittleEndian.Uint32(w.cache.data[offState:])
+	if state == stateInvalidated {
+		return ErrInvalidated
+	}
+
+	w.pendingUserData = data
+	w.userDataDirty = true
+
+	return nil
 }
 
 // resetDirtyTracking initializes dirty range tracking for a new commit.
