@@ -192,32 +192,32 @@ File: `pkg/slotcache/internal/testutil/spec_oracle.go`
 
 ---
 
-## Phase 8 — Unit tests for header state + user header
+## Phase 8 — Unit tests for header state + user header ✓
 
 Add a new test file (e.g. `pkg/slotcache/header_state_test.go`) and cover:
 
 Invalidation:
-- [ ] Invalidate makes current handle unusable (`Len/Get/Scan/BeginWrite` → `ErrInvalidated`).
-- [ ] Invalidate observed by another handle to same file.
-- [ ] `Open()` on invalidated file returns `ErrInvalidated`.
-- [ ] Invalidate idempotence.
-- [ ] Invalidate returns `ErrBusy` if writer active.
+- [x] Invalidate makes current handle unusable (`Len/Get/Scan/BeginWrite` → `ErrInvalidated`).
+- [x] Invalidate observed by another handle to same file.
+- [x] `Open()` on invalidated file returns `ErrInvalidated`.
+- [x] Invalidate idempotence.
+- [x] Invalidate returns `ErrBusy` if writer active.
 
 User header:
-- [ ] Defaults to zero on create.
-- [ ] Persists across reopen.
-- [ ] `Writer.Close()` without commit discards header changes.
-- [ ] Commit preflight failure (`ErrFull` / `ErrOutOfOrderInsert`) does not publish header changes.
-- [ ] Setting flags does not change data; setting data does not change flags.
-- [ ] User header bytes are CRC-protected (manual byte flip on disk → `ErrCorrupt` on next open).
+- [x] Defaults to zero on create.
+- [x] Persists across reopen.
+- [x] `Writer.Close()` without commit discards header changes.
+- [x] Commit preflight failure (`ErrFull` / `ErrOutOfOrderInsert`) does not publish header changes.
+- [x] Setting flags does not change data; setting data does not change flags.
+- [x] User header bytes are CRC-protected (manual byte flip on disk → `ErrCorrupt` on next open).
 
 Generation:
-- [ ] New file returns generation 0.
-- [ ] After commit, generation increases (monotonic change).
-- [ ] After invalidation, `Generation()` returns `ErrInvalidated`.
+- [x] New file returns generation 0.
+- [x] After commit, generation increases (monotonic change).
+- [x] After invalidation, `Generation()` returns `ErrInvalidated`.
 
 Reserved tail:
-- [ ] Non-zero bytes in `0x0C0..0x0FF` cause `Open()` to return `ErrIncompatible`.
+- [x] Non-zero bytes in `0x0C0..0x0FF` cause `Open()` to return `ErrIncompatible`.
 
 ---
 
