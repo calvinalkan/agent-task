@@ -313,14 +313,14 @@ type Cache interface {
 
 	// Len returns the number of live entries in the cache.
 	//
-	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt].
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidated].
 	Len() (int, error)
 
 	// Get retrieves an entry by exact key.
 	//
 	// Returns (entry, true, nil) if found, ([Entry]{}, false, nil) if not found.
 	//
-	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrInvalidated].
 	Get(key []byte) (Entry, bool, error)
 
 	// Scan returns all live entries in insertion order.
@@ -328,7 +328,7 @@ type Cache interface {
 	// Scan captures a stable snapshot before returning. If snapshot acquisition
 	// fails, it returns [ErrBusy] and no results.
 	//
-	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrInvalidated].
 	Scan(opts ScanOptions) ([]Entry, error)
 
 	// ScanPrefix returns live entries matching the given byte prefix at offset 0.
@@ -337,7 +337,7 @@ type Cache interface {
 	// ScanPrefix captures a stable snapshot before returning. If snapshot
 	// acquisition fails, it returns [ErrBusy] and no results.
 	//
-	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrInvalidated].
 	ScanPrefix(prefix []byte, opts ScanOptions) ([]Entry, error)
 
 	// ScanMatch returns live entries matching a [Prefix].
@@ -346,7 +346,7 @@ type Cache interface {
 	// ScanMatch captures a stable snapshot before returning. If snapshot
 	// acquisition fails, it returns [ErrBusy] and no results.
 	//
-	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput].
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrInvalidated].
 	ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error)
 
 	// ScanRange returns live entries in the half-open key range [start, end).
@@ -356,7 +356,7 @@ type Cache interface {
 	// ScanRange captures a stable snapshot before returning. If snapshot
 	// acquisition fails, it returns [ErrBusy] and no results.
 	//
-	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrUnordered].
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrCorrupt], [ErrInvalidInput], [ErrUnordered], [ErrInvalidated].
 	ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error)
 
 	// BeginWrite starts a new write session.
@@ -374,7 +374,7 @@ type Cache interface {
 	//
 	// Calling Invalidate on an already-invalidated cache is a no-op.
 	//
-	// Possible errors: [ErrClosed], [ErrBusy].
+	// Possible errors: [ErrClosed], [ErrBusy], [ErrWriteback].
 	Invalidate() error
 
 	// UserHeader returns the caller-owned header metadata.
@@ -426,7 +426,7 @@ type Writer interface {
 	//
 	// After Commit, further operations return [ErrClosed].
 	//
-	// Possible errors: [ErrClosed], [ErrFull], [ErrOutOfOrderInsert], [ErrWriteback], [ErrCorrupt].
+	// Possible errors: [ErrClosed], [ErrFull], [ErrOutOfOrderInsert], [ErrWriteback], [ErrCorrupt], [ErrInvalidated].
 	Commit() error
 
 	// Close releases resources and discards uncommitted changes.

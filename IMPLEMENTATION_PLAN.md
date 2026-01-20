@@ -276,6 +276,6 @@ No changes to behavior-model harness unless we explicitly decide to model user h
 
 ## Phase 11 — Cleanup / dogfood polish
 
-- [ ] Update `pkg/slotcache/api.go` method docs to mention `ErrInvalidated` on read APIs and `Writer.Commit`.
-- [ ] Update `Cache.Invalidate` docs to mention `ErrWriteback` when sync writeback fails.
+- [x] Update `pkg/slotcache/api.go` method docs to mention `ErrInvalidated` on read APIs and `Writer.Commit`.
+- [x] Update `Cache.Invalidate` docs to mention `ErrWriteback` when sync writeback fails.
 - [ ] Decide whether `ScanRange` should check invalidation before returning `ErrUnordered`, and add a regression test if behavior is changed.
