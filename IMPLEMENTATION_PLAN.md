@@ -176,18 +176,19 @@ Important: invalidation stays **out** of the model-vs-real behavior harness.
 
 ---
 
-## Phase 7 — Test infrastructure updates (oracle + fuzz classification)
+## Phase 7 — Test infrastructure updates (oracle + fuzz classification) ✓
 
 ### Spec oracle
 File: `pkg/slotcache/internal/testutil/spec_oracle.go`
 
-- [ ] Parse `state` at `0x074`; allow {0,1}, reject others.
-- [ ] Stop enforcing zero for `0x078..0x0BF` (caller-owned bytes).
-- [ ] Keep enforcing zero for `0x0C0..0x0FF`.
-- [ ] Optionally add a helper to assert expected `state` in unit tests.
+- [x] Parse `state` at `0x074`; allow {0,1}, reject others.
+- [x] Stop enforcing zero for `0x078..0x0BF` (caller-owned bytes).
+- [x] Keep enforcing zero for `0x0C0..0x0FF`.
+- [x] Optionally add a helper to assert expected `state` in unit tests.
+  - Added `ReadHeaderState()` and `AssertHeaderState()` in `spec_oracle_helpers.go`.
 
 ### Fuzz classification
-- [ ] Update `pkg/slotcache/robustness_fuzz_test.go` to treat `ErrInvalidated` as an allowed `Open()` failure classification.
+- [x] Update `pkg/slotcache/robustness_fuzz_test.go` to treat `ErrInvalidated` as an allowed `Open()` failure classification.
 
 ---
 

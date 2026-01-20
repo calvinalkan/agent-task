@@ -115,7 +115,8 @@ func FuzzSpec_OpenAndReadRobustness(f *testing.F) {
 			// Only allow classified errors.
 			if errors.Is(openErr, slotcache.ErrCorrupt) ||
 				errors.Is(openErr, slotcache.ErrIncompatible) ||
-				errors.Is(openErr, slotcache.ErrBusy) {
+				errors.Is(openErr, slotcache.ErrBusy) ||
+				errors.Is(openErr, slotcache.ErrInvalidated) {
 				return
 			}
 
@@ -448,7 +449,8 @@ func FuzzSpec_OpenAndReadRobustness_NearCapConfig(f *testing.F) {
 			// Only allow classified errors.
 			if errors.Is(openErr, slotcache.ErrCorrupt) ||
 				errors.Is(openErr, slotcache.ErrIncompatible) ||
-				errors.Is(openErr, slotcache.ErrBusy) {
+				errors.Is(openErr, slotcache.ErrBusy) ||
+				errors.Is(openErr, slotcache.ErrInvalidated) {
 				return
 			}
 

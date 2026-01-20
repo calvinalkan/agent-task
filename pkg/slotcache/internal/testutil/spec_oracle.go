@@ -104,12 +104,16 @@ func validateSlotcacheBytesAgainstOptions(fileBytes []byte, options slotcache.Op
 
 	headerCRC32C := binary.LittleEndian.Uint32(headerBytes[0x070:0x074])
 
-	reservedU32 := binary.LittleEndian.Uint32(headerBytes[0x074:0x078])
-	if reservedU32 != 0 {
-		return fmt.Errorf("speccheck: reserved_u32 must be 0: got %d", reservedU32)
+	// State field at 0x074: allowed values are 0 (normal) and 1 (invalidated).
+	state := binary.LittleEndian.Uint32(headerBytes[0x074:0x078])
+	if state > 1 {
+		return fmt.Errorf("speccheck: unknown state value at 0x074: got %d (must be 0 or 1)", state)
 	}
 
-	for reservedIndex := 0x078; reservedIndex < headerSizeBytes; reservedIndex++ {
+	// User header bytes (0x078..0x0BF) are caller-owned and may be any value.
+	// Reserved tail bytes (0x0C0..0x0FF) MUST be zero.
+	const reservedTailStart = 0x0C0
+	for reservedIndex := reservedTailStart; reservedIndex < headerSizeBytes; reservedIndex++ {
 		if headerBytes[reservedIndex] != 0 {
 			return fmt.Errorf("speccheck: reserved header byte at 0x%X must be 0", reservedIndex)
 		}
