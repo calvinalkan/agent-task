@@ -208,70 +208,24 @@ type cache struct {
 	writeback      WritebackMode
 }
 
-// validateFileLayoutFitsInt64 checks that the computed file layout for the given
-// options is representable and within implementation limits.
-//
-// This is primarily used to fail fast on unsafe configurations before attempting
-// to create/truncate/mmap a file.
-func validateFileLayoutFitsInt64(opts Options) error {
-	// Convert sizes (already validated to fit in uint32).
-	keySize32, _ := intToUint32Checked(opts.KeySize)
-	indexSize32, _ := intToUint32Checked(opts.IndexSize)
-
-	slotSize32, err := computeSlotSizeChecked(keySize32, indexSize32)
-	if err != nil {
-		return err
-	}
-
-	slotSize := uint64(slotSize32)
-
-	bucketCount := computeBucketCount(opts.SlotCapacity)
-	if bucketCount == 0 {
-		return fmt.Errorf("bucket_count overflows uint64: %w", ErrInvalidInput)
-	}
-
-	// Check slots section: header_size + slot_capacity * slot_size
-	slotsSection := opts.SlotCapacity * slotSize
-	if slotSize > 0 && slotsSection/slotSize != opts.SlotCapacity {
-		return fmt.Errorf("slots section size overflows uint64: %w", ErrInvalidInput)
-	}
-
-	bucketsOffset := uint64(slc1HeaderSize) + slotsSection
-	if bucketsOffset < uint64(slc1HeaderSize) {
-		return fmt.Errorf("buckets offset overflows uint64: %w", ErrInvalidInput)
-	}
-
-	// Check buckets section: bucket_count * 16
-	bucketsSection := bucketCount * 16
-	if bucketsSection/16 != bucketCount {
-		return fmt.Errorf("buckets section size overflows uint64: %w", ErrInvalidInput)
-	}
-
-	// Check total file size
-	fileSize := bucketsOffset + bucketsSection
-	if fileSize < bucketsOffset {
-		return fmt.Errorf("file size overflows uint64: %w", ErrInvalidInput)
-	}
-
-	if fileSize > maxCacheFileSizeBytes {
-		return fmt.Errorf("file size %d exceeds max cache file size %d: %w", fileSize, maxCacheFileSizeBytes, ErrInvalidInput)
-	}
-
-	// Must fit in int64 for ftruncate/stat and friends.
-	if _, ok := uint64ToInt64Checked(fileSize); !ok {
-		return fmt.Errorf("file size %d exceeds int64 max: %w", fileSize, ErrInvalidInput)
-	}
-
-	// Must fit in int for mmap length and Go slice sizing.
-	if _, ok := uint64ToIntChecked(fileSize); !ok {
-		return fmt.Errorf("file size %d exceeds max int %d: %w", fileSize, maxInt, ErrInvalidInput)
-	}
-
-	return nil
-}
-
 // Open creates or opens a cache file with the given options.
 func Open(opts Options) (Cache, error) {
+	// 64-bit required: The cross-process seqlock uses atomic 64-bit load/store
+	// on the generation counter. On 32-bit platforms, atomic 64-bit ops may not
+	// be available or may require alignment guarantees we can't ensure via mmap.
+	if !is64Bit {
+		return nil, fmt.Errorf("slotcache requires 64-bit architecture: %w", ErrIncompatible)
+	}
+
+	// Little-endian required: The file format stores all integers as little-endian.
+	// For most fields we use encoding/binary which handles conversion explicitly.
+	// However, atomic ops (generation, slot meta, revision) use native CPU byte
+	// order via unsafe pointer casts - there's no atomic little-endian load/store.
+	// On big-endian CPUs, these would misinterpret the file data.
+	if !isLittleEndian {
+		return nil, fmt.Errorf("slotcache requires little-endian CPU (x86_64, arm64): %w", ErrIncompatible)
+	}
+
 	// Validate options.
 	if opts.Path == "" {
 		return nil, fmt.Errorf("path is required: %w", ErrInvalidInput)
@@ -827,6 +781,68 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 	}
 
 	return mmapAndCreateCache(fd, size, &header, opts)
+}
+
+// validateFileLayoutFitsInt64 checks that the computed file layout for the given
+// options is representable and within implementation limits.
+//
+// This is primarily used to fail fast on unsafe configurations before attempting
+// to create/truncate/mmap a file.
+func validateFileLayoutFitsInt64(opts Options) error {
+	// Convert sizes (already validated to fit in uint32).
+	keySize32, _ := intToUint32Checked(opts.KeySize)
+	indexSize32, _ := intToUint32Checked(opts.IndexSize)
+
+	slotSize32, err := computeSlotSizeChecked(keySize32, indexSize32)
+	if err != nil {
+		return err
+	}
+
+	slotSize := uint64(slotSize32)
+
+	bucketCount := computeBucketCount(opts.SlotCapacity)
+	if bucketCount == 0 {
+		return fmt.Errorf("bucket_count overflows uint64: %w", ErrInvalidInput)
+	}
+
+	// Check slots section: header_size + slot_capacity * slot_size
+	slotsSection := opts.SlotCapacity * slotSize
+	if slotSize > 0 && slotsSection/slotSize != opts.SlotCapacity {
+		return fmt.Errorf("slots section size overflows uint64: %w", ErrInvalidInput)
+	}
+
+	bucketsOffset := uint64(slc1HeaderSize) + slotsSection
+	if bucketsOffset < uint64(slc1HeaderSize) {
+		return fmt.Errorf("buckets offset overflows uint64: %w", ErrInvalidInput)
+	}
+
+	// Check buckets section: bucket_count * 16
+	bucketsSection := bucketCount * 16
+	if bucketsSection/16 != bucketCount {
+		return fmt.Errorf("buckets section size overflows uint64: %w", ErrInvalidInput)
+	}
+
+	// Check total file size
+	fileSize := bucketsOffset + bucketsSection
+	if fileSize < bucketsOffset {
+		return fmt.Errorf("file size overflows uint64: %w", ErrInvalidInput)
+	}
+
+	if fileSize > maxCacheFileSizeBytes {
+		return fmt.Errorf("file size %d exceeds max cache file size %d: %w", fileSize, maxCacheFileSizeBytes, ErrInvalidInput)
+	}
+
+	// Must fit in int64 for ftruncate/stat and friends.
+	if _, ok := uint64ToInt64Checked(fileSize); !ok {
+		return fmt.Errorf("file size %d exceeds int64 max: %w", fileSize, ErrInvalidInput)
+	}
+
+	// Must fit in int for mmap length and Go slice sizing.
+	if _, ok := uint64ToIntChecked(fileSize); !ok {
+		return fmt.Errorf("file size %d exceeds max int %d: %w", fileSize, maxInt, ErrInvalidInput)
+	}
+
+	return nil
 }
 
 // handleCRCFailure is called when header CRC validation fails.

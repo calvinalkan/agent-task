@@ -10,6 +10,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// isLittleEndian is true if the CPU uses little-endian byte order.
+// Computed once at package init time.
+var isLittleEndian = func() bool {
+	var x uint32 = 0x04030201
+
+	return *(*byte)(unsafe.Pointer(&x)) == 0x01
+}()
+
+// is64Bit is true if the architecture has 64-bit pointers.
+// Required for atomic 64-bit operations across processes.
+var is64Bit = unsafe.Sizeof(uintptr(0)) >= 8
+
 // SLC1 file format constants.
 const (
 	// File format version.
@@ -36,7 +48,6 @@ const (
 	maxInt    = int(^uint(0) >> 1)
 	maxInt64  = int64(^uint64(0) >> 1)
 	maxUint32 = ^uint32(0)
-	maxUint64 = ^uint64(0)
 )
 
 // intToUint32Checked converts a non-negative int to uint32.

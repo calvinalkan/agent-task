@@ -61,6 +61,20 @@ If another process truncates or overwrites the cache file while it is mapped, th
 
 ---
 
+## Architecture requirements
+
+slotcache requires:
+
+- **64-bit architecture**: Atomic 64-bit operations are used for the cross-process seqlock (`generation` counter). 32-bit platforms are not supported.
+
+- **Little-endian CPU**: The file format specifies little-endian encoding. Atomic operations interpret mmap'd bytes using native CPU byte order, so big-endian platforms (s390x, ppc64) are not supported.
+
+Supported platforms: x86_64 (amd64), arm64 (Apple Silicon, Linux arm64).
+
+`Open` returns `ErrIncompatible` on unsupported platforms.
+
+---
+
 ## Platform notes
 
 ### macOS
