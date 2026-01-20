@@ -254,11 +254,22 @@ No changes to behavior-model harness unless we explicitly decide to model user h
   - Forward scans validate `key >= prevKey`; reverse scans validate `key <= prevKey`.
   - On order violation, uses `checkInvariantViolation()` to distinguish overlap from real corruption.
   - Tests added in `scan_order_validation_test.go` covering forward/reverse scans, range scans, tombstones, prefix scans, and unordered mode (no validation).
-- [ ] Phase 10.4: Ordered-mode prefix acceleration (`ScanPrefix`/`ScanMatch`) via binary search range.
+- [x] Phase 10.4: Ordered-mode prefix acceleration (`ScanPrefix`/`ScanMatch`) via binary search range.
+  - `ScanMatch` detects when prefix is at offset 0 in ordered-keys mode and uses `collectRangeEntries`.
+  - Added `prefixCanUseRangeScan()` to check acceleration eligibility.
+  - Added `prefixToRange()` to convert prefix spec to range bounds [start, end).
+  - Handles byte-aligned prefixes and bit-level prefixes.
+  - Edge case: all-0xFF prefix produces nil end bound (unbounded).
+  - Falls back to full scan for non-zero offset prefixes.
+  - Tests added in `scan_early_termination_test.go` covering:
+    - Range optimization correctness with Limit/Reverse options
+    - All-0xFF prefix edge case
+    - Bit-level prefix matching
+    - Fallback behavior for non-zero offset
 
-- [ ] Tests/benchmarks:
+- [x] Tests/benchmarks:
   - [x] Reverse scans with `Limit/Offset`.
-  - [ ] Ordered prefix/range scans match existing results.
+  - [x] Ordered prefix/range scans match existing results (via metamorphic tests + new unit tests).
   - [ ] Adjust corruption tests if order validation changes expectations.
 
 ---

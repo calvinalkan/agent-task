@@ -1235,6 +1235,9 @@ func (c *cache) ScanPrefix(prefix []byte, opts ScanOptions) ([]Entry, error) {
 }
 
 // ScanMatch returns all live entries whose keys match the given prefix spec.
+//
+// Optimization: In ordered-keys mode with prefix at offset 0, this uses
+// binary search to find the range bounds, avoiding a full scan.
 func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error) {
 	c.mu.Lock()
 
@@ -1267,6 +1270,14 @@ func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error) {
 		return nil, validationErr
 	}
 
+	// Optimization: Use binary search range scan for prefix at offset 0 in ordered-keys mode.
+	if c.prefixCanUseRangeScan(spec) {
+		start, end, _ := c.prefixToRange(spec)
+		// Note: Filter is applied by collectRangeEntries internally.
+		return c.collectRangeEntries(start, end, opts)
+	}
+
+	// Fall back to full scan with filter for non-zero offset prefixes or unordered mode.
 	return c.collectEntries(opts, func(key []byte) bool {
 		return keyMatchesPrefix(key, spec)
 	})
@@ -2541,4 +2552,152 @@ func keyMatchesPrefix(key []byte, spec Prefix) bool {
 	mask := byte(0xFF) << (8 - remBits)
 
 	return (segment[needBytes-1] & mask) == (spec.Bytes[needBytes-1] & mask)
+}
+
+// prefixCanUseRangeScan checks whether a prefix scan can be accelerated
+// using the binary search range scan path. This is possible when:
+// - The cache is in ordered-keys mode
+// - The prefix starts at offset 0 (prefix matches key start).
+func (c *cache) prefixCanUseRangeScan(spec Prefix) bool {
+	return c.orderedKeys && spec.Offset == 0
+}
+
+// prefixToRange converts a Prefix spec to range bounds [start, end) for use
+// with the range scan optimization. Both bounds are padded to keySize.
+//
+// Returns (start, end, true) if conversion succeeded.
+// Returns (nil, nil, false) if the prefix matches all keys (all 0xFF prefix).
+//
+// Precondition: spec.Offset == 0 (caller must verify prefix starts at key start).
+// Precondition: spec has already been validated by validatePrefixSpec.
+func (c *cache) prefixToRange(spec Prefix) ([]byte, []byte, bool) {
+	keySize := int(c.keySize)
+
+	if spec.Bits == 0 {
+		// Byte-aligned prefix.
+		return byteAlignedPrefixToRange(spec.Bytes, keySize)
+	}
+
+	// Bit-level prefix.
+	return bitLevelPrefixToRange(spec.Bytes, spec.Bits, keySize)
+}
+
+// byteAlignedPrefixToRange converts a byte-aligned prefix to range bounds.
+func byteAlignedPrefixToRange(prefix []byte, keySize int) ([]byte, []byte, bool) {
+	// Start bound: prefix padded with zeros.
+	start := make([]byte, keySize)
+	copy(start, prefix)
+
+	// End bound: prefix incremented, padded with zeros.
+	// If prefix is all 0xFF, there's no successor - prefix matches all keys >= start.
+	end := computePrefixSuccessor(prefix, keySize)
+
+	return start, end, true
+}
+
+// bitLevelPrefixToRange converts a bit-level prefix to range bounds.
+func bitLevelPrefixToRange(prefixBytes []byte, bits int, keySize int) ([]byte, []byte, bool) {
+	needBytes := (bits + 7) / 8
+
+	// Start bound: prefix bytes with unused bits zeroed, then padded with zeros.
+	start := make([]byte, keySize)
+	copy(start, prefixBytes)
+
+	// Mask out unused bits in the last byte.
+	remBits := bits % 8
+	if remBits != 0 {
+		mask := byte(0xFF) << (8 - remBits)
+		start[needBytes-1] &= mask
+	}
+
+	// End bound: increment at the bit level.
+	// For a 10-bit prefix matching 0b1010101111..., the successor is 0b1010110000...
+	end := computeBitPrefixSuccessor(start[:needBytes], bits, keySize)
+
+	return start, end, true
+}
+
+// computePrefixSuccessor returns the lexicographically next prefix after the given one.
+// The result is padded to keySize with zeros.
+// Returns nil if there is no successor (prefix is all 0xFF).
+func computePrefixSuccessor(prefix []byte, keySize int) []byte {
+	// Work from the end, incrementing bytes and handling carry.
+	succ := make([]byte, len(prefix))
+	copy(succ, prefix)
+
+	for i := len(succ) - 1; i >= 0; i-- {
+		if succ[i] < 0xFF {
+			succ[i]++
+
+			// Pad the result to keySize.
+			result := make([]byte, keySize)
+			copy(result, succ[:i+1])
+
+			return result
+		}
+
+		// Byte is 0xFF, need to carry.
+		succ[i] = 0x00
+	}
+
+	// All bytes were 0xFF - no successor exists.
+	return nil
+}
+
+// computeBitPrefixSuccessor computes the successor of a bit-level prefix.
+// bits is the number of significant bits in the prefix.
+// Returns nil if there is no successor (all significant bits are 1).
+func computeBitPrefixSuccessor(prefix []byte, bits int, keySize int) []byte {
+	if bits == 0 {
+		return nil
+	}
+
+	needBytes := (bits + 7) / 8
+	remBits := bits % 8
+
+	// Make a copy to work with.
+	succ := make([]byte, needBytes)
+	copy(succ, prefix)
+
+	// Mask out unused bits in the last byte.
+	if remBits != 0 {
+		mask := byte(0xFF) << (8 - remBits)
+		succ[needBytes-1] &= mask
+	}
+
+	// Compute the increment value for the least significant bit position.
+	// For a 10-bit prefix (remBits=2), we need to add 0b01000000 = 0x40.
+	// For a byte-aligned prefix (remBits=0), we add 0x01 to the last byte.
+	var (
+		incrementByte  int
+		incrementValue byte
+	)
+
+	if remBits == 0 {
+		incrementByte = needBytes - 1
+		incrementValue = 0x01
+	} else {
+		incrementByte = needBytes - 1
+		incrementValue = 0x01 << (8 - remBits)
+	}
+
+	// Add the increment and propagate carry.
+	for i := incrementByte; i >= 0; i-- {
+		newVal := uint16(succ[i]) + uint16(incrementValue)
+		succ[i] = byte(newVal & 0xFF)
+
+		if newVal <= 0xFF {
+			// No carry, done.
+			result := make([]byte, keySize)
+			copy(result, succ)
+
+			return result
+		}
+
+		// Carry to next byte.
+		incrementValue = 0x01
+	}
+
+	// All significant bits were 1 - no successor exists.
+	return nil
 }
