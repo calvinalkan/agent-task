@@ -12,7 +12,10 @@
 package slotcache_test
 
 import (
+	"encoding/binary"
 	"errors"
+	"hash/crc32"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -423,5 +426,93 @@ func Test_Open_Returns_ErrInvalidInput_When_FileSize_Exceeds_MaxCacheFileSize(t 
 	_, err := slotcache.Open(opts)
 	if !errors.Is(err, slotcache.ErrInvalidInput) {
 		t.Fatalf("Open(file size cap) error mismatch: got=%v want=%v", err, slotcache.ErrInvalidInput)
+	}
+}
+
+const (
+	// Additional header offsets used by tests.
+	offBucketCount = 0x048
+)
+
+func mutateHeaderAndFixCRC(tb testing.TB, path string, mutate func([]byte)) {
+	tb.Helper()
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		tb.Fatalf("open file: %v", err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	hdr := make([]byte, slcHeaderSize)
+
+	n, err := f.ReadAt(hdr, 0)
+	if err != nil {
+		tb.Fatalf("read header: %v", err)
+	}
+
+	if n != slcHeaderSize {
+		tb.Fatalf("read header size mismatch: got=%d want=%d", n, slcHeaderSize)
+	}
+
+	mutate(hdr)
+
+	// Recompute header CRC32-C with generation and crc fields zeroed.
+	tmp := make([]byte, slcHeaderSize)
+	copy(tmp, hdr)
+
+	for i := offGeneration; i < offGeneration+8; i++ {
+		tmp[i] = 0
+	}
+
+	for i := offHeaderCRC32C; i < offHeaderCRC32C+4; i++ {
+		tmp[i] = 0
+	}
+
+	crc := crc32.Checksum(tmp, crc32.MakeTable(crc32.Castagnoli))
+	binary.LittleEndian.PutUint32(hdr[offHeaderCRC32C:offHeaderCRC32C+4], crc)
+
+	_, err = f.WriteAt(hdr, 0)
+	if err != nil {
+		tb.Fatalf("write header: %v", err)
+	}
+
+	_ = f.Sync()
+}
+
+func Test_Open_Returns_ErrIncompatible_When_BucketCount_Is_Not_Greater_Than_SlotCapacity(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "open_bucketcount_too_small.slc")
+
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: 64,
+	}
+
+	c, err := slotcache.Open(opts)
+	if err != nil {
+		t.Fatalf("Open(create) failed: %v", err)
+	}
+
+	closeErr := c.Close()
+	if closeErr != nil {
+		t.Fatalf("Close(create) failed: %v", closeErr)
+	}
+
+	// Make the file look like a foreign-but-spec-valid SLC1 file by setting
+	// bucket_count <= slot_capacity (still a power of two). This is not safe for
+	// this implementation, so Open() must reject it as incompatible.
+	mutateHeaderAndFixCRC(t, path, func(hdr []byte) {
+		binary.LittleEndian.PutUint64(hdr[offBucketCount:offBucketCount+8], opts.SlotCapacity)
+	})
+
+	_, reopenErr := slotcache.Open(opts)
+	if !errors.Is(reopenErr, slotcache.ErrIncompatible) {
+		t.Fatalf("Open(patched) error mismatch: got=%v want=%v", reopenErr, slotcache.ErrIncompatible)
 	}
 }

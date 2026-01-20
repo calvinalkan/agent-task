@@ -369,7 +369,7 @@ type Writer interface {
 	//
 	// After Commit, further operations return [ErrClosed].
 	//
-	// Possible errors: [ErrClosed], [ErrFull], [ErrOutOfOrderInsert], [ErrWriteback].
+	// Possible errors: [ErrClosed], [ErrFull], [ErrOutOfOrderInsert], [ErrWriteback], [ErrCorrupt].
 	Commit() error
 
 	// Close releases resources and discards uncommitted changes.

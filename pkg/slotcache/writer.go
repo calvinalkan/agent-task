@@ -219,21 +219,56 @@ func (w *writer) Commit() error {
 
 	for _, op := range deletes {
 		slotID, found := w.findLiveSlotLocked(op.key)
-		if found {
-			w.deleteSlot(slotID, op.key)
-
-			deleteCount++
+		if !found {
+			continue
 		}
+
+		err := w.deleteSlot(slotID, op.key)
+		if err != nil {
+			// Leave generation odd and fail fast. The file is corrupt and must be
+			// rebuilt by the caller.
+			w.cache.registry.mu.Unlock()
+			w.closeByCommit()
+
+			return err
+		}
+
+		deleteCount++
 	}
 
 	// Apply inserts (already sorted if ordered mode).
+	filledTombstones := uint64(0)
+
+	slotID := highwater
+
 	for _, op := range inserts {
-		w.insertSlot(op.key, op.revision, op.index)
+		filled, err := w.insertSlot(slotID, op.key, op.revision, op.index)
+		if err != nil {
+			// Leave generation odd and fail fast. The file is corrupt and must be
+			// rebuilt by the caller.
+			w.cache.registry.mu.Unlock()
+			w.closeByCommit()
+
+			return err
+		}
+
+		if filled {
+			filledTombstones++
+		}
+
+		slotID++
 	}
 
 	// Update header counters.
-	liveCount := binary.LittleEndian.Uint64(w.cache.data[offLiveCount:])
-	newLiveCount := liveCount - deleteCount + uint64(len(inserts))
+	oldLiveCount := binary.LittleEndian.Uint64(w.cache.data[offLiveCount:])
+	if oldLiveCount < deleteCount {
+		w.cache.registry.mu.Unlock()
+		w.closeByCommit()
+
+		return fmt.Errorf("live_count underflow (old=%d deletes=%d): %w", oldLiveCount, deleteCount, ErrCorrupt)
+	}
+
+	newLiveCount := oldLiveCount - deleteCount + uint64(len(inserts))
 	binary.LittleEndian.PutUint64(w.cache.data[offLiveCount:], newLiveCount)
 
 	newHighwater := highwater + uint64(len(inserts))
@@ -242,11 +277,29 @@ func (w *writer) Commit() error {
 	// bucket_used must equal live_count.
 	binary.LittleEndian.PutUint64(w.cache.data[offBucketUsed:], newLiveCount)
 
+	// Update bucket_tombstones counter. Deletes add tombstones; inserts may reuse
+	// tombstones (decrement).
+	oldTombstones := binary.LittleEndian.Uint64(w.cache.data[offBucketTombstones:])
+
+	newTombstones := oldTombstones + deleteCount
+	if newTombstones < filledTombstones {
+		w.cache.registry.mu.Unlock()
+		w.closeByCommit()
+
+		return fmt.Errorf("bucket_tombstones underflow (old=%d deletes=%d filled=%d): %w",
+			oldTombstones, deleteCount, filledTombstones, ErrCorrupt)
+	}
+
+	newTombstones -= filledTombstones
+	binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], newTombstones)
+
 	// Step 3b: Check if tombstone-driven rehash is needed.
 	// Per TECHNICAL_DECISIONS.md §5: rebuild when bucket_tombstones/bucket_count > 0.25.
-	bucketTombstones := binary.LittleEndian.Uint64(w.cache.data[offBucketTombstones:])
-	if w.cache.bucketCount > 0 && float64(bucketTombstones)/float64(w.cache.bucketCount) > rehashThreshold {
+	if w.cache.bucketCount > 0 && float64(newTombstones)/float64(w.cache.bucketCount) > rehashThreshold {
 		w.rehashBuckets(newHighwater)
+
+		// Rehash eliminates all bucket tombstones.
+		binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], 0)
 	}
 
 	// Step 4: Recompute header CRC.
@@ -413,15 +466,10 @@ func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) {
 }
 
 // deleteSlot marks a slot as tombstoned and updates the bucket index.
-func (w *writer) deleteSlot(slotID uint64, key []byte) {
-	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
-
-	// Clear USED bit. Use atomic store to ensure readers see complete values.
-	atomicStoreUint64(w.cache.data[slotOffset:], 0)
-
-	w.markSlotDirty(slotID)
-
-	// Find and tombstone the bucket entry.
+func (w *writer) deleteSlot(slotID uint64, key []byte) error {
+	// Find and tombstone the bucket entry first. If the bucket entry cannot be
+	// found, the file is corrupt (a live slot must be reachable via the bucket
+	// probe sequence) and we must not silently proceed.
 	hash := fnv1a64(key)
 	mask := w.cache.bucketCount - 1
 	startIdx := hash & mask
@@ -432,8 +480,8 @@ func (w *writer) deleteSlot(slotID uint64, key []byte) {
 
 		slotPlusOne := binary.LittleEndian.Uint64(w.cache.data[bucketOffset+8:])
 		if slotPlusOne == 0 {
-			// EMPTY - shouldn't happen for existing key.
-			break
+			// Hit EMPTY: key is not findable via the probe sequence.
+			return fmt.Errorf("delete: bucket entry not found for slot_id %d: %w", slotID, ErrCorrupt)
 		}
 
 		if slotPlusOne == ^uint64(0) {
@@ -444,25 +492,58 @@ func (w *writer) deleteSlot(slotID uint64, key []byte) {
 		if slotPlusOne-1 == slotID {
 			// Found our bucket entry - tombstone it.
 			binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], ^uint64(0))
-
 			w.markBucketDirty(idx)
 
-			// Update bucket_tombstones.
-			tombstones := binary.LittleEndian.Uint64(w.cache.data[offBucketTombstones:])
-			binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], tombstones+1)
+			// Clear USED bit. Use atomic store to ensure readers see complete values.
+			slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
+			atomicStoreUint64(w.cache.data[slotOffset:], 0)
+			w.markSlotDirty(slotID)
+
+			return nil
+		}
+	}
+
+	// Probed all buckets without finding the entry.
+	return fmt.Errorf("delete: bucket entry not found for slot_id %d (no EMPTY buckets): %w", slotID, ErrCorrupt)
+}
+
+// insertSlot allocates a new slot and inserts into the bucket index.
+//
+// Returns whether the insertion filled a TOMBSTONE bucket.
+func (w *writer) insertSlot(slotID uint64, key []byte, revision int64, index []byte) (bool, error) {
+	// Find an available bucket first so we never silently "fall through" and
+	// publish a slot that isn't reachable via the hash index.
+	hash := fnv1a64(key)
+	mask := w.cache.bucketCount - 1
+	startIdx := hash & mask
+
+	var (
+		foundIdx         uint64
+		foundSlotPlusOne uint64
+		found            bool
+	)
+
+	for probeCount := range w.cache.bucketCount {
+		idx := (startIdx + probeCount) & mask
+		bucketOffset := w.cache.bucketsOffset + idx*16
+
+		slotPlusOne := binary.LittleEndian.Uint64(w.cache.data[bucketOffset+8:])
+		if slotPlusOne == 0 || slotPlusOne == ^uint64(0) {
+			foundIdx = idx
+			foundSlotPlusOne = slotPlusOne
+			found = true
 
 			break
 		}
 	}
-}
 
-// insertSlot allocates a new slot and inserts into the bucket index.
-func (w *writer) insertSlot(key []byte, revision int64, index []byte) {
-	highwater := binary.LittleEndian.Uint64(w.cache.data[offSlotHighwater:])
-	slotID := highwater
-	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
+	if !found {
+		return false, fmt.Errorf("insert: hash table has no EMPTY/TOMBSTONE buckets: %w", ErrCorrupt)
+	}
 
 	// Write slot.
+	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
+
 	// Use atomic store for meta to ensure readers see complete values.
 	atomicStoreUint64(w.cache.data[slotOffset:], slotMetaUsed) // meta = USED
 	copy(w.cache.data[slotOffset+8:slotOffset+8+uint64(w.cache.keySize)], key)
@@ -477,39 +558,15 @@ func (w *writer) insertSlot(key []byte, revision int64, index []byte) {
 		copy(w.cache.data[idxOffset:idxOffset+uint64(w.cache.indexSize)], index)
 	}
 
-	// Update highwater (done in Commit after all inserts).
-	binary.LittleEndian.PutUint64(w.cache.data[offSlotHighwater:], highwater+1)
-
 	w.markSlotDirty(slotID)
 
-	// Insert into bucket index.
-	hash := fnv1a64(key)
-	mask := w.cache.bucketCount - 1
-	startIdx := hash & mask
+	// Insert into the bucket index.
+	bucketOffset := w.cache.bucketsOffset + foundIdx*16
+	binary.LittleEndian.PutUint64(w.cache.data[bucketOffset:], hash)
+	binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], slotID+1)
+	w.markBucketDirty(foundIdx)
 
-	for probeCount := range w.cache.bucketCount {
-		idx := (startIdx + probeCount) & mask
-		bucketOffset := w.cache.bucketsOffset + idx*16
-
-		slotPlusOne := binary.LittleEndian.Uint64(w.cache.data[bucketOffset+8:])
-		if slotPlusOne == 0 || slotPlusOne == ^uint64(0) {
-			// EMPTY or TOMBSTONE - insert here.
-			binary.LittleEndian.PutUint64(w.cache.data[bucketOffset:], hash)
-			binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], slotID+1)
-
-			w.markBucketDirty(idx)
-
-			// If we filled a tombstone, decrement tombstone count.
-			if slotPlusOne == ^uint64(0) {
-				tombstones := binary.LittleEndian.Uint64(w.cache.data[offBucketTombstones:])
-				if tombstones > 0 {
-					binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], tombstones-1)
-				}
-			}
-
-			break
-		}
-	}
+	return foundSlotPlusOne == ^uint64(0), nil
 }
 
 // rehashBuckets rebuilds the bucket index by clearing all buckets and
@@ -564,9 +621,6 @@ func (w *writer) rehashBuckets(highwater uint64) {
 			// or existing entries. This loop will always find an empty bucket.
 		}
 	}
-
-	// Step 3: Update header - reset bucket_tombstones to 0.
-	binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], 0)
 
 	// Mark that all buckets were touched for WritebackSync optimization.
 	w.rehashOccurred = true

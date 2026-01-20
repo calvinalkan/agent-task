@@ -788,6 +788,14 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		return nil, fmt.Errorf("bucket_count %d is not a power of two >= 2: %w", bucketCount, ErrCorrupt)
 	}
 
+	// bucket_count must be large enough that the hash table always has at least
+	// one EMPTY bucket. This implementation requires bucket_count > slot_capacity
+	// so the table cannot become completely full even if slot_highwater reaches
+	// slot_capacity.
+	if bucketCount <= slotCapacity {
+		return nil, fmt.Errorf("bucket_count %d must be > slot_capacity %d: %w", bucketCount, slotCapacity, ErrIncompatible)
+	}
+
 	if bucketUsed+bucketTombstones >= bucketCount {
 		return nil, fmt.Errorf("bucket_used (%d) + bucket_tombstones (%d) >= bucket_count (%d): %w", bucketUsed, bucketTombstones, bucketCount, ErrCorrupt)
 	}
