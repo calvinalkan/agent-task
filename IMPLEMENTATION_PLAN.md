@@ -244,11 +244,23 @@ No changes to behavior-model harness unless we explicitly decide to model user h
 (From the approved ordered-scan optimization plan.)
 
 - [x] Phase 10.1: Add early termination for `Limit` (and `Offset+Limit`) in forward scans.
-- [ ] Phase 10.2: Implement reverse-iteration paths (avoid `slices.Reverse`) for ordered mode.
+- [x] Phase 10.2: Implement reverse-iteration paths (avoid `slices.Reverse`) for ordered mode.
+  - `doCollect()`: For ordered-keys mode with `Reverse`, uses `doCollectReverse()` to iterate slots backward directly.
+  - `doCollectRange()`: For `Reverse`, uses `doCollectRangeReverse()` with binary search to find range end.
+  - Both paths support early termination with `Offset+Limit`.
+  - Tests added in `scan_reverse_test.go` covering tombstones, filters, and edge cases.
 - [ ] Phase 10.3: Ordered-mode order validation during scans (`prevKey <= key`), surfacing `ErrCorrupt`.
 - [ ] Phase 10.4: Ordered-mode prefix acceleration (`ScanPrefix`/`ScanMatch`) via binary search range.
 
 - [ ] Tests/benchmarks:
-  - [ ] Reverse scans with `Limit/Offset`.
+  - [x] Reverse scans with `Limit/Offset`.
   - [ ] Ordered prefix/range scans match existing results.
   - [ ] Adjust corruption tests if order validation changes expectations.
+
+---
+
+## Phase 11 — Cleanup / dogfood polish
+
+- [ ] Update `pkg/slotcache/api.go` method docs to mention `ErrInvalidated` on read APIs and `Writer.Commit`.
+- [ ] Update `Cache.Invalidate` docs to mention `ErrWriteback` when sync writeback fails.
+- [ ] Decide whether `ScanRange` should check invalidation before returning `ErrUnordered`, and add a regression test if behavior is changed.

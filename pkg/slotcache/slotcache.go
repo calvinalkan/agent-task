@@ -1670,8 +1670,12 @@ func (c *cache) collectRangeEntries(startPadded, endPadded []byte, opts ScanOpti
 // Allocation optimization: Same approach as doCollect - borrow mmap slices for
 // filter callbacks, only allocate owned copies for entries that pass the filter.
 //
-// Early termination optimization: For forward scans with Limit, we stop scanning
+// Early termination optimization: For scans with Limit, we stop scanning
 // once we've collected Offset+Limit entries (enough to satisfy the request).
+//
+// Reverse iteration optimization: For reverse scans, we iterate slots in
+// reverse order directly (avoiding slices.Reverse). We use binary search to
+// find the last slot in range (key < end), then iterate backward to start.
 func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
 	highwater, hwErr := c.safeSlotHighwater(expectedGen)
 	if hwErr != nil {
@@ -1680,6 +1684,11 @@ func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte
 
 	if highwater == 0 {
 		return []Entry{}, nil
+	}
+
+	// For reverse scans, iterate backwards directly.
+	if opts.Reverse {
+		return c.doCollectRangeReverse(expectedGen, highwater, startPadded, endPadded, opts)
 	}
 
 	// Binary search to find starting position.
@@ -1693,9 +1702,8 @@ func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte
 	entries := make([]Entry, 0)
 	keyPad := (8 - (c.keySize % 8)) % 8
 
-	// Early termination: for forward scans with Limit, we only need Offset+Limit entries.
-	// For reverse scans, we need all entries since we reverse after collection.
-	canTerminateEarly := !opts.Reverse && opts.Limit > 0
+	// Early termination: we only need Offset+Limit entries.
+	canTerminateEarly := opts.Limit > 0
 
 	needCount := 0
 	if canTerminateEarly {
@@ -1776,15 +1784,148 @@ func (c *cache) doCollectRange(expectedGen uint64, startPadded, endPadded []byte
 			Index:    indexCopy,
 		})
 
-		// Early termination for forward scans with Limit.
+		// Early termination when we have enough entries.
 		if canTerminateEarly && len(entries) >= needCount {
 			break
 		}
 	}
 
-	if opts.Reverse {
-		slices.Reverse(entries)
+	start := min(opts.Offset, len(entries))
+
+	end := len(entries)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
 	}
+
+	return entries[start:end], nil
+}
+
+// binarySearchSlotLT finds the last slot index where key < target.
+// Returns the index of the last slot with key < target, or highwater if none found.
+// This is used for reverse range scans to find the starting point.
+// Must be called with registry.mu.RLock held.
+func (c *cache) binarySearchSlotLT(target []byte, highwater uint64) uint64 {
+	// Binary search for first slot with key >= target, then step back.
+	// binarySearchSlotGE returns first slot with key >= target, or highwater if all < target.
+	firstGE := c.binarySearchSlotGE(target, highwater)
+	if firstGE == 0 {
+		// All keys >= target, no slot with key < target.
+		return highwater // Signal "no valid slot"
+	}
+	// Return the slot before firstGE (last slot with key < target).
+	return firstGE - 1
+}
+
+// doCollectRangeReverse performs reverse range scan.
+// Iterates slots in reverse order directly, from the last slot in range
+// (key < end) back to the first slot in range (key >= start).
+// Must be called with registry.mu.RLock held.
+func (c *cache) doCollectRangeReverse(expectedGen uint64, highwater uint64, startPadded, endPadded []byte, opts ScanOptions) ([]Entry, error) {
+	// Find the last slot in range.
+	// For range [start, end), we want slots where start <= key < end.
+	// In reverse, we start from the last slot with key < end.
+	var lastSlot uint64
+	if endPadded != nil {
+		// Find last slot with key < endPadded.
+		lastSlot = c.binarySearchSlotLT(endPadded, highwater)
+		if lastSlot == highwater {
+			// All keys >= end, no entries in range.
+			return []Entry{}, nil
+		}
+	} else {
+		// No end bound, start from the last slot.
+		lastSlot = highwater - 1
+	}
+
+	entries := make([]Entry, 0)
+	keyPad := (8 - (c.keySize % 8)) % 8
+
+	// Early termination: we only need Offset+Limit entries.
+	canTerminateEarly := opts.Limit > 0
+
+	needCount := 0
+	if canTerminateEarly {
+		needCount = opts.Offset + opts.Limit
+	}
+
+	// Iterate from lastSlot down to 0.
+	for i := lastSlot + 1; i > 0; i-- {
+		slotID := i - 1
+		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
+		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+
+		// Early termination: if key < start, we're done (keys are sorted).
+		if startPadded != nil && bytes.Compare(key, startPadded) < 0 {
+			break
+		}
+
+		// Skip if key >= end (corruption defense: binary search may land wrong
+		// if the ordered-keys invariant is violated by file corruption).
+		if endPadded != nil && bytes.Compare(key, endPadded) >= 0 {
+			continue
+		}
+
+		// Check if live (not tombstoned).
+		meta := atomicLoadUint64(c.data[slotOffset:])
+
+		// Check for reserved bits set (corruption indicator).
+		if meta&slotMetaReservedMask != 0 {
+			return nil, c.checkInvariantViolation(expectedGen)
+		}
+
+		if (meta & slotMetaUsed) == 0 {
+			continue // tombstone
+		}
+
+		// Read entry data.
+		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
+		revision := atomicLoadInt64(c.data[revOffset:])
+
+		// Apply filter if present.
+		if opts.Filter != nil {
+			var borrowedIndex []byte
+
+			if c.indexSize > 0 {
+				idxOffset := revOffset + 8
+				borrowedIndex = c.data[idxOffset : idxOffset+uint64(c.indexSize)]
+			}
+
+			borrowed := Entry{
+				Key:      key,
+				Revision: revision,
+				Index:    borrowedIndex,
+			}
+
+			if !opts.Filter(borrowed) {
+				continue
+			}
+		}
+
+		// Create owned copies for result.
+		keyCopy := make([]byte, c.keySize)
+		copy(keyCopy, key)
+
+		var indexCopy []byte
+
+		if c.indexSize > 0 {
+			idxOffset := revOffset + 8
+			indexCopy = make([]byte, c.indexSize)
+			copy(indexCopy, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
+		}
+
+		entries = append(entries, Entry{
+			Key:      keyCopy,
+			Revision: revision,
+			Index:    indexCopy,
+		})
+
+		// Early termination when we have enough entries.
+		if canTerminateEarly && len(entries) >= needCount {
+			break
+		}
+	}
+
+	// No reversal needed - entries are already in reverse order.
 
 	start := min(opts.Offset, len(entries))
 
@@ -2018,12 +2159,21 @@ func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Ent
 // 2. Only allocating owned copies for entries that pass the filter
 // 3. Skipping borrowed entry construction entirely when no filter is set.
 //
-// Early termination optimization: For forward scans with Limit, we stop scanning
+// Early termination optimization: For scans with Limit, we stop scanning
 // once we've collected Offset+Limit entries (enough to satisfy the request).
+//
+// Reverse iteration optimization: For ordered-keys mode with reverse scans,
+// we iterate slots in reverse order directly (avoiding slices.Reverse).
 func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
 	highwater, hwErr := c.safeSlotHighwater(expectedGen)
 	if hwErr != nil {
 		return nil, hwErr
+	}
+
+	// For ordered-keys mode with reverse scans, iterate backwards directly.
+	// This avoids collecting all entries and then reversing.
+	if opts.Reverse && c.orderedKeys {
+		return c.doCollectReverse(expectedGen, highwater, opts, match)
 	}
 
 	entries := make([]Entry, 0)
@@ -2031,7 +2181,7 @@ func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byt
 	keyPad := (8 - (c.keySize % 8)) % 8
 
 	// Early termination: for forward scans with Limit, we only need Offset+Limit entries.
-	// For reverse scans, we need all entries since we reverse after collection.
+	// For reverse scans in unordered mode, we need all entries since we reverse after collection.
 	canTerminateEarly := !opts.Reverse && opts.Limit > 0
 
 	needCount := 0
@@ -2111,8 +2261,107 @@ func (c *cache) doCollect(expectedGen uint64, opts ScanOptions, match func([]byt
 	}
 
 	if opts.Reverse {
+		// Unordered mode: must reverse after collection.
 		slices.Reverse(entries)
 	}
+
+	start := min(opts.Offset, len(entries))
+
+	end := len(entries)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
+	}
+
+	return entries[start:end], nil
+}
+
+// doCollectReverse performs reverse slot scan for ordered-keys mode.
+// Iterates slots in reverse order directly, avoiding the need to collect all
+// entries and then reverse. This enables early termination for Limit.
+// Must be called with registry.mu.RLock held.
+func (c *cache) doCollectReverse(expectedGen uint64, highwater uint64, opts ScanOptions, match func([]byte) bool) ([]Entry, error) {
+	entries := make([]Entry, 0)
+
+	keyPad := (8 - (c.keySize % 8)) % 8
+
+	// Early termination: we only need Offset+Limit entries.
+	canTerminateEarly := opts.Limit > 0
+
+	needCount := 0
+	if canTerminateEarly {
+		needCount = opts.Offset + opts.Limit
+	}
+
+	// Iterate from highwater-1 down to 0.
+	for i := highwater; i > 0; i-- {
+		slotID := i - 1
+		slotOffset := c.slotsOffset + slotID*uint64(c.slotSize)
+
+		// Use atomic load for meta to avoid torn reads during concurrent writes.
+		meta := atomicLoadUint64(c.data[slotOffset:])
+
+		// Check for reserved bits set (corruption indicator).
+		if meta&slotMetaReservedMask != 0 {
+			return nil, c.checkInvariantViolation(expectedGen)
+		}
+
+		if (meta & slotMetaUsed) == 0 {
+			continue // tombstone
+		}
+
+		key := c.data[slotOffset+8 : slotOffset+8+uint64(c.keySize)]
+		if !match(key) {
+			continue
+		}
+
+		revOffset := slotOffset + 8 + uint64(c.keySize) + uint64(keyPad)
+		revision := atomicLoadInt64(c.data[revOffset:])
+
+		// Apply filter if present.
+		if opts.Filter != nil {
+			var borrowedIndex []byte
+
+			if c.indexSize > 0 {
+				idxOffset := revOffset + 8
+				borrowedIndex = c.data[idxOffset : idxOffset+uint64(c.indexSize)]
+			}
+
+			borrowed := Entry{
+				Key:      key,
+				Revision: revision,
+				Index:    borrowedIndex,
+			}
+
+			if !opts.Filter(borrowed) {
+				continue
+			}
+		}
+
+		// Create owned copies for result.
+		keyCopy := make([]byte, c.keySize)
+		copy(keyCopy, key)
+
+		var indexCopy []byte
+
+		if c.indexSize > 0 {
+			idxOffset := revOffset + 8
+			indexCopy = make([]byte, c.indexSize)
+			copy(indexCopy, c.data[idxOffset:idxOffset+uint64(c.indexSize)])
+		}
+
+		entries = append(entries, Entry{
+			Key:      keyCopy,
+			Revision: revision,
+			Index:    indexCopy,
+		})
+
+		// Early termination when we have enough entries.
+		if canTerminateEarly && len(entries) >= needCount {
+			break
+		}
+	}
+
+	// No reversal needed - entries are already in reverse order.
 
 	start := min(opts.Offset, len(entries))
 
