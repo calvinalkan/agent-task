@@ -482,6 +482,85 @@ Closes the cache:
 - Releases any held resources
 - After `Close`, operations on this Cache MUST return `ErrClosed`
 
+### Invalidate
+
+`Invalidate()` marks the cache as permanently unusable.
+
+#### Why invalidation exists
+
+On Unix-like systems, `mmap()` maps a file's **inode**, not its path. This creates a subtle problem when cache files are replaced:
+
+1. Process A opens and mmaps `/var/cache/foo.cache` (inode 12345)
+2. Process B decides the cache is stale and rebuilds it:
+   - Deletes `/var/cache/foo.cache`
+   - Creates a new `/var/cache/foo.cache` (inode 67890)
+3. Process A still has inode 12345 mapped — it sees the **old** data
+4. Process A has no way to detect that the file at the path has changed
+
+This is a fundamental Unix behavior: the old inode remains valid (and mapped) until all file descriptors and mappings are closed, even after `unlink()`. Process A would continue reading stale data indefinitely.
+
+**Invalidation solves this** by providing an in-band signal:
+
+- Before rebuilding, Process B calls `Invalidate()` on the existing cache
+- Process A's next read operation sees `state == STATE_INVALIDATED` and returns `ErrInvalidated`
+- Process A knows to close its handle and reopen (getting the new inode)
+
+Without invalidation, the only alternatives are:
+- **Polling stat()**: Check if inode changed — adds syscall overhead to every read
+- **External coordination**: Out-of-band signaling (pipes, sockets, etc.) — complex
+- **Ignoring the problem**: Accept that long-lived processes may read stale data
+
+Invalidation is the lightweight, in-band solution that leverages the existing seqlock mechanism.
+
+**Preconditions:**
+- No writer may be active (return `ErrBusy` if a writer is active)
+- The cache must not be closed (return `ErrClosed`)
+
+**Behavior:**
+
+1. Acquire the same exclusivity mechanisms as a writer (in-process guard + optional lock file)
+2. Publish the invalidated state atomically:
+   - Set `generation` to a new odd value
+   - Set `state = STATE_INVALIDATED`
+   - Recompute and store `header_crc32c`
+   - Set `generation` to a new even value
+3. If `WritebackSync` mode is enabled, perform msync barriers as with commit
+4. Release exclusivity
+
+**Post-conditions:**
+- The cache file's `state` field is `STATE_INVALIDATED`
+- All subsequent operations on this Cache instance return `ErrInvalidated`
+- Other Cache instances observing the file (same or different process) will see `ErrInvalidated` on their next read operation
+- `Open()` on the file returns `ErrInvalidated`
+
+**Idempotence:** Invalidating an already-invalidated cache returns nil (success).
+
+**Errors:** `ErrClosed`, `ErrBusy`, `ErrWriteback` (msync failed in Sync mode)
+
+### Generation
+
+`Generation()` returns the current seqlock generation counter for cheap change detection.
+
+**Behavior:**
+- Use the seqlock retry pattern to read a stable even generation
+- If `state == STATE_INVALIDATED` under stable generation: return `ErrInvalidated`
+- Return the stable even generation value
+
+**Use case:** Callers can cache results and use `Generation()` to detect whether the cache has changed since the last read, avoiding re-scans when no modifications occurred.
+
+**Errors:** `ErrClosed`, `ErrBusy`, `ErrInvalidated`
+
+### UserHeader
+
+`UserHeader()` reads the caller-owned header metadata (`user_flags` and `user_data`).
+
+**Behavior:**
+- Use the seqlock retry pattern to read a stable snapshot
+- If `state == STATE_INVALIDATED` under stable generation: return `ErrInvalidated`
+- Return copied `user_flags` (uint64) and `user_data` ([64]byte)
+
+**Errors:** `ErrClosed`, `ErrBusy`, `ErrInvalidated`
+
 ---
 
 ## Required operations
@@ -491,17 +570,22 @@ Implementations MUST provide the following operations:
 **Lifecycle:**
 - Open (create or open existing cache file)
 - Close (release resources)
+- Invalidate (mark cache as permanently unusable)
 
 **Read operations:**
 - Get (point lookup by exact key)
 - Scan (iterate live slots with caller-provided predicate)
 - Prefix match (scan with bit/byte prefix filter; see Prefix matching)
 - Len (return count of live entries)
+- Generation (return current seqlock generation for cheap change detection)
+- UserHeader (read caller-owned header metadata)
 
 **Write operations:**
 - BeginWrite (start write session, acquire lock)
 - Put (stage upsert)
 - Delete (stage deletion)
+- SetUserHeaderFlags (stage user_flags update)
+- SetUserHeaderData (stage user_data update)
 - Commit (publish buffered changes)
 - Close (release writer, discard uncommitted changes)
 
@@ -667,6 +751,39 @@ Consistency and `ErrBusy` behavior follow **Scan consistency modes (streaming vs
 
 **Errors:** `ErrClosed`, `ErrInvalidInput` (key wrong length)
 
+### SetUserHeaderFlags
+
+`SetUserHeaderFlags(flags uint64)` stages an update to the caller-owned `user_flags` header field.
+
+- Changes are buffered and published atomically with `Commit`
+- Only the flags field is marked dirty; existing `user_data` is preserved
+- If the cache is invalidated, returns `ErrInvalidated`
+
+**Errors:** `ErrClosed`, `ErrInvalidated`
+
+### SetUserHeaderData
+
+`SetUserHeaderData(data [64]byte)` stages an update to the caller-owned `user_data` header field.
+
+- Changes are buffered and published atomically with `Commit`
+- Only the data field is marked dirty; existing `user_flags` is preserved
+- If the cache is invalidated, returns `ErrInvalidated`
+
+**Errors:** `ErrClosed`, `ErrInvalidated`
+
+### User header commit semantics
+
+User header changes follow the same atomicity rules as slot operations:
+
+- If `Commit` fails (e.g., `ErrFull`, `ErrOutOfOrderInsert`), no user header changes are published
+- If `Writer.Close()` is called without `Commit`, user header changes are discarded
+- User header updates are included in the CRC recomputation at commit time
+
+**Field-level preservation:** When committing:
+- If only `user_flags` is dirty, the existing `user_data` bytes are preserved
+- If only `user_data` is dirty, the existing `user_flags` value is preserved
+- If both are dirty, both new values are written
+
 ### Delete and the hash index
 
 Even with slot tombstones (`meta` USED=0), the hash index entry MUST be removed (converted to a hash-table TOMBSTONE):
@@ -742,7 +859,14 @@ Each check specifies which error to return on failure.
 | `header_size` ≠ 256 | `ErrIncompatible` |
 | `hash_alg` not supported | `ErrIncompatible` |
 | `flags` has unknown bits | `ErrIncompatible` |
-| Reserved bytes non-zero | `ErrIncompatible` |
+| `state` not in {0, 1} | `ErrIncompatible` |
+| Reserved bytes (0x0C0..0x0FF) non-zero | `ErrIncompatible` |
+
+**State check (ErrInvalidated — cache has been invalidated):**
+
+| Check | Error |
+|-------|-------|
+| `state == STATE_INVALIDATED` (under stable even generation) | `ErrInvalidated` |
 
 **Configuration match (ErrIncompatible — file doesn't match caller's expectations):**
 
@@ -786,6 +910,7 @@ All exported errors are **classification codes**. Implementations MAY wrap them 
 |-------|------|----------|
 | `ErrCorrupt` | Structural corruption detected | Delete and recreate |
 | `ErrIncompatible` | Format/config mismatch | Delete and recreate |
+| `ErrInvalidated` | Cache has been explicitly invalidated | Delete and recreate |
 | `ErrBusy` | Writer active or lock contention | Retry later |
 | `ErrFull` | Slot capacity exhausted | Recreate with larger capacity |
 | `ErrClosed` | Cache or Writer already closed | Fix caller code |

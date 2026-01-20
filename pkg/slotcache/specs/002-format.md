@@ -48,8 +48,10 @@ Offsets are bytes from file start.
 0x068: buckets_offset u64
 
 0x070: header_crc32c u32     (CRC32-C, Castagnoli)
-0x074: reserved_u32 u32      (MUST be 0)
-0x078: reserved bytes...     (MUST be 0 through 0x0FF)
+0x074: state u32             (slotcache-owned state; see State field)
+0x078: user_flags u64        (caller-owned; opaque)
+0x080: user_data[64]byte     (caller-owned; opaque)
+0x0C0: reserved[64]byte      (MUST be 0 through 0x0FF)
 ```
 
 ### Value constraints
@@ -83,6 +85,34 @@ Defined flags:
   - Tombstone key bytes MUST be preserved (delete MUST NOT overwrite key bytes)
   - Ordered cursor APIs are enabled
 
+### State field
+
+`state` is a slotcache-owned field indicating the cache's lifecycle state.
+
+Defined values:
+
+- `STATE_NORMAL = 0` — cache is operational
+- `STATE_INVALIDATED = 1` — cache has been explicitly invalidated (terminal)
+
+If `state` contains an unknown value (not 0 or 1), implementations MUST return `ErrIncompatible`.
+
+If `state == STATE_INVALIDATED` under a stable even generation, implementations MUST return `ErrInvalidated`.
+
+Invalidation is a terminal state. Once invalidated, the cache file cannot be used; callers should delete and recreate.
+
+**Why invalidation exists:** On Unix, `mmap()` maps an inode, not a path. If a process has a cache file mapped and another process deletes/rebuilds it at the same path, the first process continues seeing the old (now-unlinked) inode's data. Invalidation provides an in-band signal that the cache is stale, allowing the first process to detect this and reopen. See `003-semantics.md § Invalidate` for details.
+
+### User header fields
+
+`user_flags` and `user_data` are caller-owned regions for application-specific metadata.
+
+- slotcache stores these bytes verbatim and does not interpret them
+- Both fields default to zero on creation
+- Writers MAY update these fields during a write session; changes are published atomically with the commit
+- Readers observe a stable snapshot of user header fields (seqlock protected)
+
+**Typical use:** Store application-level metadata that should persist with the cache (e.g., source data version, build timestamp, feature flags).
+
 ### Header CRC rules
 
 `header_crc32c` MUST be computed as CRC32-C (Castagnoli) over the 256-byte header with:
@@ -92,7 +122,13 @@ Defined flags:
 
 This allows `generation` to change for seqlock publish without recomputing CRC for transient values.
 
-If reserved bytes are non-zero, implementations MUST return `ErrIncompatible`.
+The CRC covers all header bytes including `state`, `user_flags`, and `user_data`. Changes to any of these fields require CRC recomputation during commit.
+
+### Reserved bytes
+
+Reserved bytes at `0x0C0..0x0FF` (64 bytes) are held for future v1 extensions.
+
+If any reserved byte is non-zero, implementations MUST return `ErrIncompatible`.
 
 ### Header counter invariants
 

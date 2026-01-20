@@ -41,24 +41,24 @@ CRC rules remain unchanged:
 
 ---
 
-## Phase 1 — Specification updates (format + semantics)
+## Phase 1 — Specification updates (format + semantics) ✓
 
-- [ ] Update `pkg/slotcache/specs/002-format.md`:
-  - [ ] Replace `reserved_u32` at `0x074` with `state u32` + document values.
-  - [ ] Replace “reserved bytes 0x078..0x0FF MUST be 0” with:
+- [x] Update `pkg/slotcache/specs/002-format.md`:
+  - [x] Replace `reserved_u32` at `0x074` with `state u32` + document values.
+  - [x] Replace “reserved bytes 0x078..0x0FF MUST be 0” with:
     - `user_flags u64` at `0x078`
     - `user_data[64]byte` at `0x080`
     - `reserved[64]byte` at `0x0C0..0x0FF` MUST be 0
-  - [ ] Clarify that CRC covers user header bytes.
+  - [x] Clarify that CRC covers user header bytes.
 
-- [ ] Update `pkg/slotcache/specs/003-semantics.md`:
-  - [ ] Add `ErrInvalidated` to the error model + recovery guidance.
-  - [ ] Specify `Cache.Invalidate()` behavior and publish protocol (odd/even generation + CRC update + optional msync barriers).
-  - [ ] Specify user header semantics:
+- [x] Update `pkg/slotcache/specs/003-semantics.md`:
+  - [x] Add `ErrInvalidated` to the error model + recovery guidance.
+  - [x] Specify `Cache.Invalidate()` behavior and publish protocol (odd/even generation + CRC update + optional msync barriers).
+  - [x] Specify user header semantics:
     - stable snapshot reads (seqlock correct-or-retry)
     - writes published via Writer commit (field-level last-write-wins)
     - untouched field preservation.
-  - [ ] Document `Cache.Generation()` semantics (stable even snapshot, ErrBusy on contention, ErrInvalidated/ErrClosed) and add it to the required operations list.
+  - [x] Document `Cache.Generation()` semantics (stable even snapshot, ErrBusy on contention, ErrInvalidated/ErrClosed) and add it to the required operations list.
 
 (Keep `pkg/slotcache/specs/README.md` as optional follow-up: brief mention in quick reference.)
 
