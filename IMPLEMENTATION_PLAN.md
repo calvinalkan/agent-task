@@ -278,4 +278,7 @@ No changes to behavior-model harness unless we explicitly decide to model user h
 
 - [x] Update `pkg/slotcache/api.go` method docs to mention `ErrInvalidated` on read APIs and `Writer.Commit`.
 - [x] Update `Cache.Invalidate` docs to mention `ErrWriteback` when sync writeback fails.
-- [ ] Decide whether `ScanRange` should check invalidation before returning `ErrUnordered`, and add a regression test if behavior is changed.
+- [x] Decide whether `ScanRange` should check invalidation before returning `ErrUnordered`, and add a regression test if behavior is changed.
+  - Decision: Yes, check invalidation first. ErrInvalidated is terminal (cache unusable), while ErrUnordered suggests a config fix. Returning ErrInvalidated first gives callers the most actionable error.
+  - Added early invalidation check in `ScanRange` before `ErrUnordered` check.
+  - Added regression test: `Test_ScanRange_Returns_ErrInvalidated_When_Cache_Is_Invalidated_Without_OrderedKeys`.

@@ -1295,6 +1295,16 @@ func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) 
 		return nil, ErrClosed
 	}
 
+	// Check for invalidation early, before ErrUnordered.
+	// Per spec: "All subsequent operations return ErrInvalidated" once invalidated.
+	// This is a fast-path check; collectRangeEntries will also check under seqlock.
+	state := binary.LittleEndian.Uint32(c.data[offState:])
+	if state == stateInvalidated {
+		c.mu.Unlock()
+
+		return nil, ErrInvalidated
+	}
+
 	c.mu.Unlock()
 
 	if !c.orderedKeys {

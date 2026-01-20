@@ -95,6 +95,59 @@ func Test_Invalidate_Returns_ErrInvalidated_When_Handle_Is_Used_After_Invalidati
 	}
 }
 
+// Test_ScanRange_Returns_ErrInvalidated_When_Cache_Is_Invalidated_Without_OrderedKeys verifies
+// that ScanRange returns ErrInvalidated before ErrUnordered when called on an invalidated
+// cache that was not created with OrderedKeys mode.
+//
+// Why this matters: ErrInvalidated is terminal — the cache is permanently unusable
+// and must be deleted. ErrUnordered suggests a configuration fix. We don't want
+// callers to think "just enable OrderedKeys" when the real issue is invalidation.
+func Test_ScanRange_Returns_ErrInvalidated_When_Cache_Is_Invalidated_Without_OrderedKeys(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "scanrange_invalidated_before_unordered.slc")
+
+	// Create cache WITHOUT OrderedKeys.
+	opts := slotcache.Options{
+		Path:         path,
+		KeySize:      8,
+		IndexSize:    4,
+		UserVersion:  1,
+		SlotCapacity: 64,
+		OrderedKeys:  false, // explicitly disabled
+	}
+
+	c, openErr := slotcache.Open(opts)
+	if openErr != nil {
+		t.Fatalf("Open failed: %v", openErr)
+	}
+	defer c.Close()
+
+	// Verify ScanRange returns ErrUnordered on non-invalidated cache.
+	_, unorderedErr := c.ScanRange(nil, nil, slotcache.ScanOptions{})
+	if !errors.Is(unorderedErr, slotcache.ErrUnordered) {
+		t.Fatalf("ScanRange on non-invalidated cache: got %v, want ErrUnordered", unorderedErr)
+	}
+
+	// Invalidate the cache.
+	invErr := c.Invalidate()
+	if invErr != nil {
+		t.Fatalf("Invalidate failed: %v", invErr)
+	}
+
+	// ScanRange should now return ErrInvalidated, not ErrUnordered.
+	_, scanRangeErr := c.ScanRange(nil, nil, slotcache.ScanOptions{})
+	if !errors.Is(scanRangeErr, slotcache.ErrInvalidated) {
+		t.Errorf("ScanRange after invalidate: got %v, want ErrInvalidated", scanRangeErr)
+	}
+
+	// Double-check it's specifically ErrInvalidated, not ErrUnordered.
+	if errors.Is(scanRangeErr, slotcache.ErrUnordered) {
+		t.Error("ScanRange after invalidate returned ErrUnordered; ErrInvalidated should take priority")
+	}
+}
+
 func Test_Invalidate_Returns_ErrInvalidated_When_Read_Via_Another_Handle(t *testing.T) {
 	t.Parallel()
 
