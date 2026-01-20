@@ -221,19 +221,19 @@ Reserved tail:
 
 ---
 
-## Phase 9 — Spec fuzz enhancements (format fuzz)
+## Phase 9 — Spec fuzz enhancements (format fuzz) ✓
 
 Files:
 - `pkg/slotcache/spec_fuzz_test.go`
 - `pkg/slotcache/spec_fuzz_options_test.go`
 - `pkg/slotcache/near_cap_fuzz_test.go`
 
-- [ ] Add fuzzer actions that exercise:
-  - [ ] `Writer.SetUserHeaderFlags` / `Writer.SetUserHeaderData`
-  - [ ] `Cache.Invalidate()` when no writer is active
+- [x] Add fuzzer actions that exercise:
+  - [x] `Writer.SetUserHeaderFlags` / `Writer.SetUserHeaderData`
+  - [x] `Cache.Invalidate()` when no writer is active
 
-- [ ] After commits/aborts/invalidation, keep validating on-disk format via `spec_oracle`.
-- [ ] After invalidation, reset the run (e.g. delete file + recreate) so fuzz iterations don’t get stuck in terminal `ErrInvalidated` state.
+- [x] After commits/aborts/invalidation, keep validating on-disk format via `spec_oracle`.
+- [x] After invalidation, reset the run (e.g. delete file + recreate) so fuzz iterations don’t get stuck in terminal `ErrInvalidated` state.
 
 No changes to behavior-model harness unless we explicitly decide to model user header behavior later.
 

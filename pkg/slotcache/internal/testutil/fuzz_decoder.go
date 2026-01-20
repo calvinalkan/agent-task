@@ -70,6 +70,17 @@ func (decoder *FuzzDecoder) NextInt64() int64 {
 	return getInt64LE(raw[:])
 }
 
+// NextUint64 reads the next uint64 value (little-endian, 8 bytes).
+// If the stream ends, missing bytes are treated as 0.
+func (decoder *FuzzDecoder) NextUint64() uint64 {
+	var raw [8]byte
+	for index := range raw {
+		raw[index] = decoder.NextByte()
+	}
+
+	return binary.LittleEndian.Uint64(raw[:])
+}
+
 // getInt64LE reads an int64 from buf in little-endian byte order.
 // This avoids uint64->int64 conversion that binary.LittleEndian.Uint64 returns.
 func getInt64LE(buf []byte) int64 {
