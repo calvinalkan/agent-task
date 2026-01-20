@@ -116,18 +116,18 @@ Files: `pkg/slotcache/format.go`, `pkg/slotcache/slotcache.go`
 
 ---
 
-## Phase 4 — Implement read APIs (user header + generation)
+## Phase 4 — Implement read APIs (user header + generation) ✓
 
 File: `pkg/slotcache/slotcache.go`
 
-- [ ] Implement `Cache.UserHeader()`:
-  - [ ] Use existing seqlock retry pattern (bounded retries + backoff).
-  - [ ] Under stable `generation`, if `state==INVALIDATED`: return `ErrInvalidated`.
-  - [ ] Return copied bytes (`[64]byte` copy).
+- [x] Implement `Cache.UserHeader()`:
+  - [x] Use existing seqlock retry pattern (bounded retries + backoff).
+  - [x] Under stable `generation`, if `state==INVALIDATED`: return `ErrInvalidated`.
+  - [x] Return copied bytes (`[64]byte` copy).
 
-- [ ] Implement `Cache.Generation()`:
-  - [ ] Use seqlock retry pattern (read g1 even → state check → read g2).
-  - [ ] Return `ErrInvalidated` on invalidated state; `ErrBusy` on repeated odd/changed generation.
+- [x] Implement `Cache.Generation()`:
+  - [x] Use seqlock retry pattern (read g1 even → state check → read g2).
+  - [x] Return `ErrInvalidated` on invalidated state; `ErrBusy` on repeated odd/changed generation.
 
 ---
 

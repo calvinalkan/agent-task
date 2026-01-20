@@ -1352,13 +1352,105 @@ func (*cache) Invalidate() error {
 }
 
 // UserHeader returns the caller-owned header metadata.
-func (*cache) UserHeader() (UserHeader, error) {
-	panic("slotcache: UserHeader not yet implemented")
+//
+// Uses the seqlock retry pattern to read a stable snapshot of the user header.
+// If the cache is invalidated, returns ErrInvalidated.
+func (c *cache) UserHeader() (UserHeader, error) {
+	c.mu.Lock()
+
+	if c.isClosed {
+		c.mu.Unlock()
+
+		return UserHeader{}, ErrClosed
+	}
+
+	c.mu.Unlock()
+
+	for attempt := range readMaxRetries {
+		readBackoff(attempt)
+
+		c.registry.mu.RLock()
+
+		g1 := c.readGeneration()
+		if g1%2 == 1 {
+			c.registry.mu.RUnlock()
+
+			continue
+		}
+
+		// Check state under stable generation.
+		state := binary.LittleEndian.Uint32(c.data[offState:])
+		if state == stateInvalidated {
+			c.registry.mu.RUnlock()
+
+			return UserHeader{}, ErrInvalidated
+		}
+
+		// Read user header fields.
+		userFlags := binary.LittleEndian.Uint64(c.data[offUserFlags:])
+
+		var userData [UserDataSize]byte
+
+		copy(userData[:], c.data[offUserData:offUserData+UserDataSize])
+
+		g2 := c.readGeneration()
+		c.registry.mu.RUnlock()
+
+		if g1 == g2 {
+			return UserHeader{
+				Flags: userFlags,
+				Data:  userData,
+			}, nil
+		}
+	}
+
+	return UserHeader{}, ErrBusy
 }
 
 // Generation returns the current generation counter.
-func (*cache) Generation() (uint64, error) {
-	panic("slotcache: Generation not yet implemented")
+//
+// Uses the seqlock retry pattern to read a stable even generation value.
+// If the cache is invalidated, returns ErrInvalidated.
+func (c *cache) Generation() (uint64, error) {
+	c.mu.Lock()
+
+	if c.isClosed {
+		c.mu.Unlock()
+
+		return 0, ErrClosed
+	}
+
+	c.mu.Unlock()
+
+	for attempt := range readMaxRetries {
+		readBackoff(attempt)
+
+		c.registry.mu.RLock()
+
+		g1 := c.readGeneration()
+		if g1%2 == 1 {
+			c.registry.mu.RUnlock()
+
+			continue
+		}
+
+		// Check state under stable generation.
+		state := binary.LittleEndian.Uint32(c.data[offState:])
+		if state == stateInvalidated {
+			c.registry.mu.RUnlock()
+
+			return 0, ErrInvalidated
+		}
+
+		g2 := c.readGeneration()
+		c.registry.mu.RUnlock()
+
+		if g1 == g2 {
+			return g1, nil
+		}
+	}
+
+	return 0, ErrBusy
 }
 
 // binarySearchSlotGE finds the first slot index where key >= target.
