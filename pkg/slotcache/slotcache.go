@@ -1084,6 +1084,14 @@ func (c *cache) Len() (int, error) {
 			continue
 		}
 
+		// Check for invalidation under stable generation.
+		state := binary.LittleEndian.Uint32(c.data[offState:])
+		if state == stateInvalidated {
+			c.registry.mu.RUnlock()
+
+			return 0, ErrInvalidated
+		}
+
 		highwater, hwErr := c.safeSlotHighwater(g1)
 		if hwErr != nil {
 			c.registry.mu.RUnlock()
@@ -1156,6 +1164,14 @@ func (c *cache) Get(key []byte) (Entry, bool, error) {
 			c.registry.mu.RUnlock()
 
 			continue
+		}
+
+		// Check for invalidation under stable generation.
+		state := binary.LittleEndian.Uint32(c.data[offState:])
+		if state == stateInvalidated {
+			c.registry.mu.RUnlock()
+
+			return Entry{}, false, ErrInvalidated
 		}
 
 		entry, found, err := c.lookupKey(key, g1)
@@ -1307,6 +1323,15 @@ func (c *cache) BeginWrite() (Writer, error) {
 		return nil, ErrClosed
 	}
 
+	// Check for invalidation before acquiring writer.
+	// Note: This reads without the seqlock since we're about to acquire
+	// exclusive access anyway. A concurrent invalidation would be caught
+	// by the in-process writer guard.
+	state := binary.LittleEndian.Uint32(c.data[offState:])
+	if state == stateInvalidated {
+		return nil, ErrInvalidated
+	}
+
 	// Check in-process writer guard.
 	c.registry.mu.Lock()
 
@@ -1347,8 +1372,130 @@ func (c *cache) BeginWrite() (Writer, error) {
 }
 
 // Invalidate marks the cache as permanently unusable.
-func (*cache) Invalidate() error {
-	panic("slotcache: Invalidate not yet implemented")
+//
+// After invalidation, all operations on this handle and any future Open()
+// calls on the same file return ErrInvalidated. Invalidation is atomic and
+// durable (in WritebackSync mode).
+//
+// Calling Invalidate on an already-invalidated cache is a no-op and returns nil.
+func (c *cache) Invalidate() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.isClosed {
+		return ErrClosed
+	}
+
+	// Check for active in-process writer.
+	c.registry.mu.Lock()
+
+	if c.registry.writerActive {
+		c.registry.mu.Unlock()
+
+		return ErrBusy
+	}
+
+	// Acquire in-process guard (same as BeginWrite).
+	c.registry.writerActive = true
+	c.registry.mu.Unlock()
+
+	// Acquire cross-process lock if enabled.
+	var lock *fs.Lock
+
+	if !c.disableLocking {
+		var err error
+
+		lock, err = acquireWriterLock(c.path)
+		if err != nil {
+			// Release in-process guard on failure.
+			c.registry.mu.Lock()
+			c.registry.writerActive = false
+			c.registry.mu.Unlock()
+
+			return err
+		}
+	}
+
+	// Perform invalidation under the registry lock.
+	c.registry.mu.Lock()
+
+	// Check if already invalidated (idempotent).
+	state := binary.LittleEndian.Uint32(c.data[offState:])
+	if state == stateInvalidated {
+		c.registry.mu.Unlock()
+
+		// Release resources.
+		releaseWriterLock(lock)
+		c.registry.mu.Lock()
+		c.registry.writerActive = false
+		c.registry.mu.Unlock()
+
+		return nil
+	}
+
+	syncMode := c.writeback == WritebackSync
+
+	var msyncFailed bool
+
+	// Step 1: Publish odd generation.
+	oldGen := c.readGeneration()
+	newOddGen := oldGen + 1
+	atomicStoreUint64(c.data[offGeneration:], newOddGen)
+
+	// Step 2 (WritebackSync): msync header to ensure odd generation is on disk.
+	if syncMode {
+		err := msyncRange(c.data, 0, slc1HeaderSize)
+		if err != nil {
+			msyncFailed = true
+		}
+	}
+
+	// Step 3: Set state=INVALIDATED.
+	binary.LittleEndian.PutUint32(c.data[offState:], stateInvalidated)
+
+	// Step 4: Recompute header CRC.
+	crc := computeHeaderCRC(c.data[:slc1HeaderSize])
+	binary.LittleEndian.PutUint32(c.data[offHeaderCRC32C:], crc)
+
+	// Step 5 (WritebackSync): msync header to ensure state + CRC are on disk.
+	if syncMode {
+		err := msyncRange(c.data, 0, slc1HeaderSize)
+		if err != nil {
+			msyncFailed = true
+		}
+	}
+
+	// Step 6: Publish even generation.
+	newEvenGen := newOddGen + 1
+	atomicStoreUint64(c.data[offGeneration:], newEvenGen)
+
+	// Step 7 (WritebackSync): msync header to ensure even generation is on disk.
+	if syncMode {
+		err := msyncRange(c.data, 0, slc1HeaderSize)
+		if err != nil {
+			msyncFailed = true
+		}
+	}
+
+	c.registry.mu.Unlock()
+
+	// Release cross-process lock.
+	releaseWriterLock(lock)
+
+	// Release in-process guard.
+	c.registry.mu.Lock()
+	c.registry.writerActive = false
+	c.registry.mu.Unlock()
+
+	// Per spec: ErrWriteback indicates changes are visible but durability
+	// is not guaranteed. We still return nil for the invalidation itself
+	// since the state change is visible. The caller can check durability
+	// separately if needed.
+	if msyncFailed {
+		return ErrWriteback
+	}
+
+	return nil
 }
 
 // UserHeader returns the caller-owned header metadata.
@@ -1489,6 +1636,14 @@ func (c *cache) collectRangeEntries(startPadded, endPadded []byte, opts ScanOpti
 			c.registry.mu.RUnlock()
 
 			continue
+		}
+
+		// Check for invalidation under stable generation.
+		state := binary.LittleEndian.Uint32(c.data[offState:])
+		if state == stateInvalidated {
+			c.registry.mu.RUnlock()
+
+			return nil, ErrInvalidated
 		}
 
 		entries, err := c.doCollectRange(g1, startPadded, endPadded, opts)
@@ -1810,6 +1965,14 @@ func (c *cache) collectEntries(opts ScanOptions, match func([]byte) bool) ([]Ent
 			c.registry.mu.RUnlock()
 
 			continue
+		}
+
+		// Check for invalidation under stable generation.
+		state := binary.LittleEndian.Uint32(c.data[offState:])
+		if state == stateInvalidated {
+			c.registry.mu.RUnlock()
+
+			return nil, ErrInvalidated
 		}
 
 		entries, err := c.doCollect(g1, opts, match)

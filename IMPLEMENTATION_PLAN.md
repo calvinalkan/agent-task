@@ -153,24 +153,24 @@ File: `pkg/slotcache/writer.go`
 
 ---
 
-## Phase 6 — Implement invalidation (terminal state)
+## Phase 6 — Implement invalidation (terminal state) ✓
 
 File: `pkg/slotcache/slotcache.go` (or a new `invalidate.go`)
 
-- [ ] Implement `Cache.Invalidate()`:
-  - [ ] Fast checks: `ErrClosed`, `ErrBusy` if writer active.
-  - [ ] Acquire the same exclusivity mechanisms as a writer (in-process guard + optional lock file).
-  - [ ] Under `registry.mu.Lock()`:
+- [x] Implement `Cache.Invalidate()`:
+  - [x] Fast checks: `ErrClosed`, `ErrBusy` if writer active.
+  - [x] Acquire the same exclusivity mechanisms as a writer (in-process guard + optional lock file).
+  - [x] Under `registry.mu.Lock()`:
     - publish odd generation
     - set `state=INVALIDATED`
     - recompute header CRC
     - publish even generation
     - msync header barriers in `WritebackSync` mode
-  - [ ] Decide idempotence: invalidating an already-invalidated file returns nil.
+  - [x] Decide idempotence: invalidating an already-invalidated file returns nil.
 
-- [ ] Make all runtime operations fail fast on invalidation:
-  - [ ] Read APIs (`Len/Get/Scan/...`) return `ErrInvalidated` under stable snapshot.
-  - [ ] `BeginWrite` and `Writer.Commit` return `ErrInvalidated`.
+- [x] Make all runtime operations fail fast on invalidation:
+  - [x] Read APIs (`Len/Get/Scan/...`) return `ErrInvalidated` under stable snapshot.
+  - [x] `BeginWrite` and `Writer.Commit` return `ErrInvalidated`.
 
 Important: invalidation stays **out** of the model-vs-real behavior harness.
 

@@ -132,6 +132,14 @@ func (w *writer) Commit() error {
 		return ErrClosed
 	}
 
+	// Check for invalidation before applying changes.
+	state := binary.LittleEndian.Uint32(w.cache.data[offState:])
+	if state == stateInvalidated {
+		w.closeByCommit()
+
+		return ErrInvalidated
+	}
+
 	// Initialize dirty range tracking for WritebackSync optimization.
 	w.resetDirtyTracking()
 
