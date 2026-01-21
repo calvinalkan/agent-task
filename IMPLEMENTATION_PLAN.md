@@ -37,13 +37,13 @@ This makes it hard to reason about seeds, guard tests, and what coverage we actu
 
 ## Phase 0 — Design + invariants
 
-- [ ] Define `OpKind` + `OpSet` (bitmask) for allowed ops.
+- [x] Define `OpKind` + `OpSet` (bitmask) for allowed ops.
   - Files: `pkg/slotcache/internal/testutil/opgen_config.go`
-- [ ] Add two explicit profiles:
+- [x] Add two explicit profiles:
   - `BehaviorOpSet` (no invalidation; include user header ops)
   - `SpecOpSet` (includes invalidation + user header ops)
-- [ ] Add `CanonicalOpGenConfig()` and document that fuzz targets + seed guards MUST use it.
-- [ ] Add “protocol lock” tests that fail if the canonical protocol drifts:
+- [x] Add `CanonicalOpGenConfig()` and document that fuzz targets + seed guards MUST use it.
+- [x] Add “protocol lock” tests that fail if the canonical protocol drifts:
   - Assert key `CanonicalOpGenConfig()` fields (rates/feature flags) match frozen expected values.
   - Assert the first N generated op *names* for a tiny fixed input under `CanonicalOpGenConfig + BehaviorOpSet` (and optionally `+ SpecOpSet`).
   - Files: `pkg/slotcache/internal/testutil/opgen_protocol_lock_test.go`

@@ -6,6 +6,148 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
 )
 
+// -----------------------------------------------------------------------------
+// OpKind and OpSet — operation filtering for OpGenerator.
+// -----------------------------------------------------------------------------
+
+// OpKind identifies a specific operation type for filtering.
+// Each value corresponds to one Operation struct type in ops.go.
+type OpKind uint32
+
+// Operation kind constants. These form a bitmask where each operation
+// type has a unique bit position.
+const (
+	OpKindLen                OpKind = 1 << iota // OpKindLen is the Len() cache read operation.
+	OpKindGet                                   // OpKindGet is the Get(key) cache read operation.
+	OpKindScan                                  // OpKindScan is the Scan(opts) cache read operation.
+	OpKindScanPrefix                            // OpKindScanPrefix is the ScanPrefix(prefix, opts) operation.
+	OpKindScanMatch                             // OpKindScanMatch is the ScanMatch(spec, opts) operation.
+	OpKindScanRange                             // OpKindScanRange is the ScanRange(start, end, opts) operation.
+	OpKindUserHeader                            // OpKindUserHeader is the UserHeader() cache read (Phase 1).
+	OpKindClose                                 // OpKindClose is the Cache.Close() operation.
+	OpKindReopen                                // OpKindReopen simulates a process restart.
+	OpKindBeginWrite                            // OpKindBeginWrite is the BeginWrite() operation.
+	OpKindCommit                                // OpKindCommit is the Writer.Commit() operation.
+	OpKindWriterClose                           // OpKindWriterClose is the Writer.Close() operation.
+	OpKindPut                                   // OpKindPut is the Writer.Put() mutation operation.
+	OpKindDelete                                // OpKindDelete is the Writer.Delete() mutation operation.
+	OpKindSetUserHeaderFlags                    // OpKindSetUserHeaderFlags is writer staging (Phase 1).
+	OpKindSetUserHeaderData                     // OpKindSetUserHeaderData is writer staging (Phase 1).
+	OpKindInvalidate                            // OpKindInvalidate is the cache.Invalidate() spec-only op.
+)
+
+// unknownOpKind is returned by OpKind.String() for unrecognized values.
+const unknownOpKind = "Unknown"
+
+// String returns a human-readable name for the OpKind.
+func (k OpKind) String() string {
+	switch k {
+	case OpKindLen:
+		return "Len"
+	case OpKindGet:
+		return "Get"
+	case OpKindScan:
+		return "Scan"
+	case OpKindScanPrefix:
+		return "ScanPrefix"
+	case OpKindScanMatch:
+		return "ScanMatch"
+	case OpKindScanRange:
+		return "ScanRange"
+	case OpKindUserHeader:
+		return "UserHeader"
+	case OpKindClose:
+		return "Close"
+	case OpKindReopen:
+		return "Reopen"
+	case OpKindBeginWrite:
+		return "BeginWrite"
+	case OpKindCommit:
+		return "Commit"
+	case OpKindWriterClose:
+		return "WriterClose"
+	case OpKindPut:
+		return "Put"
+	case OpKindDelete:
+		return "Delete"
+	case OpKindSetUserHeaderFlags:
+		return "SetUserHeaderFlags"
+	case OpKindSetUserHeaderData:
+		return "SetUserHeaderData"
+	case OpKindInvalidate:
+		return "Invalidate"
+	default:
+		return unknownOpKind
+	}
+}
+
+// OpSet is a bitmask of allowed operation kinds.
+// Use bitwise OR to combine OpKind values.
+type OpSet uint32
+
+// Contains reports whether the set contains the given operation kind.
+func (s OpSet) Contains(k OpKind) bool {
+	return s&OpSet(k) != 0
+}
+
+// Add returns a new set with the given operation kind added.
+func (s OpSet) Add(k OpKind) OpSet {
+	return s | OpSet(k)
+}
+
+// Remove returns a new set with the given operation kind removed.
+func (s OpSet) Remove(k OpKind) OpSet {
+	return s &^ OpSet(k)
+}
+
+// Pre-defined operation sets for different testing profiles.
+const (
+	// coreReadOps contains all read operations that exist today.
+	coreReadOps = OpSet(OpKindLen | OpKindGet | OpKindScan |
+		OpKindScanPrefix | OpKindScanMatch | OpKindScanRange)
+
+	// coreLifecycleOps contains cache lifecycle operations.
+	coreLifecycleOps = OpSet(OpKindClose | OpKindReopen)
+
+	// coreWriterOps contains writer lifecycle and mutation operations.
+	coreWriterOps = OpSet(OpKindBeginWrite | OpKindCommit | OpKindWriterClose |
+		OpKindPut | OpKindDelete)
+
+	// userHeaderReadOps contains user header read operations (Phase 1).
+	userHeaderReadOps = OpSet(OpKindUserHeader)
+
+	// userHeaderWriteOps contains user header staging operations (Phase 1).
+	userHeaderWriteOps = OpSet(OpKindSetUserHeaderFlags | OpKindSetUserHeaderData)
+
+	// specOnlyOps contains operations only valid for spec testing.
+	specOnlyOps = OpSet(OpKindInvalidate)
+)
+
+// BehaviorOpSet is the operation set for behavior model-vs-real testing.
+// It includes all operations except Invalidate (which is terminal and
+// would require modeling Open-can-fail semantics).
+//
+// NOTE: UserHeader ops are included in the set definition but won't be
+// generated until Phase 1 adds the corresponding Operation types.
+const BehaviorOpSet = coreReadOps | coreLifecycleOps | coreWriterOps |
+	userHeaderReadOps | userHeaderWriteOps
+
+// SpecOpSet is the operation set for spec oracle testing.
+// It includes all operations including Invalidate.
+//
+// NOTE: UserHeader and Invalidate ops are included in the set definition
+// but won't be generated until Phase 1 adds the corresponding Operation types.
+const SpecOpSet = BehaviorOpSet | specOnlyOps
+
+// CoreOpSet is the operation set containing only currently-implemented operations.
+// This excludes UserHeader, SetUserHeaderFlags, SetUserHeaderData, and Invalidate
+// which will be added in Phase 1.
+const CoreOpSet = coreReadOps | coreLifecycleOps | coreWriterOps
+
+// -----------------------------------------------------------------------------
+// OpGenConfig — configurable operation generator.
+// -----------------------------------------------------------------------------
+
 // OpGenConfig tunes the probabilities and behavior of OpGenerator.
 // All rate fields are percentages (0–100).
 //
@@ -102,6 +244,16 @@ type OpGenConfig struct {
 	// ReadPhaseBeginWriteRate overrides BeginWriteRate during Read phase.
 	// Lower values favor reading over writing. Default: 5.
 	ReadPhaseBeginWriteRate int
+
+	// --- Operation filtering ---
+
+	// AllowedOps specifies which operation kinds the generator may emit.
+	// If zero (the default), all currently-implemented ops are allowed
+	// (equivalent to CoreOpSet).
+	//
+	// Use BehaviorOpSet for behavior model-vs-real testing.
+	// Use SpecOpSet for spec oracle testing (includes Invalidate).
+	AllowedOps OpSet
 }
 
 // DefaultOpGenConfig returns a config matching the original FuzzDecoder behavior.
@@ -192,6 +344,50 @@ func PhasedOpGenConfig() OpGenConfig {
 	}
 }
 
+// CanonicalOpGenConfig returns the frozen configuration for fuzz targets and
+// seed guard tests.
+//
+// IMPORTANT: All fuzz-seeded behavior and spec tests MUST use this config to
+// ensure curated seeds remain meaningful. Any change to this config's values
+// will break seed guards and require explicit seed migration.
+//
+// The canonical config uses phased generation for better state coverage:
+//   - Fill phase (0–60%): Heavy writes to populate the cache
+//   - Churn phase (60–85%): Mix of puts/deletes for tombstone stress
+//   - Read phase (85–100%): Heavy reads to validate final state
+//
+// AllowedOps defaults to CoreOpSet (zero value). Callers should set
+// AllowedOps to BehaviorOpSet or SpecOpSet depending on their test type.
+func CanonicalOpGenConfig() OpGenConfig {
+	return OpGenConfig{
+		// Frozen probability rates — DO NOT CHANGE without updating seeds.
+		InvalidKeyRate:       5,
+		InvalidIndexRate:     5,
+		InvalidScanOptsRate:  5,
+		DeleteRate:           15,
+		CommitRate:           15,
+		WriterCloseRate:      5,
+		NonMonotonicRate:     3,
+		ReopenRate:           3,
+		CloseRate:            3,
+		BeginWriteRate:       20,
+		SmallScanLimitBias:   true,
+		KeyReuseMinThreshold: 4,
+		KeyReuseMaxThreshold: 32,
+		// Phased generation enabled for better coverage.
+		PhasedEnabled:           true,
+		FillPhaseEnd:            60,
+		ChurnPhaseEnd:           85,
+		FillPhaseBeginWriteRate: 50,
+		FillPhaseCommitRate:     8,
+		ChurnPhaseDeleteRate:    35,
+		ReadPhaseBeginWriteRate: 5,
+		// AllowedOps defaults to zero (CoreOpSet).
+		// Callers set BehaviorOpSet or SpecOpSet as needed.
+		AllowedOps: 0,
+	}
+}
+
 // safeIntToUint64 converts a non-negative int to uint64.
 // Negative values are clamped to 0.
 func safeIntToUint64(v int) uint64 {
@@ -226,7 +422,7 @@ func (p Phase) String() string {
 	case PhaseRead:
 		return "Read"
 	default:
-		return "Unknown"
+		return unknownOpKind
 	}
 }
 
