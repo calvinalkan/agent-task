@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"slices"
 	"sort"
+	"sync/atomic"
 
 	"github.com/calvinalkan/agent-task/pkg/fs"
 )
@@ -28,13 +28,12 @@ type bufferedOp struct {
 	index    []byte
 }
 
-// writer is the concrete implementation of Writer.
+// writer is the concrete implementation of [Writer].
 type writer struct {
-	cache          *cache
-	bufferedOps    []bufferedOp
-	isClosed       bool
-	closedByCommit bool
-	lock           *fs.Lock
+	cache       *cache
+	bufferedOps []bufferedOp
+	isClosed    atomic.Bool // atomic for safe concurrent Close() during Commit()
+	lock        *fs.Lock
 
 	// User header staging fields.
 	// Changes are buffered here and only applied during Commit() if dirty.
@@ -61,10 +60,12 @@ type writer struct {
 
 // Put buffers a put operation for the given key.
 func (w *writer) Put(key []byte, revision int64, index []byte) error {
-	w.cache.mu.Lock()
-	defer w.cache.mu.Unlock()
+	w.cache.mu.RLock()
+	defer w.cache.mu.RUnlock()
 
-	if w.isClosed || w.cache.isClosed {
+	// cache.isClosed check is defensive: cache.Close() returns ErrBusy if a
+	// writer is active, so this shouldn't happen in normal operation.
+	if w.isClosed.Load() || w.cache.isClosed {
 		return ErrClosed
 	}
 
@@ -77,7 +78,8 @@ func (w *writer) Put(key []byte, revision int64, index []byte) error {
 	}
 
 	if len(w.bufferedOps) >= maxBufferedOpsPerWriter {
-		return fmt.Errorf("too many buffered ops (%d), max %d: %w", len(w.bufferedOps), maxBufferedOpsPerWriter, ErrInvalidInput)
+		return fmt.Errorf("buffered ops (%d) reached limit (%d): %w",
+			len(w.bufferedOps), maxBufferedOpsPerWriter, ErrBufferFull)
 	}
 
 	// Copy key and index to avoid external mutation.
@@ -99,10 +101,12 @@ func (w *writer) Put(key []byte, revision int64, index []byte) error {
 
 // Delete buffers a delete operation for the given key.
 func (w *writer) Delete(key []byte) (bool, error) {
-	w.cache.mu.Lock()
-	defer w.cache.mu.Unlock()
+	w.cache.mu.RLock()
+	defer w.cache.mu.RUnlock()
 
-	if w.isClosed || w.cache.isClosed {
+	// cache.isClosed check is defensive: cache.Close() returns ErrBusy if a
+	// writer is active, so this shouldn't happen in normal operation.
+	if w.isClosed.Load() || w.cache.isClosed {
 		return false, ErrClosed
 	}
 
@@ -111,7 +115,8 @@ func (w *writer) Delete(key []byte) (bool, error) {
 	}
 
 	if len(w.bufferedOps) >= maxBufferedOpsPerWriter {
-		return false, fmt.Errorf("too many buffered ops (%d), max %d: %w", len(w.bufferedOps), maxBufferedOpsPerWriter, ErrInvalidInput)
+		return false, fmt.Errorf("buffered ops (%d) reached limit (%d): %w",
+			len(w.bufferedOps), maxBufferedOpsPerWriter, ErrBufferFull)
 	}
 
 	keyCopy := make([]byte, len(key))
@@ -128,18 +133,46 @@ func (w *writer) Delete(key []byte) (bool, error) {
 }
 
 // Commit applies all buffered operations atomically.
+//
+//  1. Preflight (no locks held except cache.mu read lock)
+//     - Check closed/invalidated state
+//     - Compute final ops (last-wins per key)
+//     - Categorize into updates, inserts, deletes based on disk state
+//     - Validate capacity and ordered-keys constraints
+//     - Any preflight failure indicate corruption and close the writer and returns an error
+//
+//  2. Publish (registry.mu write lock held)
+//     - Set generation to odd (signals "write in progress" to readers)
+//     - Apply all changes to mmap'd data (slots, buckets, counters)
+//     - Optionally rehash if tombstone threshold exceeded
+//     - Update header CRC
+//     - Set generation to even (publishes changes atomically)
+//     - In WritebackSync mode, msync barriers ensure durability
+//
+//  3. Cleanup
+//     - Release registry lock
+//     - Close writer (releases file lock, clears writerOwner)
+//
+// On any error during publish, generation is left odd and the file must be
+// rebuilt by the caller (readers will see ErrCorrupt or ErrBusy).
 func (w *writer) Commit() error {
-	w.cache.mu.Lock()
-	defer w.cache.mu.Unlock()
+	w.cache.mu.RLock()
+	defer w.cache.mu.RUnlock()
 
-	if w.isClosed || w.cache.isClosed {
+	// =========================================================================
+	// Phase 1: Preflight checks (no registry lock)
+	// =========================================================================
+
+	// cache.isClosed check is defensive: cache.Close() returns ErrBusy if a
+	// writer is active, so this shouldn't happen in normal operation.
+	if w.isClosed.Load() || w.cache.isClosed {
 		return ErrClosed
 	}
 
 	// Check for invalidation before applying changes.
 	state := binary.LittleEndian.Uint32(w.cache.data[offState:])
 	if state == stateInvalidated {
-		w.closeByCommit()
+		w.closeLocked()
 
 		return ErrInvalidated
 	}
@@ -151,13 +184,12 @@ func (w *writer) Commit() error {
 	finalOps := w.finalOps()
 
 	// Categorize operations based on DISK state only (not buffered ops).
+	// This determines whether each Put is an update (key exists) or insert (new key).
 	var updates, inserts, deletes []bufferedOp
-
 	for _, op := range finalOps {
-		// Check disk state only - don't consider buffered ops.
 		_, found, err := w.findLiveSlotLocked(op.key)
 		if err != nil {
-			w.closeByCommit()
+			w.closeLocked()
 
 			return err
 		}
@@ -176,20 +208,18 @@ func (w *writer) Commit() error {
 		}
 	}
 
-	// Preflight checks.
+	// Capacity check: ensure we have room for new inserts.
 	highwater := w.cache.readSlotHighwater()
-
 	newInserts := uint64(len(inserts))
 	if highwater+newInserts > w.cache.slotCapacity {
-		w.closeByCommit()
+		w.closeLocked()
 
 		return fmt.Errorf("slot_highwater (%d) + new_inserts (%d) > slot_capacity (%d): %w",
 			highwater, newInserts, w.cache.slotCapacity, ErrFull)
 	}
 
-	// Ordered mode check.
+	// Ordered-keys mode: verify new inserts maintain sorted order.
 	if w.cache.orderedKeys && len(inserts) > 0 {
-		// Sort inserts by key.
 		sort.Slice(inserts, func(i, j int) bool {
 			return bytes.Compare(inserts[i].key, inserts[j].key) < 0
 		})
@@ -197,12 +227,11 @@ func (w *writer) Commit() error {
 		minNewKey := inserts[0].key
 
 		if highwater > 0 {
-			// Get tail key (even if tombstoned).
 			tailSlotOffset := w.cache.slotsOffset + (highwater-1)*uint64(w.cache.slotSize)
-
 			tailKey := w.cache.data[tailSlotOffset+8 : tailSlotOffset+8+uint64(w.cache.keySize)]
+
 			if bytes.Compare(minNewKey, tailKey) < 0 {
-				w.closeByCommit()
+				w.closeLocked()
 
 				return fmt.Errorf("new key %x < tail key %x at slot %d: %w",
 					minNewKey, tailKey, highwater-1, ErrOutOfOrderInsert)
@@ -210,22 +239,24 @@ func (w *writer) Commit() error {
 		}
 	}
 
-	// Track msync failures for WritebackSync mode.
+	// =========================================================================
+	// Phase 2: Publish changes (registry lock held)
+	// =========================================================================
+
 	var msyncFailed bool
 
 	syncMode := w.cache.writeback == WritebackSync
 
-	// Now apply changes under the registry lock.
 	w.cache.registry.mu.Lock()
 
-	// Step 1: Publish odd generation.
-	// Uses atomic store per spec requirement for cross-process seqlock.
+	// Step 1: Publish odd generation (signals write-in-progress to readers).
 	oldGen := w.cache.readGeneration()
 	newOddGen := oldGen + 1
 	atomicStoreUint64(w.cache.data[offGeneration:], newOddGen)
 
-	// Step 2 (WritebackSync): msync header to ensure odd generation is on disk
-	// before data modifications.
+	// Step 2 (WritebackSync only): msync header to ensure odd generation is on
+	// disk before data modifications. This prevents partial writes from appearing
+	// committed after a crash.
 	if syncMode {
 		err := msyncRange(w.cache.data, 0, slc1HeaderSize)
 		if err != nil {
@@ -233,14 +264,12 @@ func (w *writer) Commit() error {
 		}
 	}
 
-	// Step 3: Apply buffered ops to slots, buckets, and header counters.
+	// Step 3a: Apply updates (modify existing slots in place).
 	for _, op := range updates {
 		slotID, found, err := w.findLiveSlotLocked(op.key)
 		if err != nil {
-			// Leave generation odd and fail fast. The file is corrupt and must be
-			// rebuilt by the caller.
 			w.cache.registry.mu.Unlock()
-			w.closeByCommit()
+			w.closeLocked()
 
 			return err
 		}
@@ -249,21 +278,21 @@ func (w *writer) Commit() error {
 			err := w.updateSlot(slotID, op.revision, op.index)
 			if err != nil {
 				w.cache.registry.mu.Unlock()
-				w.closeByCommit()
+				w.closeLocked()
 
 				return err
 			}
 		}
 	}
 
-	// Apply deletes.
+	// Step 3b: Apply deletes (tombstone slots and bucket entries).
 	deleteCount := uint64(0)
 
 	for _, op := range deletes {
 		slotID, found, err := w.findLiveSlotLocked(op.key)
 		if err != nil {
 			w.cache.registry.mu.Unlock()
-			w.closeByCommit()
+			w.closeLocked()
 
 			return err
 		}
@@ -272,12 +301,9 @@ func (w *writer) Commit() error {
 			continue
 		}
 
-		err = w.deleteSlot(slotID, op.key)
-		if err != nil {
-			// Leave generation odd and fail fast. The file is corrupt and must be
-			// rebuilt by the caller.
+		if err := w.deleteSlot(slotID, op.key); err != nil {
 			w.cache.registry.mu.Unlock()
-			w.closeByCommit()
+			w.closeLocked()
 
 			return err
 		}
@@ -285,18 +311,15 @@ func (w *writer) Commit() error {
 		deleteCount++
 	}
 
-	// Apply inserts (already sorted if ordered mode).
+	// Step 3c: Apply inserts (allocate new slots, insert into hash index).
 	filledTombstones := uint64(0)
-
 	slotID := highwater
 
 	for _, op := range inserts {
 		filled, err := w.insertSlot(slotID, op.key, op.revision, op.index)
 		if err != nil {
-			// Leave generation odd and fail fast. The file is corrupt and must be
-			// rebuilt by the caller.
 			w.cache.registry.mu.Unlock()
-			w.closeByCommit()
+			w.closeLocked()
 
 			return err
 		}
@@ -308,32 +331,28 @@ func (w *writer) Commit() error {
 		slotID++
 	}
 
-	// Update header counters.
+	// Step 3d: Update header counters.
 	oldLiveCount := binary.LittleEndian.Uint64(w.cache.data[offLiveCount:])
 	if oldLiveCount < deleteCount {
 		w.cache.registry.mu.Unlock()
-		w.closeByCommit()
+		w.closeLocked()
 
 		return fmt.Errorf("live_count underflow (old=%d deletes=%d): %w", oldLiveCount, deleteCount, ErrCorrupt)
 	}
 
 	newLiveCount := oldLiveCount - deleteCount + uint64(len(inserts))
 	binary.LittleEndian.PutUint64(w.cache.data[offLiveCount:], newLiveCount)
+	binary.LittleEndian.PutUint64(w.cache.data[offBucketUsed:], newLiveCount)
 
 	newHighwater := highwater + uint64(len(inserts))
 	binary.LittleEndian.PutUint64(w.cache.data[offSlotHighwater:], newHighwater)
 
-	// bucket_used must equal live_count.
-	binary.LittleEndian.PutUint64(w.cache.data[offBucketUsed:], newLiveCount)
-
-	// Update bucket_tombstones counter. Deletes add tombstones; inserts may reuse
-	// tombstones (decrement).
 	oldTombstones := binary.LittleEndian.Uint64(w.cache.data[offBucketTombstones:])
-
 	newTombstones := oldTombstones + deleteCount
+
 	if newTombstones < filledTombstones {
 		w.cache.registry.mu.Unlock()
-		w.closeByCommit()
+		w.closeLocked()
 
 		return fmt.Errorf("bucket_tombstones underflow (old=%d deletes=%d filled=%d): %w",
 			oldTombstones, deleteCount, filledTombstones, ErrCorrupt)
@@ -342,19 +361,13 @@ func (w *writer) Commit() error {
 	newTombstones -= filledTombstones
 	binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], newTombstones)
 
-	// Step 3b: Check if tombstone-driven rehash is needed.
-	// Per TECHNICAL_DECISIONS.md §5: rebuild when bucket_tombstones/bucket_count > 0.25.
+	// Step 3e: Rehash if tombstone ratio exceeds threshold.
 	if w.cache.bucketCount > 0 && float64(newTombstones)/float64(w.cache.bucketCount) > rehashThreshold {
 		w.rehashBuckets(newHighwater)
-
-		// Rehash eliminates all bucket tombstones.
 		binary.LittleEndian.PutUint64(w.cache.data[offBucketTombstones:], 0)
 	}
 
-	// Step 3c: Apply buffered user header changes.
-	// Per spec: only dirty fields are updated; untouched fields preserve their values.
-	// This happens inside the publish window (odd generation) so readers either see
-	// the complete old state or the complete new state.
+	// Step 3f: Apply user header changes (if any were staged).
 	if w.userFlagsDirty {
 		binary.LittleEndian.PutUint64(w.cache.data[offUserFlags:], w.pendingUserFlags)
 	}
@@ -367,19 +380,15 @@ func (w *writer) Commit() error {
 	crc := computeHeaderCRC(w.cache.data[:slc1HeaderSize])
 	binary.LittleEndian.PutUint32(w.cache.data[offHeaderCRC32C:], crc)
 
-	// Step 5 (WritebackSync): msync modified data (slots + buckets + header).
-	// This ensures data is on disk before we publish the even generation.
-	// Optimization: track dirty page ranges and only sync those instead of
-	// the entire file. The kernel usually skips clean pages, but for large
-	// caches this can reduce syscall overhead.
+	// Step 5 (WritebackSync only): msync modified data before publishing.
 	if syncMode {
-		// Always sync header (contains generation, counters, CRC).
+		// Header (contains generation, counters, CRC).
 		err := msyncRange(w.cache.data, 0, slc1HeaderSize)
 		if err != nil {
 			msyncFailed = true
 		}
 
-		// Sync dirty slot range if any slots were modified.
+		// Dirty slot range.
 		if w.minSlotOffset >= 0 {
 			err := msyncRange(w.cache.data, w.minSlotOffset, w.maxSlotOffset-w.minSlotOffset)
 			if err != nil {
@@ -387,35 +396,28 @@ func (w *writer) Commit() error {
 			}
 		}
 
-		// Sync buckets: all if rehash occurred, otherwise just dirty range.
+		// Buckets: all if rehash occurred, otherwise just dirty range.
 		if w.rehashOccurred {
 			bucketsStart, err1 := uint64ToIntChecked(w.cache.bucketsOffset)
 			bucketsLen, err2 := uint64ToIntChecked(w.cache.bucketCount * 16)
 
 			if err1 != nil || err2 != nil {
-				// Conversion overflow. Should not happen due to validation at open time,
-				// but if it does, we cannot reliably msync the bucket range.
 				msyncFailed = true
-			} else {
-				err := msyncRange(w.cache.data, bucketsStart, bucketsLen)
-				if err != nil {
-					msyncFailed = true
-				}
+			} else if err := msyncRange(w.cache.data, bucketsStart, bucketsLen); err != nil {
+				msyncFailed = true
 			}
 		} else if w.minBucketOffset >= 0 {
-			err := msyncRange(w.cache.data, w.minBucketOffset, w.maxBucketOffset-w.minBucketOffset)
-			if err != nil {
+			if err := msyncRange(w.cache.data, w.minBucketOffset, w.maxBucketOffset-w.minBucketOffset); err != nil {
 				msyncFailed = true
 			}
 		}
 	}
 
-	// Step 6: Publish even generation.
-	// Uses atomic store per spec requirement for cross-process seqlock.
+	// Step 6: Publish even generation (makes changes visible to readers).
 	newEvenGen := newOddGen + 1
 	atomicStoreUint64(w.cache.data[offGeneration:], newEvenGen)
 
-	// Step 7 (WritebackSync): msync header to ensure even generation is on disk.
+	// Step 7 (WritebackSync only): msync header to ensure even generation is durable.
 	if syncMode {
 		err := msyncRange(w.cache.data, 0, slc1HeaderSize)
 		if err != nil {
@@ -425,10 +427,12 @@ func (w *writer) Commit() error {
 
 	w.cache.registry.mu.Unlock()
 
-	w.closeByCommit()
+	// =========================================================================
+	// Phase 3: Cleanup
+	// =========================================================================
 
-	// If any msync failed, data is visible via MAP_SHARED but durability
-	// is not guaranteed. Return ErrWriteback per spec.
+	w.closeLocked()
+
 	if msyncFailed {
 		return ErrWriteback
 	}
@@ -438,26 +442,11 @@ func (w *writer) Commit() error {
 
 // Close releases resources and discards uncommitted changes.
 func (w *writer) Close() error {
-	w.cache.mu.Lock()
-	defer w.cache.mu.Unlock()
-
-	if w.isClosed {
+	if w.isClosed.Load() {
 		return nil
 	}
 
-	w.isClosed = true
-	w.closedByCommit = false
-	w.bufferedOps = nil
-	w.cache.activeWriter = nil
-
-	// Release in-process guard.
-	w.cache.registry.mu.Lock()
-	w.cache.registry.writerActive = false
-	w.cache.registry.mu.Unlock()
-
-	// Release file lock.
-	releaseWriterLock(w.lock)
-	w.lock = nil
+	w.closeLocked()
 
 	return nil
 }
@@ -468,10 +457,12 @@ func (w *writer) Close() error {
 // If Commit() fails (e.g., ErrFull, ErrOutOfOrderInsert), the change is discarded.
 // Setting flags does not affect the user data bytes.
 func (w *writer) SetUserHeaderFlags(flags uint64) error {
-	w.cache.mu.Lock()
-	defer w.cache.mu.Unlock()
+	w.cache.mu.RLock()
+	defer w.cache.mu.RUnlock()
 
-	if w.isClosed || w.cache.isClosed {
+	// cache.isClosed check is defensive: cache.Close() returns ErrBusy if a
+	// writer is active, so this shouldn't happen in normal operation.
+	if w.isClosed.Load() || w.cache.isClosed {
 		return ErrClosed
 	}
 
@@ -493,10 +484,12 @@ func (w *writer) SetUserHeaderFlags(flags uint64) error {
 // If Commit() fails (e.g., ErrFull, ErrOutOfOrderInsert), the change is discarded.
 // Setting data does not affect the user flags.
 func (w *writer) SetUserHeaderData(data [UserDataSize]byte) error {
-	w.cache.mu.Lock()
-	defer w.cache.mu.Unlock()
+	w.cache.mu.RLock()
+	defer w.cache.mu.RUnlock()
 
-	if w.isClosed || w.cache.isClosed {
+	// cache.isClosed check is defensive: cache.Close() returns ErrBusy if a
+	// writer is active, so this shouldn't happen in normal operation.
+	if w.isClosed.Load() || w.cache.isClosed {
 		return ErrClosed
 	}
 
@@ -762,15 +755,16 @@ func (w *writer) rehashBuckets(highwater uint64) {
 	// Mark that all buckets were touched for WritebackSync optimization.
 	w.rehashOccurred = true
 }
-func (w *writer) closeByCommit() {
-	w.isClosed = true
-	w.closedByCommit = true
+
+// closeLocked releases writer resources and clears the in-process writer guard.
+// Acquires registry.mu internally to clear writerOwner.
+func (w *writer) closeLocked() {
+	w.isClosed.Store(true)
 	w.bufferedOps = nil
-	w.cache.activeWriter = nil
 
 	// Release in-process guard.
 	w.cache.registry.mu.Lock()
-	w.cache.registry.writerActive = false
+	w.cache.registry.writerOwner = nil
 	w.cache.registry.mu.Unlock()
 
 	// Release file lock.
@@ -780,24 +774,19 @@ func (w *writer) closeByCommit() {
 
 // finalOps returns the last operation per key, in original order.
 func (w *writer) finalOps() []bufferedOp {
-	seen := make(map[string]bool)
+	lastIndex := make(map[string]int)
 
-	var ops []bufferedOp
-
-	for i := len(w.bufferedOps) - 1; i >= 0; i-- {
-		op := w.bufferedOps[i]
-
-		keyStr := string(op.key)
-		if seen[keyStr] {
-			continue
-		}
-
-		seen[keyStr] = true
-
-		ops = append(ops, op)
+	for i, op := range w.bufferedOps {
+		lastIndex[string(op.key)] = i
 	}
 
-	slices.Reverse(ops)
+	ops := make([]bufferedOp, 0, len(lastIndex))
+
+	for i, op := range w.bufferedOps {
+		if lastIndex[string(op.key)] == i {
+			ops = append(ops, op)
+		}
+	}
 
 	return ops
 }

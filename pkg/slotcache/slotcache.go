@@ -64,12 +64,50 @@ type fileIdentity struct {
 	ino uint64
 }
 
-// fileRegistryEntry tracks per-file state for in-process coordination.
-type fileRegistryEntry struct {
-	mu           sync.RWMutex // protects mmap reads vs writes
-	writerActive bool         // in-process writer guard
+// Locking architecture
+//
+// slotcache uses a two-level locking scheme to coordinate access:
+//
+//  1. cache.mu (per-instance, sync.Mutex)
+//     - Protects instance-level state: isClosed
+//     - Fast path for "am I closed?" checks
+//     - Never held while acquiring other locks
+//
+//  2. registry.mu (per-file, sync.RWMutex)
+//     - Shared by all Cache handles backed by the same file (same device:inode)
+//     - Protects writerOwner (which cache instance owns the active writer)
+//     - Guards mmap reads vs writes: readers take RLock, writers take Lock
+//     - Ensures seqlock reads see consistent memory
+//
+// Additionally, cross-process coordination uses flock on a separate .lock file.
+//
+// Lock ordering: cache.mu -> registry.mu (never reversed)
+//
+// Why two locks?
+//   - cache.mu is per-instance and uncontended for simple isClosed checks
+//   - registry.mu is shared across instances and coordinates mmap access
+//   - Separating them avoids taking a shared lock for every operation
 
-	// refCount tracks the number of open cache handles for this file.
+// fileRegistryEntry tracks per-file state shared across all Cache handles
+// backed by the same file (identified by device:inode pair).
+//
+// Multiple Cache instances may exist for the same file (e.g., opened multiple
+// times in the same process). They share a single fileRegistryEntry to
+// coordinate writer access and mmap visibility.
+type fileRegistryEntry struct {
+	// mu protects mmap reads vs writes across all Cache handles for this file.
+	// Readers (Get, Scan, etc.) take RLock; writers (Commit) take Lock.
+	// This ensures readers see consistent memory during seqlock reads.
+	mu sync.RWMutex
+
+	// writerOwner is the Cache instance that currently owns the active writer,
+	// or nil if no writer is active. Used to:
+	//   - Prevent multiple concurrent writers (BeginWrite checks writerOwner != nil)
+	//   - Allow Cache.Close to check if it owns an uncommitted writer
+	writerOwner *cache
+
+	// refCount tracks the number of open Cache handles for this file.
+	// When it reaches zero, the entry is removed from globalRegistry.
 	// Protected by registryMu, not by mu.
 	refCount int
 }
@@ -79,7 +117,8 @@ type fileRegistryEntry struct {
 // potential deadlocks during Close() when registry pruning is needed.
 var registryMu sync.Mutex
 
-// globalRegistry maps file identities to their entries.
+// globalRegistry maps file identities to their registry entries.
+// This allows multiple Cache handles on the same file to share coordination state.
 var globalRegistry sync.Map // map[fileIdentity]*fileRegistryEntry
 
 // pkgLocker is the package-level file locker for cross-process writer coordination.
@@ -179,7 +218,10 @@ func releaseRegistryEntry(id fileIdentity) {
 
 // cache is the concrete implementation of Cache.
 type cache struct {
-	mu sync.Mutex // protects cache-level state (closed, activeWriter)
+	// mu protects isClosed. See "Locking architecture" comment above.
+	// RWMutex because isClosed is read frequently (every operation) but
+	// written rarely (only on Close).
+	mu sync.RWMutex
 
 	fd       int    // file descriptor
 	data     []byte // mmap'd file data
@@ -202,7 +244,6 @@ type cache struct {
 
 	// State
 	isClosed       bool
-	activeWriter   *writer
 	disableLocking bool
 	path           string
 	writeback      WritebackMode
@@ -1056,7 +1097,12 @@ func (c *cache) Close() error {
 		return nil
 	}
 
-	if c.activeWriter != nil && !c.activeWriter.isClosed {
+	// Check if this cache owns an active writer.
+	c.registry.mu.RLock()
+	hasActiveWriter := c.registry.writerOwner == c
+	c.registry.mu.RUnlock()
+
+	if hasActiveWriter {
 		return ErrBusy
 	}
 
@@ -1081,15 +1127,15 @@ func (c *cache) Close() error {
 
 // Len returns the number of live entries in the cache.
 func (c *cache) Len() (int, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 
 	if c.isClosed {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 
 		return 0, ErrClosed
 	}
 
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	for attempt := range readMaxRetries {
 		readBackoff(attempt)
@@ -1159,15 +1205,15 @@ func (c *cache) Len() (int, error) {
 
 // Get retrieves an entry by exact key.
 func (c *cache) Get(key []byte) (Entry, bool, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 
 	if c.isClosed {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 
 		return Entry{}, false, ErrClosed
 	}
 
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	if len(key) != int(c.keySize) {
 		return Entry{}, false, fmt.Errorf("key length %d != key_size %d: %w", len(key), c.keySize, ErrInvalidInput)
@@ -1219,15 +1265,15 @@ func (c *cache) Get(key []byte) (Entry, bool, error) {
 
 // Scan returns all live entries in insertion (slot) order.
 func (c *cache) Scan(opts ScanOptions) ([]Entry, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 
 	if c.isClosed {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 
 		return nil, ErrClosed
 	}
 
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	if opts.Offset < 0 {
 		return nil, fmt.Errorf("offset must be >= 0, got %d: %w", opts.Offset, ErrInvalidInput)
@@ -1258,15 +1304,15 @@ func (c *cache) ScanPrefix(prefix []byte, opts ScanOptions) ([]Entry, error) {
 // Optimization: In ordered-keys mode with prefix at offset 0, this uses
 // binary search to find the range bounds, avoiding a full scan.
 func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 
 	if c.isClosed {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 
 		return nil, ErrClosed
 	}
 
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	if opts.Offset < 0 {
 		return nil, fmt.Errorf("offset must be >= 0, got %d: %w", opts.Offset, ErrInvalidInput)
@@ -1306,10 +1352,10 @@ func (c *cache) ScanMatch(spec Prefix, opts ScanOptions) ([]Entry, error) {
 // For ordered-keys mode, this uses binary search to find the start position,
 // then sequential scan, stopping early when keys exceed the end bound.
 func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 
 	if c.isClosed {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 
 		return nil, ErrClosed
 	}
@@ -1319,12 +1365,12 @@ func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) 
 	// This is a fast-path check; collectRangeEntries will also check under seqlock.
 	state := binary.LittleEndian.Uint32(c.data[offState:])
 	if state == stateInvalidated {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 
 		return nil, ErrInvalidated
 	}
 
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	if !c.orderedKeys {
 		return nil, fmt.Errorf("ScanRange requires ordered_keys mode: %w", ErrUnordered)
@@ -1356,12 +1402,15 @@ func (c *cache) ScanRange(start, end []byte, opts ScanOptions) ([]Entry, error) 
 
 // BeginWrite starts a new write session.
 func (c *cache) BeginWrite() (Writer, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
 
 	if c.isClosed {
+		c.mu.RUnlock()
+
 		return nil, ErrClosed
 	}
+
+	c.mu.RUnlock()
 
 	// Check for invalidation before acquiring writer.
 	// Note: This reads without the seqlock since we're about to acquire
@@ -1375,13 +1424,13 @@ func (c *cache) BeginWrite() (Writer, error) {
 	// Check in-process writer guard.
 	c.registry.mu.Lock()
 
-	if c.registry.writerActive {
+	if c.registry.writerOwner != nil {
 		c.registry.mu.Unlock()
 
 		return nil, ErrBusy
 	}
 
-	c.registry.writerActive = true
+	c.registry.writerOwner = c
 	c.registry.mu.Unlock()
 
 	// Acquire cross-process lock if enabled.
@@ -1393,7 +1442,7 @@ func (c *cache) BeginWrite() (Writer, error) {
 		lock, err = acquireWriterLock(c.path)
 		if err != nil {
 			c.registry.mu.Lock()
-			c.registry.writerActive = false
+			c.registry.writerOwner = nil
 			c.registry.mu.Unlock()
 
 			return nil, err
@@ -1403,10 +1452,9 @@ func (c *cache) BeginWrite() (Writer, error) {
 	wr := &writer{
 		cache:       c,
 		bufferedOps: nil,
-		isClosed:    false,
 		lock:        lock,
 	}
-	c.activeWriter = wr
+	// isClosed is zero-value (false) by default for atomic.Bool
 
 	return wr, nil
 }
@@ -1419,24 +1467,27 @@ func (c *cache) BeginWrite() (Writer, error) {
 //
 // Calling Invalidate on an already-invalidated cache is a no-op and returns nil.
 func (c *cache) Invalidate() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
 
 	if c.isClosed {
+		c.mu.RUnlock()
+
 		return ErrClosed
 	}
+
+	c.mu.RUnlock()
 
 	// Check for active in-process writer.
 	c.registry.mu.Lock()
 
-	if c.registry.writerActive {
+	if c.registry.writerOwner != nil {
 		c.registry.mu.Unlock()
 
 		return ErrBusy
 	}
 
 	// Acquire in-process guard (same as BeginWrite).
-	c.registry.writerActive = true
+	c.registry.writerOwner = c
 	c.registry.mu.Unlock()
 
 	// Acquire cross-process lock if enabled.
@@ -1449,7 +1500,7 @@ func (c *cache) Invalidate() error {
 		if err != nil {
 			// Release in-process guard on failure.
 			c.registry.mu.Lock()
-			c.registry.writerActive = false
+			c.registry.writerOwner = nil
 			c.registry.mu.Unlock()
 
 			return err
@@ -1467,7 +1518,7 @@ func (c *cache) Invalidate() error {
 		// Release resources.
 		releaseWriterLock(lock)
 		c.registry.mu.Lock()
-		c.registry.writerActive = false
+		c.registry.writerOwner = nil
 		c.registry.mu.Unlock()
 
 		return nil
@@ -1524,7 +1575,7 @@ func (c *cache) Invalidate() error {
 
 	// Release in-process guard.
 	c.registry.mu.Lock()
-	c.registry.writerActive = false
+	c.registry.writerOwner = nil
 	c.registry.mu.Unlock()
 
 	// Per spec: ErrWriteback indicates changes are visible but durability
@@ -1543,15 +1594,15 @@ func (c *cache) Invalidate() error {
 // Uses the seqlock retry pattern to read a stable snapshot of the user header.
 // If the cache is invalidated, returns ErrInvalidated.
 func (c *cache) UserHeader() (UserHeader, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 
 	if c.isClosed {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 
 		return UserHeader{}, ErrClosed
 	}
 
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	for attempt := range readMaxRetries {
 		readBackoff(attempt)
@@ -1599,15 +1650,15 @@ func (c *cache) UserHeader() (UserHeader, error) {
 // Uses the seqlock retry pattern to read a stable even generation value.
 // If the cache is invalidated, returns ErrInvalidated.
 func (c *cache) Generation() (uint64, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 
 	if c.isClosed {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 
 		return 0, ErrClosed
 	}
 
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	for attempt := range readMaxRetries {
 		readBackoff(attempt)

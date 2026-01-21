@@ -10,6 +10,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// =============================================================================
+// Platform detection
+// =============================================================================
+
 // isLittleEndian is true if the CPU uses little-endian byte order.
 // Computed once at package init time.
 var isLittleEndian = func() bool {
@@ -22,7 +26,14 @@ var isLittleEndian = func() bool {
 // Required for atomic 64-bit operations across processes.
 var is64Bit = unsafe.Sizeof(uintptr(0)) >= 8
 
-// SLC1 file format constants.
+// pageSize is the system page size, used for aligning msync ranges.
+// macOS requires page-aligned ranges for msync.
+var pageSize = unix.Getpagesize()
+
+// =============================================================================
+// SLC1 file format constants
+// =============================================================================
+
 const (
 	// File format version.
 	slc1Version = 1
@@ -37,72 +48,13 @@ const (
 	slc1FlagOrderedKeys uint32 = 1 << 0
 )
 
-// FNV-1a 64-bit hash constants.
+// Cache state values (stored in the state field at offset 0x074).
 const (
-	fnv1aOffsetBasis uint64 = 14695981039346656037
-	fnv1aPrime       uint64 = 1099511628211
+	// stateNormal indicates the cache is operational.
+	stateNormal uint32 = 0
+	// stateInvalidated indicates the cache has been explicitly invalidated (terminal).
+	stateInvalidated uint32 = 1
 )
-
-// Safe integer conversion constants.
-const (
-	maxInt    = int(^uint(0) >> 1)
-	maxInt64  = int64(^uint64(0) >> 1)
-	maxUint32 = ^uint32(0)
-)
-
-// intToUint32Checked converts a non-negative int to uint32.
-// Returns ErrInvalidInput if the value is negative or exceeds uint32 max.
-//
-// Callers should validate inputs upfront via Open() and reject with ErrInvalidInput.
-// This function exists to avoid unsafe silent truncation.
-func intToUint32Checked(v int) (uint32, error) {
-	if v < 0 {
-		return 0, fmt.Errorf("int %d is negative, cannot convert to uint32: %w", v, ErrInvalidInput)
-	}
-
-	// Convert through uint64 to avoid gosec G115 warning.
-	u64 := uint64(v)
-
-	if u64 > uint64(maxUint32) {
-		return 0, fmt.Errorf("int %d exceeds uint32 max: %w", v, ErrInvalidInput)
-	}
-
-	return uint32(u64), nil
-}
-
-// uint64ToInt64Checked converts uint64 to int64.
-// Returns ErrInvalidInput if the value exceeds maxInt64.
-//
-// Used for file sizes and offsets. Callers should validate configurations upfront
-// to ensure computed sizes fit in int64.
-func uint64ToInt64Checked(v uint64) (int64, error) {
-	if v > uint64(maxInt64) {
-		return 0, fmt.Errorf("uint64 %d exceeds int64 max: %w", v, ErrInvalidInput)
-	}
-
-	return int64(v), nil
-}
-
-// uint64ToIntChecked converts uint64 to int.
-// Returns ErrInvalidInput if the value exceeds maxInt.
-func uint64ToIntChecked(v uint64) (int, error) {
-	if v > uint64(maxInt) {
-		return 0, fmt.Errorf("uint64 %d exceeds int max: %w", v, ErrInvalidInput)
-	}
-
-	return int(v), nil
-}
-
-// fnv1a64 computes the FNV-1a 64-bit hash over key bytes.
-func fnv1a64(key []byte) uint64 {
-	hash := fnv1aOffsetBasis
-	for _, b := range key {
-		hash ^= uint64(b)
-		hash *= fnv1aPrime
-	}
-
-	return hash
-}
 
 // Header field offsets (bytes from file start).
 const (
@@ -131,13 +83,33 @@ const (
 	offReservedTailStart = 0x0C0 // reserved bytes through 0x0FF (64 bytes)
 )
 
-// Cache state values (stored in the state field at offset 0x074).
+// Slot meta bit flags.
 const (
-	// stateNormal indicates the cache is operational.
-	stateNormal uint32 = 0
-	// stateInvalidated indicates the cache has been explicitly invalidated (terminal).
-	stateInvalidated uint32 = 1
+	// slotMetaUsed indicates a live (non-deleted) slot.
+	slotMetaUsed uint64 = 1 << 0
+
+	// slotMetaReservedMask is the mask for reserved bits in slot meta.
+	// Per spec (002-format.md): "All other bits are reserved and MUST be zero in v1."
+	// If (meta & slotMetaReservedMask) != 0 under a stable even generation, it's corruption.
+	slotMetaReservedMask = ^slotMetaUsed
 )
+
+// FNV-1a 64-bit hash constants.
+const (
+	fnv1aOffsetBasis uint64 = 14695981039346656037
+	fnv1aPrime       uint64 = 1099511628211
+)
+
+// Safe integer conversion constants.
+const (
+	maxInt    = int(^uint(0) >> 1)
+	maxInt64  = int64(^uint64(0) >> 1)
+	maxUint32 = ^uint32(0)
+)
+
+// =============================================================================
+// Header type and operations
+// =============================================================================
 
 // slc1Header represents the 256-byte SLC1 file header.
 type slc1Header struct {
@@ -164,6 +136,53 @@ type slc1Header struct {
 	UserFlags        uint64             // caller-owned opaque flags
 	UserData         [UserDataSize]byte // caller-owned opaque data (64 bytes)
 	// Reserved bytes from 0x0C0 to 0x0FF (64 bytes) MUST be zero.
+}
+
+// newHeader creates a header for a new cache file with the given options.
+// Returns ErrInvalidInput if slot size or bucket count computation fails.
+func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, orderedKeys bool) (slc1Header, error) {
+	slotSize, err := computeSlotSize(keySize, indexSize)
+	if err != nil {
+		return slc1Header{}, err
+	}
+
+	bucketCount, err := computeBucketCount(slotCapacity)
+	if err != nil {
+		return slc1Header{}, err
+	}
+
+	slotsOffset := uint64(slc1HeaderSize)
+	bucketsOffset := slotsOffset + slotCapacity*uint64(slotSize)
+
+	var flags uint32
+	if orderedKeys {
+		flags |= slc1FlagOrderedKeys
+	}
+
+	return slc1Header{
+		Magic:            [4]byte{'S', 'L', 'C', '1'},
+		Version:          slc1Version,
+		HeaderSize:       slc1HeaderSize,
+		KeySize:          keySize,
+		IndexSize:        indexSize,
+		SlotSize:         slotSize,
+		HashAlg:          slc1HashAlgFNV1a64,
+		Flags:            flags,
+		SlotCapacity:     slotCapacity,
+		SlotHighwater:    0,
+		LiveCount:        0,
+		UserVersion:      userVersion,
+		Generation:       0, // even = stable
+		BucketCount:      bucketCount,
+		BucketUsed:       0,
+		BucketTombstones: 0,
+		SlotsOffset:      slotsOffset,
+		BucketsOffset:    bucketsOffset,
+		HeaderCRC32C:     0,                    // computed during encode
+		State:            stateNormal,          // cache is operational
+		UserFlags:        0,                    // caller-owned, default zero
+		UserData:         [UserDataSize]byte{}, // caller-owned, default zero
+	}, nil
 }
 
 // encodeHeader serializes the header to a 256-byte slice.
@@ -247,6 +266,94 @@ func hasReservedBytesSet(buf []byte) bool {
 	return false
 }
 
+// =============================================================================
+// Slot encoding/decoding
+// =============================================================================
+
+// decodedSlot holds the deserialized fields of a slot.
+type decodedSlot struct {
+	key      []byte
+	isLive   bool
+	revision int64
+	index    []byte
+}
+
+// encodeSlot serializes a slot record to a fixed-size byte slice.
+// The slot layout per spec:
+//   - meta (8 bytes, uint64)
+//   - key (keySize bytes)
+//   - key_pad (padding to align revision to 8 bytes)
+//   - revision (8 bytes, int64)
+//   - index (indexSize bytes)
+//   - padding (to slotSize)
+//
+// The caller must provide a precomputed slotSize (from computeSlotSize) to
+// avoid redundant validation. This ensures error handling happens at cache
+// initialization time, not during slot encoding.
+func encodeSlot(key []byte, isLive bool, revision int64, index []byte, keySize, indexSize, slotSize uint32) []byte {
+	buf := make([]byte, slotSize)
+
+	// Meta: bit 0 = USED.
+	var meta uint64
+	if isLive {
+		meta = slotMetaUsed
+	}
+
+	binary.LittleEndian.PutUint64(buf[0:8], meta)
+
+	// Key (keySize bytes starting at offset 8).
+	copy(buf[8:8+keySize], key)
+
+	// Key padding is implicit (already zero in the slice).
+	// Pad to align revision to 8 bytes.
+	keyPad := (8 - (keySize % 8)) % 8
+
+	// Revision (8 bytes, little-endian, at offset 8 + keySize + keyPad).
+	revisionOffset := 8 + keySize + keyPad
+	putInt64LE(buf[revisionOffset:revisionOffset+8], revision)
+
+	// Index (indexSize bytes starting after revision).
+	indexOffset := revisionOffset + 8
+	copy(buf[indexOffset:indexOffset+indexSize], index)
+
+	// Remaining padding is implicit (already zero in the slice).
+
+	return buf
+}
+
+// decodeSlot deserializes a fixed-size byte slice into slot fields.
+func decodeSlot(buf []byte, keySize, indexSize uint32) decodedSlot {
+	// Meta: bit 0 = USED.
+	meta := binary.LittleEndian.Uint64(buf[0:8])
+
+	// Key (keySize bytes starting at offset 8).
+	key := make([]byte, keySize)
+	copy(key, buf[8:8+keySize])
+
+	// Pad to align revision to 8 bytes.
+	keyPad := (8 - (keySize % 8)) % 8
+
+	// Revision (8 bytes at offset 8 + keySize + keyPad).
+	revisionOffset := 8 + keySize + keyPad
+	revision := getInt64LE(buf[revisionOffset : revisionOffset+8])
+
+	// Index (indexSize bytes starting after revision).
+	indexOffset := revisionOffset + 8
+
+	var index []byte
+	if indexSize > 0 {
+		index = make([]byte, indexSize)
+		copy(index, buf[indexOffset:indexOffset+indexSize])
+	}
+
+	return decodedSlot{
+		key:      key,
+		isLive:   (meta & slotMetaUsed) != 0,
+		revision: revision,
+		index:    index,
+	}
+}
+
 // computeSlotSize calculates the slot size per spec and enforces
 // implementation limits.
 //
@@ -272,9 +379,19 @@ func computeSlotSize(keySize, indexSize uint32) (uint32, error) {
 	return uint32(aligned), nil
 }
 
-// align8U64 rounds x up to the next multiple of 8.
-func align8U64(x uint64) uint64 {
-	return (x + 7) &^ 7
+// =============================================================================
+// Hash table helpers
+// =============================================================================
+
+// fnv1a64 computes the FNV-1a 64-bit hash over key bytes.
+func fnv1a64(key []byte) uint64 {
+	hash := fnv1aOffsetBasis
+	for _, b := range key {
+		hash ^= uint64(b)
+		hash *= fnv1aPrime
+	}
+
+	return hash
 }
 
 // computeBucketCount calculates the bucket count for a given slot capacity
@@ -321,181 +438,9 @@ func nextPow2(value uint64) uint64 {
 	return value + 1
 }
 
-// Slot meta bit flags.
-const (
-	// slotMetaUsed indicates a live (non-deleted) slot.
-	slotMetaUsed uint64 = 1 << 0
-
-	// slotMetaReservedMask is the mask for reserved bits in slot meta.
-	// Per spec (002-format.md): "All other bits are reserved and MUST be zero in v1."
-	// If (meta & slotMetaReservedMask) != 0 under a stable even generation, it's corruption.
-	slotMetaReservedMask = ^slotMetaUsed
-)
-
-// encodeSlot serializes a slot record to a fixed-size byte slice.
-// The slot layout per spec:
-//   - meta (8 bytes, uint64)
-//   - key (keySize bytes)
-//   - key_pad (padding to align revision to 8 bytes)
-//   - revision (8 bytes, int64)
-//   - index (indexSize bytes)
-//   - padding (to slotSize)
-//
-// The caller must provide a precomputed slotSize (from computeSlotSize) to
-// avoid redundant validation. This ensures error handling happens at cache
-// initialization time, not during slot encoding.
-func encodeSlot(key []byte, isLive bool, revision int64, index []byte, keySize, indexSize, slotSize uint32) []byte {
-	buf := make([]byte, slotSize)
-
-	// Meta: bit 0 = USED.
-	var meta uint64
-	if isLive {
-		meta = slotMetaUsed
-	}
-
-	binary.LittleEndian.PutUint64(buf[0:8], meta)
-
-	// Key (keySize bytes starting at offset 8).
-	copy(buf[8:8+keySize], key)
-
-	// Key padding is implicit (already zero in the slice).
-	// Pad to align revision to 8 bytes.
-	keyPad := (8 - (keySize % 8)) % 8
-
-	// Revision (8 bytes, little-endian, at offset 8 + keySize + keyPad).
-	revisionOffset := 8 + keySize + keyPad
-	putInt64LE(buf[revisionOffset:revisionOffset+8], revision)
-
-	// Index (indexSize bytes starting after revision).
-	indexOffset := revisionOffset + 8
-	copy(buf[indexOffset:indexOffset+indexSize], index)
-
-	// Remaining padding is implicit (already zero in the slice).
-
-	return buf
-}
-
-// decodedSlot holds the deserialized fields of a slot.
-type decodedSlot struct {
-	key      []byte
-	isLive   bool
-	revision int64
-	index    []byte
-}
-
-// decodeSlot deserializes a fixed-size byte slice into slot fields.
-func decodeSlot(buf []byte, keySize, indexSize uint32) decodedSlot {
-	// Meta: bit 0 = USED.
-	meta := binary.LittleEndian.Uint64(buf[0:8])
-
-	// Key (keySize bytes starting at offset 8).
-	key := make([]byte, keySize)
-	copy(key, buf[8:8+keySize])
-
-	// Pad to align revision to 8 bytes.
-	keyPad := (8 - (keySize % 8)) % 8
-
-	// Revision (8 bytes at offset 8 + keySize + keyPad).
-	revisionOffset := 8 + keySize + keyPad
-	revision := getInt64LE(buf[revisionOffset : revisionOffset+8])
-
-	// Index (indexSize bytes starting after revision).
-	indexOffset := revisionOffset + 8
-
-	var index []byte
-	if indexSize > 0 {
-		index = make([]byte, indexSize)
-		copy(index, buf[indexOffset:indexOffset+indexSize])
-	}
-
-	return decodedSlot{
-		key:      key,
-		isLive:   (meta & slotMetaUsed) != 0,
-		revision: revision,
-		index:    index,
-	}
-}
-
-// newHeader creates a header for a new cache file with the given options.
-// Returns ErrInvalidInput if slot size or bucket count computation fails.
-func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, orderedKeys bool) (slc1Header, error) {
-	slotSize, err := computeSlotSize(keySize, indexSize)
-	if err != nil {
-		return slc1Header{}, err
-	}
-
-	bucketCount, err := computeBucketCount(slotCapacity)
-	if err != nil {
-		return slc1Header{}, err
-	}
-
-	slotsOffset := uint64(slc1HeaderSize)
-	bucketsOffset := slotsOffset + slotCapacity*uint64(slotSize)
-
-	var flags uint32
-	if orderedKeys {
-		flags |= slc1FlagOrderedKeys
-	}
-
-	return slc1Header{
-		Magic:            [4]byte{'S', 'L', 'C', '1'},
-		Version:          slc1Version,
-		HeaderSize:       slc1HeaderSize,
-		KeySize:          keySize,
-		IndexSize:        indexSize,
-		SlotSize:         slotSize,
-		HashAlg:          slc1HashAlgFNV1a64,
-		Flags:            flags,
-		SlotCapacity:     slotCapacity,
-		SlotHighwater:    0,
-		LiveCount:        0,
-		UserVersion:      userVersion,
-		Generation:       0, // even = stable
-		BucketCount:      bucketCount,
-		BucketUsed:       0,
-		BucketTombstones: 0,
-		SlotsOffset:      slotsOffset,
-		BucketsOffset:    bucketsOffset,
-		HeaderCRC32C:     0,                    // computed during encode
-		State:            stateNormal,          // cache is operational
-		UserFlags:        0,                    // caller-owned, default zero
-		UserData:         [UserDataSize]byte{}, // caller-owned, default zero
-	}, nil
-}
-
-// putInt64LE writes an int64 to buf in little-endian byte order.
-// This avoids int64->uint64 conversion that binary.LittleEndian.PutUint64 requires.
-func putInt64LE(buf []byte, value int64) {
-	// Bounds check hint: if buf[7] is valid, buf[0..6] are too.
-	// Lets the compiler eliminate redundant bounds checks below.
-	_ = buf[7]
-
-	buf[0] = byte(value)
-	buf[1] = byte(value >> 8)
-	buf[2] = byte(value >> 16)
-	buf[3] = byte(value >> 24)
-	buf[4] = byte(value >> 32)
-	buf[5] = byte(value >> 40)
-	buf[6] = byte(value >> 48)
-	buf[7] = byte(value >> 56)
-}
-
-// getInt64LE reads an int64 from buf in little-endian byte order.
-// This avoids uint64->int64 conversion that binary.LittleEndian.Uint64 returns.
-func getInt64LE(buf []byte) int64 {
-	// Bounds check hint: if buf[7] is valid, buf[0..6] are too.
-	// Lets the compiler eliminate redundant bounds checks below.
-	_ = buf[7]
-
-	return int64(buf[0]) |
-		int64(buf[1])<<8 |
-		int64(buf[2])<<16 |
-		int64(buf[3])<<24 |
-		int64(buf[4])<<32 |
-		int64(buf[5])<<40 |
-		int64(buf[6])<<48 |
-		int64(buf[7])<<56
-}
+// =============================================================================
+// Atomic operations for cross-process synchronization
+// =============================================================================
 
 // atomicLoadUint64 performs an atomic 64-bit load from an 8-byte-aligned
 // position in the buffer. The spec requires generation reads to be atomic
@@ -568,9 +513,99 @@ func atomicStoreInt64(buf []byte, val int64) {
 	atomic.StoreInt64((*int64)(unsafe.Pointer(&buf[0])), val)
 }
 
-// pageSize is the system page size, used for aligning msync ranges.
-// macOS requires page-aligned ranges for msync.
-var pageSize = unix.Getpagesize()
+// =============================================================================
+// Low-level byte encoding helpers
+// =============================================================================
+
+// putInt64LE writes an int64 to buf in little-endian byte order.
+// This avoids int64->uint64 conversion that binary.LittleEndian.PutUint64 requires.
+func putInt64LE(buf []byte, value int64) {
+	// Bounds check hint: if buf[7] is valid, buf[0..6] are too.
+	// Lets the compiler eliminate redundant bounds checks below.
+	_ = buf[7]
+
+	buf[0] = byte(value)
+	buf[1] = byte(value >> 8)
+	buf[2] = byte(value >> 16)
+	buf[3] = byte(value >> 24)
+	buf[4] = byte(value >> 32)
+	buf[5] = byte(value >> 40)
+	buf[6] = byte(value >> 48)
+	buf[7] = byte(value >> 56)
+}
+
+// getInt64LE reads an int64 from buf in little-endian byte order.
+// This avoids uint64->int64 conversion that binary.LittleEndian.Uint64 returns.
+func getInt64LE(buf []byte) int64 {
+	// Bounds check hint: if buf[7] is valid, buf[0..6] are too.
+	// Lets the compiler eliminate redundant bounds checks below.
+	_ = buf[7]
+
+	return int64(buf[0]) |
+		int64(buf[1])<<8 |
+		int64(buf[2])<<16 |
+		int64(buf[3])<<24 |
+		int64(buf[4])<<32 |
+		int64(buf[5])<<40 |
+		int64(buf[6])<<48 |
+		int64(buf[7])<<56
+}
+
+// align8U64 rounds x up to the next multiple of 8.
+func align8U64(x uint64) uint64 {
+	return (x + 7) &^ 7
+}
+
+// =============================================================================
+// Safe integer conversion helpers
+// =============================================================================
+
+// intToUint32Checked converts a non-negative int to uint32.
+// Returns ErrInvalidInput if the value is negative or exceeds uint32 max.
+//
+// Callers should validate inputs upfront via Open() and reject with ErrInvalidInput.
+// This function exists to avoid unsafe silent truncation.
+func intToUint32Checked(v int) (uint32, error) {
+	if v < 0 {
+		return 0, fmt.Errorf("int %d is negative, cannot convert to uint32: %w", v, ErrInvalidInput)
+	}
+
+	// Convert through uint64 to avoid gosec G115 warning.
+	u64 := uint64(v)
+
+	if u64 > uint64(maxUint32) {
+		return 0, fmt.Errorf("int %d exceeds uint32 max: %w", v, ErrInvalidInput)
+	}
+
+	return uint32(u64), nil
+}
+
+// uint64ToInt64Checked converts uint64 to int64.
+// Returns ErrInvalidInput if the value exceeds maxInt64.
+//
+// Used for file sizes and offsets. Callers should validate configurations upfront
+// to ensure computed sizes fit in int64.
+func uint64ToInt64Checked(v uint64) (int64, error) {
+	if v > uint64(maxInt64) {
+		return 0, fmt.Errorf("uint64 %d exceeds int64 max: %w", v, ErrInvalidInput)
+	}
+
+	return int64(v), nil
+}
+
+// uint64ToIntChecked converts uint64 to int.
+// Returns ErrInvalidInput if the value exceeds maxInt.
+func uint64ToIntChecked(v uint64) (int, error) {
+	if v > uint64(maxInt) {
+		return 0, fmt.Errorf("uint64 %d exceeds int max: %w", v, ErrInvalidInput)
+	}
+
+	return int(v), nil
+}
+
+// =============================================================================
+// Memory-mapped file operations
+// =============================================================================
 
 // msyncRange performs a synchronous msync on the given byte range.
 // The range is automatically page-aligned to satisfy macOS requirements.
