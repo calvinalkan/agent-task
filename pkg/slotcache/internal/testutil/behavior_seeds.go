@@ -163,6 +163,53 @@ var SeedPrefixBehavior = NewBehaviorSeedBuilder(seedKeySize, seedIndexSize).
 	Build()
 
 // -----------------------------------------------------------------------------
+// UserHeader seeds (K-L).
+//
+// These seeds exercise user header operations. Guard tests verify they
+// emit SetUserHeaderFlags/SetUserHeaderData and UserHeader operations.
+// -----------------------------------------------------------------------------
+
+// SeedUserHeaderFlagsCommit exercises SetUserHeaderFlags with commit.
+//
+// Sequence:
+//   - BeginWrite -> SetUserHeaderFlags(0x1234) -> Put(key) -> Commit -> UserHeader
+//
+// Validates: header flags are published on commit and readable via UserHeader().
+var SeedUserHeaderFlagsCommit = NewBehaviorSeedBuilder(seedKeySize, seedIndexSize).
+	BeginWrite().
+	SetUserHeaderFlags(0x1234567890ABCDEF).
+	Put([]byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22}, 1, []byte{0x01, 0x02, 0x03, 0x04}).
+	Commit().
+	UserHeader().
+	Build()
+
+// SeedUserHeaderDataDiscard exercises SetUserHeaderData with writer close (discard).
+//
+// Sequence:
+//   - BeginWrite -> Put(key) -> Commit -> BeginWrite -> SetUserHeaderData -> Writer.Close -> UserHeader
+//
+// Validates: header data changes are discarded on Writer.Close without commit.
+// The UserHeader call should return the unchanged header (zero data).
+var SeedUserHeaderDataDiscard = NewBehaviorSeedBuilder(seedKeySize, seedIndexSize).
+	BeginWrite().
+	Put([]byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}, 1, []byte{0xAA, 0xBB, 0xCC, 0xDD}).
+	Commit().
+	BeginWrite().
+	SetUserHeaderData([64]byte{
+		0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+		0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+		0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+		0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+		0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+		0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+	}).
+	WriterClose().
+	UserHeader().
+	Build()
+
+// -----------------------------------------------------------------------------
 // Filter seeds (I-J).
 //
 // These seeds exercise filtered scan operations. Guard tests verify they
@@ -280,10 +327,28 @@ func FilterSeeds() []BehaviorSeed {
 	}
 }
 
+// UserHeaderSeeds returns seeds that exercise user header operations.
+// Guard tests verify these emit SetUserHeaderFlags/SetUserHeaderData and UserHeader.
+func UserHeaderSeeds() []BehaviorSeed {
+	return []BehaviorSeed{
+		{
+			Name:        "UserHeaderFlagsCommit",
+			Description: "header flags published on commit and readable via UserHeader()",
+			Data:        SeedUserHeaderFlagsCommit,
+		},
+		{
+			Name:        "UserHeaderDataDiscard",
+			Description: "header data discarded on Writer.Close without commit",
+			Data:        SeedUserHeaderDataDiscard,
+		},
+	}
+}
+
 // AllBehaviorSeeds returns all curated behavior seeds.
 func AllBehaviorSeeds() []BehaviorSeed {
 	seeds := CoreBehaviorSeeds()
 	seeds = append(seeds, FilterSeeds()...)
+	seeds = append(seeds, UserHeaderSeeds()...)
 
 	return seeds
 }

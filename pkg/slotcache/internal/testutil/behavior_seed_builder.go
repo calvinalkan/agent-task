@@ -222,6 +222,55 @@ func (b *BehaviorSeedBuilder) Len() *BehaviorSeedBuilder {
 	return b
 }
 
+// UserHeader emits a UserHeader (Cache.UserHeader()) operation.
+// In reader mode (Fill phase with beginWriteRate=50):
+//   - userHeaderThreshold = 92 + scale(5) = 92 + 3 = 95
+//   - UserHeader is in range [92, 95) → choice=0x5C (92)
+func (b *BehaviorSeedBuilder) UserHeader() *BehaviorSeedBuilder {
+	if b.writerActive {
+		return b // Skip if writer active (UserHeader is a reader-only op in generation)
+	}
+
+	b.addOpGenRoulette()
+	b.data = append(b.data, 0x5C) // choice=92 → UserHeader in reader mode (Fill phase)
+
+	return b
+}
+
+// SetUserHeaderFlags emits a Writer.SetUserHeaderFlags operation.
+// In writer mode for Fill phase:
+//   - deleteThreshold=15, commitThreshold=23, closeThreshold=28
+//   - setFlagsThreshold=28+3=31
+//   - SetUserHeaderFlags is in range [28, 31) → choice=0x1C (28)
+func (b *BehaviorSeedBuilder) SetUserHeaderFlags(flags uint64) *BehaviorSeedBuilder {
+	if !b.writerActive {
+		return b
+	}
+
+	b.addOpGenRoulette()
+	b.data = append(b.data, 0x1C) // choice=28 → SetUserHeaderFlags in writer mode
+	b.addUint64(flags)
+
+	return b
+}
+
+// SetUserHeaderData emits a Writer.SetUserHeaderData operation.
+// In writer mode for Fill phase:
+//   - setFlagsThreshold=31, setDataThreshold=31+2=33
+//   - SetUserHeaderData is in range [31, 33) → choice=0x1F (31)
+func (b *BehaviorSeedBuilder) SetUserHeaderData(data [64]byte) *BehaviorSeedBuilder {
+	if !b.writerActive {
+		return b
+	}
+
+	b.addOpGenRoulette()
+	b.data = append(b.data, 0x1F) // choice=31 → SetUserHeaderData in writer mode
+	// nextUserData() reads 64 bytes from the decoder
+	b.data = append(b.data, data[:]...)
+
+	return b
+}
+
 // Close emits a Cache.Close operation.
 // OpGenerator: roulette in [reopenThreshold, closeThreshold) → Close
 // reopenThreshold ≈ 8, closeThreshold ≈ 16
@@ -289,6 +338,21 @@ func (b *BehaviorSeedBuilder) addRevision(rev int64) {
 		byte(rev>>40),
 		byte(rev>>48),
 		byte(rev>>56),
+	)
+}
+
+// addUint64 adds a uint64 value in little-endian format.
+// Used for SetUserHeaderFlags which reads via NextUint64().
+func (b *BehaviorSeedBuilder) addUint64(v uint64) {
+	b.data = append(b.data,
+		byte(v),
+		byte(v>>8),
+		byte(v>>16),
+		byte(v>>24),
+		byte(v>>32),
+		byte(v>>40),
+		byte(v>>48),
+		byte(v>>56),
 	)
 }
 

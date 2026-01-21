@@ -255,6 +255,27 @@ func IsLen(op Operation) bool {
 	return ok
 }
 
+// IsUserHeader returns true if the operation is UserHeader.
+func IsUserHeader(op Operation) bool {
+	_, ok := op.(OpUserHeader)
+
+	return ok
+}
+
+// IsSetUserHeaderFlags returns true if the operation is Writer.SetUserHeaderFlags.
+func IsSetUserHeaderFlags(op Operation) bool {
+	_, ok := op.(OpSetUserHeaderFlags)
+
+	return ok
+}
+
+// IsSetUserHeaderData returns true if the operation is Writer.SetUserHeaderData.
+func IsSetUserHeaderData(op Operation) bool {
+	_, ok := op.(OpSetUserHeaderData)
+
+	return ok
+}
+
 // IsPutWithKey returns a predicate that matches Put ops with a specific key.
 func IsPutWithKey(key []byte) func(Operation) bool {
 	return func(op Operation) bool {

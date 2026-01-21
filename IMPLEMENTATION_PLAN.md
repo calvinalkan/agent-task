@@ -233,11 +233,21 @@ required the seeds to work with the new protocol.
 
 ### 6.2 Add at least two new curated header seeds
 
-- [ ] Seed: BeginWrite → SetUserHeaderFlags → Put → Commit → UserHeader
-- [ ] Seed: BeginWrite → SetUserHeaderData → Writer.Close → UserHeader unchanged
+- [x] Seed: BeginWrite → SetUserHeaderFlags → Put → Commit → UserHeader
+- [x] Seed: BeginWrite → SetUserHeaderData → Writer.Close → UserHeader unchanged
 
 Acceptance:
 - Seed guard tests run on plain `go test` and prove header milestones occur.
+
+**Note (2026-01-21):** Phase 6.2 complete. Added two UserHeader curated seeds:
+- `SeedUserHeaderFlagsCommit`: Exercises SetUserHeaderFlags with commit and UserHeader read
+- `SeedUserHeaderDataDiscard`: Exercises SetUserHeaderData with Writer.Close (discard) and UserHeader read
+
+Also added:
+- `BehaviorSeedBuilder` methods: `UserHeader()`, `SetUserHeaderFlags(uint64)`, `SetUserHeaderData([64]byte)`
+- `UserHeaderSeeds()` function returning the new seeds
+- Predicates: `IsUserHeader`, `IsSetUserHeaderFlags`, `IsSetUserHeaderData`
+- Guard test file: `behavior_userheader_seed_guard_test.go`
 
 ---
 
@@ -307,3 +317,13 @@ Exit criteria:
 - Seeds + guards align with that protocol.
 - Behavior fuzz includes UserHeader operations and the model/harness validates them.
 - Spec fuzz is driven by OpGenerator and retains the spec oracle invariants.
+
+---
+
+## Phase 10 — Canonical protocol usage in behavior fuzz
+
+- [ ] Update behavior fuzz targets to use CanonicalOpGenConfig + BehaviorOpSet (or document why DefaultOpGenConfig is intentional).
+
+Files:
+- `pkg/slotcache/behavior_fuzz_test.go`
+- `pkg/slotcache/behavior_fuzz_options_test.go`
