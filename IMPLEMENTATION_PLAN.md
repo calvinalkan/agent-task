@@ -192,11 +192,11 @@ Keep seeds minimal and add a guard if they're hand-rolled.
 - [x] 8. Add a dedicated copy/aliasing regression test (or move copy checks into heavy-compare only).
 
 ### Phase B — update behavior tests
-- [ ] 1. Refactor deterministic tests (`behavior_deterministic_seed_test.go`) to use profiles + `RunBehavior`.
-  - [ ] Replace inline loop with `testutil.RunBehavior`.
-  - [ ] Iterate over option profiles from testutil.
-  - [ ] Use an `OpGenerator` config optimized for deeper state (lower invalid rate, longer writer sessions, mild collision mode).
-  - [ ] Configure light/heavy compare cadence (e.g., light every op, heavy on commit/close/reopen).
+- [x] 1. Refactor deterministic tests (`behavior_deterministic_seed_test.go`) to use profiles + `RunBehavior`.
+  - [x] Replace inline loop with `testutil.RunBehavior`.
+  - [x] Iterate over option profiles from testutil.
+  - [x] Use an `OpGenerator` config optimized for deeper state (lower invalid rate, longer writer sessions, mild collision mode).
+  - [x] Configure light/heavy compare cadence (e.g., light every op, heavy on commit/close/reopen).
 - [ ] 2. Refactor behavior fuzz targets (`behavior_fuzz_test.go`) to use `RunBehavior`.
   - [ ] Keep separate fuzz target (fixed config) for deep coverage.
   - [ ] Use shared `RunBehavior` + `OpGenerator` config.
