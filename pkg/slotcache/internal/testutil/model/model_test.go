@@ -1930,3 +1930,296 @@ func modelEntry(key string, revision int64, index string) model.Entry {
 		Index:    []byte(index),
 	}
 }
+
+// -----------------------------------------------------------------------------
+// UserHeader tests
+// -----------------------------------------------------------------------------
+
+func Test_ModelCache_UserHeader_Returns_ZeroValue_When_Never_Set(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	header, err := cacheHandle.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Zero(t, header.Flags, "Flags should default to zero")
+	assert.Zero(t, header.Data, "Data should default to zero")
+}
+
+func Test_ModelCache_UserHeader_Returns_ErrClosed_When_Cache_Closed(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+	require.NoError(t, cacheHandle.Close(), "Close should succeed")
+
+	_, err := cacheHandle.UserHeader()
+	require.ErrorIs(t, err, slotcache.ErrClosed, "UserHeader should return ErrClosed")
+}
+
+func Test_ModelWriter_SetUserHeaderFlags_Publishes_When_Commit_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	require.NoError(t, writer.SetUserHeaderFlags(0xDEADBEEF), "SetUserHeaderFlags should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	header, err := cacheHandle.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Equal(t, uint64(0xDEADBEEF), header.Flags, "Flags should be published")
+	assert.Zero(t, header.Data, "Data should remain zero when only Flags set")
+}
+
+func Test_ModelWriter_SetUserHeaderData_Publishes_When_Commit_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	var data [slotcache.UserDataSize]byte
+	copy(data[:], "hello, world")
+
+	require.NoError(t, writer.SetUserHeaderData(data), "SetUserHeaderData should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	header, err := cacheHandle.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Zero(t, header.Flags, "Flags should remain zero when only Data set")
+	assert.Equal(t, data, header.Data, "Data should be published")
+}
+
+func Test_ModelWriter_UserHeader_Persists_When_Cache_Reopened(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	// Set header values.
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+	require.NoError(t, writer.SetUserHeaderFlags(12345), "SetUserHeaderFlags should succeed")
+
+	var data [slotcache.UserDataSize]byte
+	copy(data[:], "persistent data")
+	require.NoError(t, writer.SetUserHeaderData(data), "SetUserHeaderData should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	// Close and reopen.
+	require.NoError(t, cacheHandle.Close(), "Close should succeed")
+	cacheHandle = model.Open(fileState)
+
+	// Verify header values persisted.
+	header, err := cacheHandle.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Equal(t, uint64(12345), header.Flags, "Flags should persist across Close/Open")
+	assert.Equal(t, data, header.Data, "Data should persist across Close/Open")
+}
+
+func Test_ModelWriter_UserHeader_Discarded_When_Close_Without_Commit(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	require.NoError(t, writer.SetUserHeaderFlags(0xCAFEBABE), "SetUserHeaderFlags should succeed")
+
+	var data [slotcache.UserDataSize]byte
+	copy(data[:], "should be discarded")
+	require.NoError(t, writer.SetUserHeaderData(data), "SetUserHeaderData should succeed")
+
+	// Close without commit.
+	writer.Close()
+
+	// Header should remain zero.
+	header, err := cacheHandle.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Zero(t, header.Flags, "Flags should not be published without Commit")
+	assert.Zero(t, header.Data, "Data should not be published without Commit")
+}
+
+func Test_ModelWriter_UserHeader_Discarded_When_Commit_Fails_With_ErrFull(t *testing.T) {
+	t.Parallel()
+
+	// Create a file with capacity for only 1 slot.
+	fileState := newTestFile(t, 1)
+	cacheHandle := model.Open(fileState)
+
+	// Fill the cache.
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+	require.NoError(t, writer.Put([]byte("k1"), 1, []byte("i1")), "Put should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	// Try to add another entry with header changes.
+	writer, err = cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	require.NoError(t, writer.SetUserHeaderFlags(9999), "SetUserHeaderFlags should succeed")
+	require.NoError(t, writer.Put([]byte("k2"), 2, []byte("i2")), "Put should succeed")
+
+	err = writer.Commit()
+	require.ErrorIs(t, err, slotcache.ErrFull, "Commit should fail with ErrFull")
+	writer.Close()
+
+	// Header should remain unchanged.
+	header, err := cacheHandle.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Zero(t, header.Flags, "Flags should not be published when Commit fails")
+}
+
+func Test_ModelWriter_SetUserHeaderFlags_Returns_ErrClosed_When_Writer_Closed(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+	writer.Close()
+
+	err = writer.SetUserHeaderFlags(123)
+	require.ErrorIs(t, err, slotcache.ErrClosed, "SetUserHeaderFlags should return ErrClosed")
+}
+
+func Test_ModelWriter_SetUserHeaderData_Returns_ErrClosed_When_Writer_Closed(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+	writer.Close()
+
+	var data [slotcache.UserDataSize]byte
+
+	err = writer.SetUserHeaderData(data)
+	require.ErrorIs(t, err, slotcache.ErrClosed, "SetUserHeaderData should return ErrClosed")
+}
+
+func Test_ModelWriter_SetUserHeaderFlags_Preserves_Data_When_Only_Flags_Set(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	// First: set data.
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	var data [slotcache.UserDataSize]byte
+	copy(data[:], "preserved")
+	require.NoError(t, writer.SetUserHeaderData(data), "SetUserHeaderData should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	// Second: set only flags.
+	writer, err = cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+	require.NoError(t, writer.SetUserHeaderFlags(42), "SetUserHeaderFlags should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	// Verify data was preserved.
+	header, err := cacheHandle.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Equal(t, uint64(42), header.Flags, "Flags should be updated")
+	assert.Equal(t, data, header.Data, "Data should be preserved when only Flags set")
+}
+
+func Test_ModelWriter_SetUserHeaderData_Preserves_Flags_When_Only_Data_Set(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	// First: set flags.
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+	require.NoError(t, writer.SetUserHeaderFlags(0xABCD), "SetUserHeaderFlags should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	// Second: set only data.
+	writer, err = cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+
+	var data [slotcache.UserDataSize]byte
+	copy(data[:], "new data")
+	require.NoError(t, writer.SetUserHeaderData(data), "SetUserHeaderData should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	// Verify flags were preserved.
+	header, err := cacheHandle.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Equal(t, uint64(0xABCD), header.Flags, "Flags should be preserved when only Data set")
+	assert.Equal(t, data, header.Data, "Data should be updated")
+}
+
+func Test_ModelFile_Clone_Copies_UserHeader_When_Header_Set(t *testing.T) {
+	t.Parallel()
+
+	fileState := newTestFile(t, 10)
+	cacheHandle := model.Open(fileState)
+
+	// Set header values.
+	writer, err := cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+	require.NoError(t, writer.SetUserHeaderFlags(999), "SetUserHeaderFlags should succeed")
+
+	var data [slotcache.UserDataSize]byte
+	copy(data[:], "cloned")
+	require.NoError(t, writer.SetUserHeaderData(data), "SetUserHeaderData should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+	require.NoError(t, cacheHandle.Close(), "Close should succeed")
+
+	// Clone the file state.
+	clonedFile := fileState.Clone()
+
+	// Verify the clone has the same header values.
+	clonedCache := model.Open(clonedFile)
+	header, err := clonedCache.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+
+	assert.Equal(t, uint64(999), header.Flags, "Cloned Flags should match")
+	assert.Equal(t, data, header.Data, "Cloned Data should match")
+
+	// Modify original and verify clone is independent.
+	cacheHandle = model.Open(fileState)
+	writer, err = cacheHandle.BeginWrite()
+	require.NoError(t, err, "BeginWrite should succeed")
+	require.NoError(t, writer.SetUserHeaderFlags(111), "SetUserHeaderFlags should succeed")
+	require.NoError(t, writer.Commit(), "Commit should succeed")
+	writer.Close()
+
+	// Clone should be unchanged.
+	header, err = clonedCache.UserHeader()
+	require.NoError(t, err, "UserHeader should succeed")
+	assert.Equal(t, uint64(999), header.Flags, "Cloned Flags should be independent of original")
+}

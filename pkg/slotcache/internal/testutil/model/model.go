@@ -45,6 +45,7 @@ type FileState struct {
 	UserVersion  uint64
 	OrderedKeys  bool
 	Slots        []SlotRecord
+	UserHeader   slotcache.UserHeader // caller-owned header metadata
 }
 
 // CacheModel is an open handle against a FileState.
@@ -69,6 +70,12 @@ type WriterModel struct {
 	IsClosed       bool
 	ClosedByCommit bool
 	BufferedOps    []BufferedOperation
+
+	// Staged user header changes; published only on successful Commit.
+	stagedFlags    uint64
+	stagedData     [slotcache.UserDataSize]byte
+	hasStagedFlags bool
+	hasStagedData  bool
 }
 
 // NewFile validates options and returns an empty file state.
@@ -107,6 +114,7 @@ func (file *FileState) Clone() *FileState {
 		UserVersion:  file.UserVersion,
 		OrderedKeys:  file.OrderedKeys,
 		Slots:        slots,
+		UserHeader:   file.UserHeader, // value copy (uint64 + [64]byte)
 	}
 }
 
@@ -145,6 +153,15 @@ func (cache *CacheModel) Len() (int, error) {
 	}
 
 	return count, nil
+}
+
+// UserHeader returns a copy of the caller-owned header metadata.
+func (cache *CacheModel) UserHeader() (slotcache.UserHeader, error) {
+	if cache.IsClosed {
+		return slotcache.UserHeader{}, slotcache.ErrClosed
+	}
+
+	return cache.File.UserHeader, nil
 }
 
 // Get returns the current live entry for the exact key, if any.
@@ -457,6 +474,38 @@ func (writer *WriterModel) Delete(key []byte) (bool, error) {
 	return wasPresent, nil
 }
 
+// SetUserHeaderFlags stages a change to the user header flags.
+//
+// The new value is published atomically on [WriterModel.Commit].
+// If Commit fails (e.g., ErrFull), the change is discarded.
+// Setting flags does not affect the user data bytes.
+func (writer *WriterModel) SetUserHeaderFlags(flags uint64) error {
+	if writer.IsClosed || writer.Cache.IsClosed {
+		return slotcache.ErrClosed
+	}
+
+	writer.stagedFlags = flags
+	writer.hasStagedFlags = true
+
+	return nil
+}
+
+// SetUserHeaderData stages a change to the user header data.
+//
+// The new value is published atomically on [WriterModel.Commit].
+// If Commit fails (e.g., ErrFull), the change is discarded.
+// Setting data does not affect the user flags.
+func (writer *WriterModel) SetUserHeaderData(data [slotcache.UserDataSize]byte) error {
+	if writer.IsClosed || writer.Cache.IsClosed {
+		return slotcache.ErrClosed
+	}
+
+	writer.stagedData = data
+	writer.hasStagedData = true
+
+	return nil
+}
+
 // Commit applies buffered operations and closes the writer session.
 func (writer *WriterModel) Commit() error {
 	if writer.IsClosed || writer.Cache.IsClosed {
@@ -478,6 +527,7 @@ func (writer *WriterModel) Commit() error {
 			return err
 		}
 
+		writer.publishUserHeader()
 		writer.closeByCommit()
 
 		return nil
@@ -487,9 +537,22 @@ func (writer *WriterModel) Commit() error {
 		writer.apply(op)
 	}
 
+	writer.publishUserHeader()
 	writer.closeByCommit()
 
 	return nil
+}
+
+// publishUserHeader applies staged user header changes to the file state.
+// Called only on successful Commit. Preserves the other field when only one is updated.
+func (writer *WriterModel) publishUserHeader() {
+	if writer.hasStagedFlags {
+		writer.Cache.File.UserHeader.Flags = writer.stagedFlags
+	}
+
+	if writer.hasStagedData {
+		writer.Cache.File.UserHeader.Data = writer.stagedData
+	}
 }
 
 func (writer *WriterModel) closeByCommit() {

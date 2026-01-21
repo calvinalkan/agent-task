@@ -132,26 +132,26 @@ canonical OpGenerator protocol.
 
 ### 3.1 Model state extensions
 
-- [ ] Add `UserHeader slotcache.UserHeader` to `model.FileState`.
-- [ ] Default is zero values on `NewFile`.
+- [x] Add `UserHeader slotcache.UserHeader` to `model.FileState`.
+- [x] Default is zero values on `NewFile`.
 
 Files:
 - `pkg/slotcache/internal/testutil/model/model.go`
 
 ### 3.2 CacheModel: UserHeader()
 
-- [ ] Implement `CacheModel.UserHeader() (slotcache.UserHeader, error)`.
+- [x] Implement `CacheModel.UserHeader() (slotcache.UserHeader, error)`.
   - returns `ErrClosed` if closed
   - returns a copy of `FileState.UserHeader`
 
 ### 3.3 WriterModel: SetUserHeaderFlags/Data staging
 
-- [ ] Implement `WriterModel.SetUserHeaderFlags(flags uint64) error`
-- [ ] Implement `WriterModel.SetUserHeaderData(data [slotcache.UserDataSize]byte) error`
-- [ ] Buffer changes in writer state.
-- [ ] Publish buffered header updates only on **successful Commit**.
-- [ ] Discard on `WriterModel.Close()`.
-- [ ] Preserve the other field when only one is updated.
+- [x] Implement `WriterModel.SetUserHeaderFlags(flags uint64) error`
+- [x] Implement `WriterModel.SetUserHeaderData(data [slotcache.UserDataSize]byte) error`
+- [x] Buffer changes in writer state.
+- [x] Publish buffered header updates only on **successful Commit**.
+- [x] Discard on `WriterModel.Close()`.
+- [x] Preserve the other field when only one is updated.
 
 Files:
 - `pkg/slotcache/internal/testutil/model/model.go`
