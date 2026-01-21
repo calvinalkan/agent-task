@@ -31,7 +31,13 @@ func Test_ComputeSlotSize_Returns_Correct_Size_When_Given_Key_And_Index_Sizes(t 
 	}
 
 	for _, tt := range tests {
-		got := computeSlotSize(tt.keySize, tt.indexSize)
+		got, err := computeSlotSize(tt.keySize, tt.indexSize)
+		if err != nil {
+			t.Errorf("computeSlotSize(%d, %d) unexpected error: %v", tt.keySize, tt.indexSize, err)
+
+			continue
+		}
+
 		if got != tt.want {
 			t.Errorf("computeSlotSize(%d, %d) = %d, want %d", tt.keySize, tt.indexSize, got, tt.want)
 		}
@@ -119,13 +125,18 @@ func Test_EncodeDecodeSlot_Roundtrips_Correctly_When_Given_Various_Inputs(t *tes
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Compute slot size first
+			slotSize, err := computeSlotSize(tt.keySize, tt.indexSize)
+			if err != nil {
+				t.Fatalf("computeSlotSize failed: %v", err)
+			}
+
 			// Encode
-			buf := encodeSlot(tt.key, tt.isLive, tt.revision, tt.index, tt.keySize, tt.indexSize)
+			buf := encodeSlot(tt.key, tt.isLive, tt.revision, tt.index, tt.keySize, tt.indexSize, slotSize)
 
 			// Verify size
-			expectedSize := computeSlotSize(tt.keySize, tt.indexSize)
-			if uint32(len(buf)) != expectedSize {
-				t.Errorf("encoded slot size = %d, want %d", len(buf), expectedSize)
+			if uint32(len(buf)) != slotSize {
+				t.Errorf("encoded slot size = %d, want %d", len(buf), slotSize)
 			}
 
 			// Decode
@@ -157,15 +168,16 @@ func Test_EncodeSlot_Sets_Meta_Bit_Correctly_When_Slot_Is_Live_Or_Dead(t *testin
 	t.Parallel()
 
 	key := []byte("0123456789abcdef")
+	slotSize, _ := computeSlotSize(16, 0)
 
 	// Live slot should have bit 0 set
-	liveBuf := encodeSlot(key, true, 0, nil, 16, 0)
+	liveBuf := encodeSlot(key, true, 0, nil, 16, 0, slotSize)
 	if liveBuf[0] != 1 || liveBuf[1] != 0 { // Little-endian: meta=1 means byte[0]=1, byte[1..7]=0
 		t.Errorf("live slot meta bytes: got %v, want [1 0 0 0 0 0 0 0]", liveBuf[0:8])
 	}
 
 	// Dead slot should have meta=0
-	deadBuf := encodeSlot(key, false, 0, nil, 16, 0)
+	deadBuf := encodeSlot(key, false, 0, nil, 16, 0, slotSize)
 	for i := range 8 {
 		if deadBuf[i] != 0 {
 			t.Errorf("dead slot meta byte[%d] = %d, want 0", i, deadBuf[i])
@@ -196,8 +208,9 @@ func Test_EncodeSlot_Aligns_Revision_To_EightBytes_When_KeySize_Varies(t *testin
 		}
 
 		revision := int64(0x0102030405060708) // Distinctive pattern
+		slotSize, _ := computeSlotSize(tc.keySize, 0)
 
-		buf := encodeSlot(key, true, revision, nil, tc.keySize, 0)
+		buf := encodeSlot(key, true, revision, nil, tc.keySize, 0, slotSize)
 
 		// Check that revision is at the expected offset (little-endian)
 		gotRevision := int64(buf[tc.expectedOffset]) |
@@ -224,7 +237,11 @@ func Test_EncodeSlot_Aligns_Revision_To_EightBytes_When_KeySize_Varies(t *testin
 func Test_HeaderCRC_Validates_Correctly_When_Header_Is_Fresh_Or_Corrupted(t *testing.T) {
 	t.Parallel()
 
-	h := newHeader(16, 8, 1000, 1, false)
+	h, err := newHeader(16, 8, 1000, 1, false)
+	if err != nil {
+		t.Fatalf("newHeader failed: %v", err)
+	}
+
 	buf := encodeHeader(&h)
 
 	// Validate CRC
@@ -242,7 +259,10 @@ func Test_HeaderCRC_Validates_Correctly_When_Header_Is_Fresh_Or_Corrupted(t *tes
 func Test_HeaderCRC_Remains_Unchanged_When_Generation_Changes(t *testing.T) {
 	t.Parallel()
 
-	h := newHeader(16, 8, 1000, 1, false)
+	h, err := newHeader(16, 8, 1000, 1, false)
+	if err != nil {
+		t.Fatalf("newHeader failed: %v", err)
+	}
 
 	// Encode with generation=0
 	h.Generation = 0
@@ -276,43 +296,37 @@ func Test_ComputeBucketCount_Returns_Power_Of_Two_When_Given_Capacity(t *testing
 	}
 
 	for _, tt := range tests {
-		got := computeBucketCount(tt.slotCapacity)
+		got, err := computeBucketCount(tt.slotCapacity)
+		if err != nil {
+			t.Errorf("computeBucketCount(%d) unexpected error: %v", tt.slotCapacity, err)
+
+			continue
+		}
+
 		if got != tt.want {
 			t.Errorf("computeBucketCount(%d) = %d, want %d", tt.slotCapacity, got, tt.want)
 		}
 	}
 }
 
-func Test_ComputeBucketCount_Returns_Zero_When_Overflow(t *testing.T) {
+func Test_ComputeBucketCount_Returns_Error_When_Overflow(t *testing.T) {
 	t.Parallel()
 
 	// slot_capacity * 2 would overflow uint64
 	// maxUint64 / 2 + 1 = 9223372036854775808
 	const overflowCapacity = (^uint64(0) >> 1) + 1 // maxUint64/2 + 1
 
-	got := computeBucketCount(overflowCapacity)
-	if got != 0 {
-		t.Errorf("computeBucketCount(%d) = %d, want 0 (overflow)", overflowCapacity, got)
-	}
-}
-
-func Test_ComputeBucketCountChecked_Returns_Error_When_Overflow(t *testing.T) {
-	t.Parallel()
-
-	// slot_capacity * 2 would overflow uint64
-	const overflowCapacity = (^uint64(0) >> 1) + 1 // maxUint64/2 + 1
-
-	_, err := computeBucketCountChecked(overflowCapacity)
+	_, err := computeBucketCount(overflowCapacity)
 	if err == nil {
-		t.Error("computeBucketCountChecked should return error for overflow capacity")
+		t.Error("computeBucketCount should return error for overflow capacity")
 	}
 
 	if !errors.Is(err, ErrInvalidInput) {
-		t.Errorf("computeBucketCountChecked error should wrap ErrInvalidInput, got %v", err)
+		t.Errorf("computeBucketCount error should wrap ErrInvalidInput, got %v", err)
 	}
 }
 
-func Test_ComputeBucketCountChecked_Returns_Valid_Count_When_No_Overflow(t *testing.T) {
+func Test_ComputeBucketCount_Returns_Valid_Count_When_No_Overflow(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -326,13 +340,13 @@ func Test_ComputeBucketCountChecked_Returns_Valid_Count_When_No_Overflow(t *test
 	}
 
 	for _, tt := range tests {
-		got, err := computeBucketCountChecked(tt.slotCapacity)
+		got, err := computeBucketCount(tt.slotCapacity)
 		if err != nil {
-			t.Errorf("computeBucketCountChecked(%d) returned error: %v", tt.slotCapacity, err)
+			t.Errorf("computeBucketCount(%d) returned error: %v", tt.slotCapacity, err)
 		}
 
 		if got != tt.want {
-			t.Errorf("computeBucketCountChecked(%d) = %d, want %d", tt.slotCapacity, got, tt.want)
+			t.Errorf("computeBucketCount(%d) = %d, want %d", tt.slotCapacity, got, tt.want)
 		}
 	}
 }
@@ -369,7 +383,10 @@ func Test_HasReservedBytesSet_Returns_True_When_Reserved_Tail_Bytes_Are_Nonzero(
 	t.Parallel()
 
 	// Clean header
-	h := newHeader(16, 0, 100, 1, false)
+	h, err := newHeader(16, 0, 100, 1, false)
+	if err != nil {
+		t.Fatalf("newHeader failed: %v", err)
+	}
 
 	buf := encodeHeader(&h)
 	if hasReservedBytesSet(buf) {

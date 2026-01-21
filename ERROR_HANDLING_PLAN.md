@@ -4,12 +4,12 @@
 
 We want to eliminate silent/sentinel return values in the slotcache core and
 always return real errors for invalid inputs or impossible states. This aligns
-with the spec’s “fail fast on corruption/mismatch” philosophy and prevents
-silent corruption when using mmap’d data.
+with the spec's "fail fast on corruption/mismatch" philosophy and prevents
+silent corruption when using mmap'd data.
 
 ## Goals
 
-- No more “0/false/nil means error” in core helpers.
+- No more "0/false/nil means error" in core helpers.
 - All invalid inputs and impossible states return real errors.
 - Errors are propagated to public APIs (ErrInvalidInput/ErrCorrupt/ErrWriteback
   as appropriate) instead of being silently ignored.
@@ -31,9 +31,13 @@ Replace sentinel return patterns with real errors.
   - `uint64ToInt64Checked` — now returns `(int64, error)` wrapping `ErrInvalidInput`
   - `uint64ToIntChecked` — now returns `(int, error)` wrapping `ErrInvalidInput`
   - All call sites in `slotcache.go` and `writer.go` updated to use `err != nil` checks
-- Make `computeSlotSize` return `(uint32, error)` (remove implicit `0` fallback).
-- Make `computeBucketCount` return `(uint64, error)` (reject `slotCapacity == 0`
+- [x] Make `computeSlotSize` return `(uint32, error)` (remove implicit `0` fallback).
+  - Removed sentinel wrapper; renamed `computeSlotSizeChecked` to `computeSlotSize`
+  - All call sites updated to handle errors
+- [x] Make `computeBucketCount` return `(uint64, error)` (reject `slotCapacity == 0`
   and overflow instead of returning `2/0`).
+  - Removed sentinel wrapper; renamed `computeBucketCountChecked` to `computeBucketCount`
+  - All call sites updated to handle errors
 - Update `msyncRange` to return an error for empty/invalid ranges (no nil on
   invalid input).
 
@@ -47,15 +51,17 @@ Replace sentinel return patterns with real errors.
 Update call sites to handle new error-returning helpers.
 
 ### Tasks
-- Propagate conversion errors in `Open`, `createNewCache`, and
+- [x] Propagate conversion errors in `Open`, `createNewCache`, and
   `initializeEmptyFile`.
-- Update `newHeader` to return `(slc1Header, error)` (or accept validated values)
+- [x] Update `newHeader` to return `(slc1Header, error)` (or accept validated values)
   and propagate errors from `computeSlotSize/computeBucketCount`.
-- Update `encodeSlot` to handle `computeSlotSize` errors (or refactor to accept
+- [x] Update `encodeSlot` to handle `computeSlotSize` errors (or refactor to accept
   precomputed slot size).
-- Replace any uses of `computeSlotSize` / `computeBucketCount` that assumed
+  - Refactored `encodeSlot` to accept precomputed `slotSize` parameter
+  - Error handling now happens at cache initialization time, not during slot encoding
+- [x] Replace any uses of `computeSlotSize` / `computeBucketCount` that assumed
   sentinel values.
-- Update `validateAndOpenExisting`, `validateFileLayoutFitsInt64`,
+- [x] Update `validateAndOpenExisting`, `validateFileLayoutFitsInt64`,
   `sampleBucketsForCorruption` to handle conversion errors explicitly.
 
 ### Files
@@ -69,13 +75,20 @@ Update call sites to handle new error-returning helpers.
 Eliminate silent failures in commit/writeback paths.
 
 ### Tasks
-- Propagate conversion errors in Commit when calculating bucket msync ranges.
-- Make dirty-range tracking (`markSlotDirty`, `markBucketDirty`) return errors
+- [x] Propagate conversion errors in Commit when calculating bucket msync ranges.
+  - Conversion errors set `msyncFailed = true`, resulting in `ErrWriteback`
+- [x] Make dirty-range tracking (`markSlotDirty`, `markBucketDirty`) return errors
   instead of silently skipping when conversions fail.
-- Surface corruption in `findLiveSlotLocked` when bucket entries point past
+  - Both functions return `ErrCorrupt` on conversion failure
+  - All call sites in Commit propagate these errors
+- [x] Surface corruption in `findLiveSlotLocked` when bucket entries point past
   `slot_highwater` (return error instead of skipping).
-- Decide how these new errors map to `ErrCorrupt` vs `ErrWriteback` and
+  - Returns `ErrCorrupt` when slot_id >= highwater
+- [x] Decide how these new errors map to `ErrCorrupt` vs `ErrWriteback` and
   propagate consistently.
+  - `markSlotDirty`/`markBucketDirty`: `ErrCorrupt` (indicates data structure corruption)
+  - `findLiveSlotLocked`: `ErrCorrupt` (indicates bucket/slot inconsistency)
+  - Commit msync conversion failures: `ErrWriteback` (durability issue, not corruption)
 
 ### Files
 - `pkg/slotcache/writer.go`
@@ -87,11 +100,11 @@ Eliminate silent failures in commit/writeback paths.
 Update tests for new error behavior.
 
 ### Tasks
-- Update `format_test.go`:
-  - `computeSlotSize` / `computeBucketCount` tests to expect errors instead of
+- [x] Update `format_test.go`:
+  - [x] `computeSlotSize` / `computeBucketCount` tests to expect errors instead of
     sentinel values.
   - `msyncRange` tests to expect errors on invalid/empty ranges.
-- Update any tests that call `newHeader` / `encodeSlot` directly.
+- [x] Update any tests that call `newHeader` / `encodeSlot` directly.
 - Audit other tests for use of the old helper signatures.
 
 ### Files

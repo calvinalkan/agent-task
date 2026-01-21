@@ -448,13 +448,19 @@ func createNewCache(opts Options) (Cache, error) {
 	keySize32, _ := intToUint32Checked(opts.KeySize)
 	indexSize32, _ := intToUint32Checked(opts.IndexSize)
 
-	header := newHeader(
+	header, headerErr := newHeader(
 		keySize32,
 		indexSize32,
 		opts.SlotCapacity,
 		opts.UserVersion,
 		opts.OrderedKeys,
 	)
+	if headerErr != nil {
+		_ = syscall.Close(fd)
+		_ = syscall.Unlink(tmpPath)
+
+		return nil, headerErr
+	}
 
 	// File size validated in Open() via computeFileSize.
 	fileSize, _ := uint64ToInt64Checked(header.BucketsOffset + header.BucketCount*16)
@@ -518,13 +524,18 @@ func initializeEmptyFile(opts Options) (Cache, error) {
 	keySize32, _ := intToUint32Checked(opts.KeySize)
 	indexSize32, _ := intToUint32Checked(opts.IndexSize)
 
-	header := newHeader(
+	header, headerErr := newHeader(
 		keySize32,
 		indexSize32,
 		opts.SlotCapacity,
 		opts.UserVersion,
 		opts.OrderedKeys,
 	)
+	if headerErr != nil {
+		_ = syscall.Close(fd)
+
+		return nil, headerErr
+	}
 
 	// File size validated in Open() via computeFileSize.
 	fileSize, _ := uint64ToInt64Checked(header.BucketsOffset + header.BucketCount*16)
@@ -721,7 +732,11 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 	}
 
 	// Validate derived slot size.
-	expectedSlotSize := computeSlotSize(keySize, indexSize)
+	expectedSlotSize, slotErr := computeSlotSize(keySize, indexSize)
+	if slotErr != nil {
+		return nil, fmt.Errorf("compute slot size: %w", slotErr)
+	}
+
 	if slotSize != expectedSlotSize {
 		return nil, fmt.Errorf("slot_size mismatch: file has %d, expected %d: %w", slotSize, expectedSlotSize, ErrIncompatible)
 	}
@@ -809,14 +824,14 @@ func validateFileLayoutFitsInt64(opts Options) error {
 	keySize32, _ := intToUint32Checked(opts.KeySize)
 	indexSize32, _ := intToUint32Checked(opts.IndexSize)
 
-	slotSize32, err := computeSlotSizeChecked(keySize32, indexSize32)
+	slotSize32, err := computeSlotSize(keySize32, indexSize32)
 	if err != nil {
 		return err
 	}
 
 	slotSize := uint64(slotSize32)
 
-	bucketCount, err := computeBucketCountChecked(opts.SlotCapacity)
+	bucketCount, err := computeBucketCount(opts.SlotCapacity)
 	if err != nil {
 		return err
 	}

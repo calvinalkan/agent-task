@@ -247,14 +247,14 @@ func hasReservedBytesSet(buf []byte) bool {
 	return false
 }
 
-// computeSlotSizeChecked calculates the slot size per spec and enforces
+// computeSlotSize calculates the slot size per spec and enforces
 // implementation limits.
 //
 // slot_size = align8( meta(8) + key_size + key_pad + revision(8) + index_size )
 // where key_pad = (8 - (key_size % 8)) % 8.
 //
-// It returns ErrInvalidInput if the derived size cannot be represented safely.
-func computeSlotSizeChecked(keySize, indexSize uint32) (uint32, error) {
+// Returns ErrInvalidInput if the derived size cannot be represented safely.
+func computeSlotSize(keySize, indexSize uint32) (uint32, error) {
 	keyPad := (8 - (keySize % 8)) % 8
 
 	// Compute in uint64 to avoid uint32 wraparound.
@@ -272,27 +272,12 @@ func computeSlotSizeChecked(keySize, indexSize uint32) (uint32, error) {
 	return uint32(aligned), nil
 }
 
-// computeSlotSize calculates slot size without validation.
-//
-// Callers MUST ensure keySize/indexSize have already been validated such that
-// the derived slot size fits in uint32 and within implementation limits.
-func computeSlotSize(keySize, indexSize uint32) uint32 {
-	size, err := computeSlotSizeChecked(keySize, indexSize)
-	if err != nil {
-		// This should be impossible if Open() validation is correct.
-		// Return 0 to fail fast on later invariants rather than silently wrapping.
-		return 0
-	}
-
-	return size
-}
-
 // align8U64 rounds x up to the next multiple of 8.
 func align8U64(x uint64) uint64 {
 	return (x + 7) &^ 7
 }
 
-// computeBucketCountChecked calculates the bucket count for a given slot capacity
+// computeBucketCount calculates the bucket count for a given slot capacity
 // and enforces implementation limits.
 //
 // bucket_count = nextPow2(slot_capacity * 2)
@@ -302,7 +287,7 @@ func align8U64(x uint64) uint64 {
 // to maintain load factor ≤ 0.5."
 //
 // Returns ErrInvalidInput if slot_capacity * 2 would overflow.
-func computeBucketCountChecked(slotCapacity uint64) (uint64, error) {
+func computeBucketCount(slotCapacity uint64) (uint64, error) {
 	if slotCapacity == 0 {
 		return 2, nil // minimum valid bucket count
 	}
@@ -317,21 +302,6 @@ func computeBucketCountChecked(slotCapacity uint64) (uint64, error) {
 	needed := max(slotCapacity*2, 2)
 
 	return nextPow2(needed), nil
-}
-
-// computeBucketCount calculates bucket count without returning an error.
-//
-// Callers MUST ensure slotCapacity has already been validated such that
-// slot_capacity * 2 does not overflow uint64.
-func computeBucketCount(slotCapacity uint64) uint64 {
-	count, err := computeBucketCountChecked(slotCapacity)
-	if err != nil {
-		// This should be impossible if Open() validation is correct.
-		// Return 0 to fail fast on later invariants rather than silently wrapping.
-		return 0
-	}
-
-	return count
 }
 
 // nextPow2 returns the smallest power of two >= value.
@@ -370,8 +340,11 @@ const (
 //   - revision (8 bytes, int64)
 //   - index (indexSize bytes)
 //   - padding (to slotSize)
-func encodeSlot(key []byte, isLive bool, revision int64, index []byte, keySize, indexSize uint32) []byte {
-	slotSize := computeSlotSize(keySize, indexSize)
+//
+// The caller must provide a precomputed slotSize (from computeSlotSize) to
+// avoid redundant validation. This ensures error handling happens at cache
+// initialization time, not during slot encoding.
+func encodeSlot(key []byte, isLive bool, revision int64, index []byte, keySize, indexSize, slotSize uint32) []byte {
 	buf := make([]byte, slotSize)
 
 	// Meta: bit 0 = USED.
@@ -444,9 +417,18 @@ func decodeSlot(buf []byte, keySize, indexSize uint32) decodedSlot {
 }
 
 // newHeader creates a header for a new cache file with the given options.
-func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, orderedKeys bool) slc1Header {
-	slotSize := computeSlotSize(keySize, indexSize)
-	bucketCount := computeBucketCount(slotCapacity)
+// Returns ErrInvalidInput if slot size or bucket count computation fails.
+func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, orderedKeys bool) (slc1Header, error) {
+	slotSize, err := computeSlotSize(keySize, indexSize)
+	if err != nil {
+		return slc1Header{}, err
+	}
+
+	bucketCount, err := computeBucketCount(slotCapacity)
+	if err != nil {
+		return slc1Header{}, err
+	}
+
 	slotsOffset := uint64(slc1HeaderSize)
 	bucketsOffset := slotsOffset + slotCapacity*uint64(slotSize)
 
@@ -478,7 +460,7 @@ func newHeader(keySize, indexSize uint32, slotCapacity, userVersion uint64, orde
 		State:            stateNormal,          // cache is operational
 		UserFlags:        0,                    // caller-owned, default zero
 		UserData:         [UserDataSize]byte{}, // caller-owned, default zero
-	}
+	}, nil
 }
 
 // putInt64LE writes an int64 to buf in little-endian byte order.
