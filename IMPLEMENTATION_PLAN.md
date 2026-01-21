@@ -278,10 +278,16 @@ invalidation).
 
 ### 7.2 Migrate near-cap spec fuzz
 
-- [ ] Apply the same migration to `near_cap_fuzz_test.go` spec fuzz sections.
+- [x] Apply the same migration to `near_cap_fuzz_test.go` spec fuzz sections.
 
 Files:
 - `pkg/slotcache/near_cap_fuzz_test.go`
+
+**Note (2026-01-21):** Phase 7.2 complete. `FuzzSpec_GenerativeUsage_NearCapConfig`
+now uses `CanonicalOpGenConfig()` with `SpecOpSet` for operation generation,
+matching the pattern used in `FuzzSpec_GenerativeUsage`. The `specFuzzState`
+helper struct (already available in the `slotcache_test` package) is reused for
+validation logic. The behavior fuzz tests in this file were already migrated.
 
 ### 7.3 Spec curated seeds
 
