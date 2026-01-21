@@ -26,7 +26,7 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil"
 )
 
-func Test_BehaviorFuzz_FilterSeeds_Emit_AtLeast_One_Filtered_Scan(t *testing.T) {
+func Test_BehaviorFuzz_Emits_FilteredScan_When_Using_Curated_FilterSeeds(t *testing.T) {
 	t.Parallel()
 
 	seeds := []struct {
@@ -58,7 +58,7 @@ func Test_BehaviorFuzz_FilterSeeds_Emit_AtLeast_One_Filtered_Scan(t *testing.T) 
 
 			var previouslySeenKeys [][]byte
 
-			const maxOps = maxFuzzOperations
+			const maxOps = testutil.DefaultMaxFuzzOperations
 
 			sawFilteredScan := false
 

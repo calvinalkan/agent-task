@@ -19,8 +19,8 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil"
 )
 
-// maxFuzzOperations is the maximum number of operations to run in a single fuzz iteration.
-const maxFuzzOperations = 200
+// maxFuzzOperations is imported from testutil.DefaultMaxFuzzOperations
+// to allow guard tests and seed helpers to share the same constant.
 
 // FuzzBehavior_ModelVsReal is a coverage-guided fuzz test for public behavior.
 func FuzzBehavior_ModelVsReal(f *testing.F) {
@@ -296,7 +296,7 @@ func FuzzBehavior_ModelVsReal(f *testing.F) {
 		var previouslySeenKeys [][]byte
 
 		// Hard bound so one fuzz input cannot run forever.
-		const maximumOperations = maxFuzzOperations
+		const maximumOperations = testutil.DefaultMaxFuzzOperations
 
 		for operationIndex := 0; operationIndex < maximumOperations && decoder.HasMore(); operationIndex++ {
 			nextOperation := decoder.NextOp(testHarness, previouslySeenKeys)
@@ -343,7 +343,7 @@ func FuzzBehavior_ModelVsReal_OrderedKeys(f *testing.F) {
 
 		var previouslySeenKeys [][]byte
 
-		const maximumOperations = maxFuzzOperations
+		const maximumOperations = testutil.DefaultMaxFuzzOperations
 
 		for operationIndex := 0; operationIndex < maximumOperations && decoder.HasMore(); operationIndex++ {
 			nextOperation := decoder.NextOp(testHarness, previouslySeenKeys)

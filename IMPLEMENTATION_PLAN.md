@@ -186,7 +186,7 @@ Keep seeds minimal and add a guard if they're hand-rolled.
 - [x] 2. Add `opgen_config.go` + `OpGenerator` (wrapper around `FuzzDecoder`).
 - [x] 3. Add optional phased generation logic (byte-driven, deterministic) with small-scan bias.
 - [x] 4. Add `options_profiles.go` with deterministic profile templates (Path injected per run).
-- [ ] 5. Move `maxFuzzOperations` (or equivalent) into testutil so guards can reuse it.
+- [x] 5. Move `maxFuzzOperations` (or equivalent) into testutil so guards can reuse it.
 - [ ] 6. Add `behavior_seeds.go` with curated seeds.
 - [ ] 7. Add guard helpers in testutil (seed assertions + minimal trace inspection).
 - [ ] 8. Add a dedicated copy/aliasing regression test (or move copy checks into heavy-compare only).

@@ -30,7 +30,7 @@ func FuzzBehavior_ModelVsReal_FuzzOptions(f *testing.F) {
 
 		var previouslySeenKeys [][]byte
 
-		for opIndex := 0; opIndex < maxFuzzOperations && decoder.HasMore(); opIndex++ {
+		for opIndex := 0; opIndex < testutil.DefaultMaxFuzzOperations && decoder.HasMore(); opIndex++ {
 			op := decoder.NextOp(h, previouslySeenKeys)
 
 			modelResult := testutil.ApplyModel(h, op)
