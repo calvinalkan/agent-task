@@ -337,11 +337,11 @@ Files:
 
 ## Phase 9 — Validation / exit criteria
 
-- [ ] `make lint`
-- [ ] `make test`
-- [ ] Smoke fuzz runs (short):
-  - `go test ./pkg/slotcache -run=^$ -fuzz=FuzzBehavior_ModelVsReal -fuzztime=5s`
-  - `go test ./pkg/slotcache -run=^$ -fuzz=FuzzSpec_GenerativeUsage -fuzztime=5s`
+- [x] `make lint`
+- [x] `make test`
+- [x] Smoke fuzz runs (short):
+  - `go test ./pkg/slotcache -run=^$ -fuzz=^FuzzBehavior_ModelVsReal$ -fuzztime=5s`
+  - `go test ./pkg/slotcache -run=^$ -fuzz=^FuzzSpec_GenerativeUsage$ -fuzztime=5s`
 
 Exit criteria:
 - Only one op-selection implementation exists (`OpGenerator`).
@@ -349,15 +349,24 @@ Exit criteria:
 - Behavior fuzz includes UserHeader operations and the model/harness validates them.
 - Spec fuzz is driven by OpGenerator and retains the spec oracle invariants.
 
+**Note (2026-01-21):** Phase 9 complete. All tests pass, lint is clean, and smoke
+fuzz runs complete successfully.
+
 ---
 
 ## Phase 10 — Canonical protocol usage in behavior fuzz
 
-- [ ] Update behavior fuzz targets to use CanonicalOpGenConfig + BehaviorOpSet (or document why DefaultOpGenConfig is intentional).
+- [x] Update behavior fuzz targets to use CanonicalOpGenConfig + BehaviorOpSet (or document why DefaultOpGenConfig is intentional).
 
 Files:
 - `pkg/slotcache/behavior_fuzz_test.go`
 - `pkg/slotcache/behavior_fuzz_options_test.go`
+
+**Note (2026-01-21):** Phase 10 complete. Updated all behavior fuzz targets in
+`behavior_fuzz_test.go` (`FuzzBehavior_ModelVsReal`, `FuzzBehavior_ModelVsReal_OrderedKeys`)
+and `behavior_fuzz_options_test.go` (`FuzzBehavior_ModelVsReal_FuzzOptions`) to use
+`CanonicalOpGenConfig() + BehaviorOpSet`. The near-cap behavior fuzz tests in
+`near_cap_fuzz_test.go` were already using the canonical config.
 
 ---
 
@@ -383,9 +392,15 @@ Files:
 
 ---
 
-## Phase 13 — msyncRange error handling
+## Phase 13 — format.go error handling
 
 - [ ] Update `msyncRange` to return a real error (not nil) for empty/invalid ranges; avoid treating invalid inputs as success.
+- [ ] Replace sentinel returns in format helpers with real errors (fmt.Errorf/ErrInvalidInput) and propagate:
+  - `computeSlotSize` (currently returns 0)
+  - `computeBucketCount` (returns 0/2 sentinel)
+  - `intToUint32Checked` (returns 0,false)
+  - `uint64ToInt64Checked` (returns 0,false)
+  - `uint64ToIntChecked` (returns 0,false)
 
 Files:
-- (locate msyncRange implementation)
+- `pkg/slotcache/format.go`

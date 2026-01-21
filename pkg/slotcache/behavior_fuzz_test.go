@@ -53,8 +53,11 @@ func FuzzBehavior_ModelVsReal(f *testing.F) {
 			SlotCapacity: 64,
 		}
 
-		// Use DefaultOpGenConfig for standard operation generation.
-		cfg := testutil.DefaultOpGenConfig()
+		// Use CanonicalOpGenConfig with BehaviorOpSet to ensure curated seeds
+		// (from AllBehaviorSeeds) remain meaningful. This config enables phased
+		// generation and the full behavior operation set including UserHeader ops.
+		cfg := testutil.CanonicalOpGenConfig()
+		cfg.AllowedOps = testutil.BehaviorOpSet
 		opGen := testutil.NewOpGenerator(fuzzBytes, options, &cfg)
 
 		// Fuzz-optimized run config:
@@ -98,8 +101,10 @@ func FuzzBehavior_ModelVsReal_OrderedKeys(f *testing.F) {
 			OrderedKeys:  true,
 		}
 
-		// Use DefaultOpGenConfig which handles ordered mode automatically.
-		cfg := testutil.DefaultOpGenConfig()
+		// Use CanonicalOpGenConfig with BehaviorOpSet to ensure curated seeds
+		// remain meaningful. The config handles ordered mode automatically.
+		cfg := testutil.CanonicalOpGenConfig()
+		cfg.AllowedOps = testutil.BehaviorOpSet
 		opGen := testutil.NewOpGenerator(fuzzBytes, options, &cfg)
 
 		// Fuzz-optimized run config (same as unordered).

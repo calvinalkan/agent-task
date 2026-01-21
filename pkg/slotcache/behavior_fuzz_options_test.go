@@ -43,8 +43,11 @@ func FuzzBehavior_ModelVsReal_FuzzOptions(f *testing.F) {
 
 		options, rest := testutil.DeriveFuzzOptions(fuzzBytes, cacheFilePath)
 
-		// Use DefaultOpGenConfig which handles ordered mode automatically.
-		cfg := testutil.DefaultOpGenConfig()
+		// Use CanonicalOpGenConfig with BehaviorOpSet to ensure curated seeds
+		// remain meaningful. The config handles ordered mode automatically and
+		// enables phased generation for better state coverage.
+		cfg := testutil.CanonicalOpGenConfig()
+		cfg.AllowedOps = testutil.BehaviorOpSet
 		opGen := testutil.NewOpGenerator(rest, options, &cfg)
 
 		// Scale MaxOps based on option heaviness.

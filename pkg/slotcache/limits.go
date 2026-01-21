@@ -34,7 +34,8 @@ const (
 	// Offset/Limit beyond this are treated as invalid input to avoid integer
 	// overflow footguns and runaway allocations.
 	maxScanOffset = 100_000_000
-	maxScanLimit  = maxScanOffset
+
+	maxScanLimit = maxScanOffset
 
 	// Maximum number of buffered operations allowed in a single Writer session.
 	// Prevents unbounded memory growth when callers stage massive batches.
