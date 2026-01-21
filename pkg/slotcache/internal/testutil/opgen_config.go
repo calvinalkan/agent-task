@@ -64,6 +64,44 @@ type OpGenConfig struct {
 	// KeyReuseMaxThreshold is the seen-key count above which reuse rate
 	// is maximized. Default: 32.
 	KeyReuseMaxThreshold int
+
+	// --- Phased generation (optional) ---
+	//
+	// When PhasedEnabled is true, operation selection follows a three-phase
+	// strategy based on cache fill level (len(seen) / SlotCapacity):
+	//
+	//   Fill phase  (0% – FillPhaseEnd%):   Heavy writes to populate the cache
+	//   Churn phase (FillPhaseEnd% – ChurnPhaseEnd%): Mix of puts/deletes for tombstones
+	//   Read phase  (ChurnPhaseEnd% – 100%): Heavy reads to validate final state
+	//
+	// All phase decisions are byte-driven for determinism.
+
+	// PhasedEnabled enables phased generation. Default: false.
+	PhasedEnabled bool
+
+	// FillPhaseEnd is the fill percentage at which Fill phase ends and Churn begins.
+	// Expressed as percentage of SlotCapacity (0–100). Default: 60.
+	FillPhaseEnd int
+
+	// ChurnPhaseEnd is the fill percentage at which Churn phase ends and Read begins.
+	// Expressed as percentage of SlotCapacity (0–100). Default: 85.
+	ChurnPhaseEnd int
+
+	// FillPhaseBeginWriteRate overrides BeginWriteRate during Fill phase.
+	// Higher values ensure we write more aggressively early on. Default: 50.
+	FillPhaseBeginWriteRate int
+
+	// FillPhaseCommitRate overrides CommitRate during Fill phase.
+	// Lower values keep writer sessions longer for more puts per session. Default: 8.
+	FillPhaseCommitRate int
+
+	// ChurnPhaseDeleteRate overrides DeleteRate during Churn phase.
+	// Higher values create more tombstones. Default: 35.
+	ChurnPhaseDeleteRate int
+
+	// ReadPhaseBeginWriteRate overrides BeginWriteRate during Read phase.
+	// Lower values favor reading over writing. Default: 5.
+	ReadPhaseBeginWriteRate int
 }
 
 // DefaultOpGenConfig returns a config matching the original FuzzDecoder behavior.
@@ -82,6 +120,14 @@ func DefaultOpGenConfig() OpGenConfig {
 		SmallScanLimitBias:   true,
 		KeyReuseMinThreshold: 4,
 		KeyReuseMaxThreshold: 32,
+		// Phased generation disabled by default.
+		PhasedEnabled:           false,
+		FillPhaseEnd:            60,
+		ChurnPhaseEnd:           85,
+		FillPhaseBeginWriteRate: 50,
+		FillPhaseCommitRate:     8,
+		ChurnPhaseDeleteRate:    35,
+		ReadPhaseBeginWriteRate: 5,
 	}
 }
 
@@ -103,6 +149,84 @@ func DeepStateOpGenConfig() OpGenConfig {
 		SmallScanLimitBias:   true,
 		KeyReuseMinThreshold: 4,
 		KeyReuseMaxThreshold: 32,
+		// Phased generation disabled by default.
+		PhasedEnabled:           false,
+		FillPhaseEnd:            60,
+		ChurnPhaseEnd:           85,
+		FillPhaseBeginWriteRate: 50,
+		FillPhaseCommitRate:     8,
+		ChurnPhaseDeleteRate:    35,
+		ReadPhaseBeginWriteRate: 5,
+	}
+}
+
+// PhasedOpGenConfig returns a config with phased generation enabled.
+// Uses a Fill → Churn → Read strategy based on cache fill level.
+//
+// Fill phase (0–60%): Aggressively populate the cache with puts
+// Churn phase (60–85%): Mix of puts/deletes to stress tombstone handling
+// Read phase (85–100%): Focus on reads to validate final state.
+func PhasedOpGenConfig() OpGenConfig {
+	return OpGenConfig{
+		InvalidKeyRate:       5, // Low invalid rate for deeper state
+		InvalidIndexRate:     5,
+		InvalidScanOptsRate:  5,
+		DeleteRate:           15, // Base delete rate (overridden in Churn)
+		CommitRate:           15, // Base commit rate (overridden in Fill)
+		WriterCloseRate:      5,  // Fewer discards
+		NonMonotonicRate:     3,  // Fewer order violations
+		ReopenRate:           3,
+		CloseRate:            3,
+		BeginWriteRate:       20, // Base rate (overridden per phase)
+		SmallScanLimitBias:   true,
+		KeyReuseMinThreshold: 4,
+		KeyReuseMaxThreshold: 32,
+		// Phased generation enabled.
+		PhasedEnabled:           true,
+		FillPhaseEnd:            60,
+		ChurnPhaseEnd:           85,
+		FillPhaseBeginWriteRate: 50, // Aggressive writes during Fill
+		FillPhaseCommitRate:     8,  // Longer sessions for more puts
+		ChurnPhaseDeleteRate:    35, // Heavy deletes during Churn
+		ReadPhaseBeginWriteRate: 5,  // Minimal writes during Read
+	}
+}
+
+// safeIntToUint64 converts a non-negative int to uint64.
+// Negative values are clamped to 0.
+func safeIntToUint64(v int) uint64 {
+	if v < 0 {
+		return 0
+	}
+
+	return uint64(v)
+}
+
+// Phase represents the current generation phase in phased mode.
+type Phase int
+
+const (
+	// PhaseFill is the initial phase focused on populating the cache.
+	PhaseFill Phase = iota
+
+	// PhaseChurn is the middle phase focused on updates and deletes.
+	PhaseChurn
+
+	// PhaseRead is the final phase focused on validating via reads.
+	PhaseRead
+)
+
+// String returns a human-readable phase name.
+func (p Phase) String() string {
+	switch p {
+	case PhaseFill:
+		return "Fill"
+	case PhaseChurn:
+		return "Churn"
+	case PhaseRead:
+		return "Read"
+	default:
+		return "Unknown"
 	}
 }
 
@@ -131,8 +255,44 @@ func (g *OpGenerator) HasMore() bool {
 	return g.decoder.HasMore()
 }
 
+// CurrentPhase returns the current generation phase based on cache fill level.
+// The fill level is calculated as len(seen) / SlotCapacity.
+//
+// This method is deterministic and does not consume fuzz bytes.
+func (g *OpGenerator) CurrentPhase(seenCount int) Phase {
+	if !g.config.PhasedEnabled {
+		// When phased generation is disabled, treat everything as Churn
+		// (the most balanced phase).
+		return PhaseChurn
+	}
+
+	slotCap := g.options.SlotCapacity
+	if slotCap == 0 {
+		return PhaseRead
+	}
+
+	// Calculate fill percentage.
+	// seenCount is a slice length (non-negative), and phase thresholds are
+	// configured as small percentages (0-100).
+	// Use safeIntToUint64 to handle potential negative values gracefully.
+	fillPercent := (safeIntToUint64(seenCount) * 100) / slotCap
+
+	if fillPercent < safeIntToUint64(g.config.FillPhaseEnd) {
+		return PhaseFill
+	}
+
+	if fillPercent < safeIntToUint64(g.config.ChurnPhaseEnd) {
+		return PhaseChurn
+	}
+
+	return PhaseRead
+}
+
 // NextOp implements OpSource. It chooses the next operation based on harness
 // state and the configured probability weights.
+//
+// When phased generation is enabled, operation selection is biased based on
+// the current phase (Fill → Churn → Read).
 func (g *OpGenerator) NextOp(h *Harness, seen [][]byte) Operation {
 	writerActive := h.Model.Writer != nil && h.Real.Writer != nil
 
@@ -150,18 +310,32 @@ func (g *OpGenerator) NextOp(h *Harness, seen [][]byte) Operation {
 		return OpClose{}
 	}
 
+	phase := g.CurrentPhase(len(seen))
+
 	if !writerActive {
-		return g.nextReaderOp(h, seen)
+		return g.nextReaderOp(h, seen, phase)
 	}
 
-	return g.nextWriterOp(h, seen)
+	return g.nextWriterOp(h, seen, phase)
 }
 
-func (g *OpGenerator) nextReaderOp(_ *Harness, seen [][]byte) Operation {
+func (g *OpGenerator) nextReaderOp(_ *Harness, seen [][]byte, phase Phase) Operation {
 	choice := g.decoder.NextByte() % 100
 
-	// BeginWrite has configurable rate.
-	if choice < byte(g.config.BeginWriteRate) {
+	// BeginWrite rate varies by phase when phased generation is enabled.
+	beginWriteRate := g.config.BeginWriteRate
+	if g.config.PhasedEnabled {
+		switch phase {
+		case PhaseFill:
+			beginWriteRate = g.config.FillPhaseBeginWriteRate
+		case PhaseChurn:
+			// PhaseChurn uses the base BeginWriteRate (no change)
+		case PhaseRead:
+			beginWriteRate = g.config.ReadPhaseBeginWriteRate
+		}
+	}
+
+	if choice < byte(beginWriteRate) {
 		return OpBeginWrite{}
 	}
 
@@ -169,10 +343,10 @@ func (g *OpGenerator) nextReaderOp(_ *Harness, seen [][]byte) Operation {
 	// Original distribution (when BeginWriteRate=20):
 	//   Get: 10%, Scan: 20%, ScanPrefix: 15%, ScanMatch: 15%, ScanRange: 10%, Len: 10%
 	// We scale these proportionally.
-	remaining := 100 - g.config.BeginWriteRate
+	remaining := 100 - beginWriteRate
 	scale := func(pct int) int { return pct * remaining / 80 }
 
-	getThreshold := g.config.BeginWriteRate + scale(10)
+	getThreshold := beginWriteRate + scale(10)
 	scanThreshold := getThreshold + scale(20)
 	prefixThreshold := scanThreshold + scale(15)
 	matchThreshold := prefixThreshold + scale(15)
@@ -210,15 +384,35 @@ func (g *OpGenerator) nextReaderOp(_ *Harness, seen [][]byte) Operation {
 	}
 }
 
-func (g *OpGenerator) nextWriterOp(h *Harness, seen [][]byte) Operation {
+func (g *OpGenerator) nextWriterOp(h *Harness, seen [][]byte, phase Phase) Operation {
 	choice := g.decoder.NextByte() % 100
 
 	// Calculate thresholds from config.
 	// Original distribution: Put=45%, Delete=15%, Commit=15%, WriterClose=10%, reads=15%
 	// We now use configurable rates for Delete/Commit/WriterClose,
 	// with Put taking the remainder before reads.
-	deleteThreshold := g.config.DeleteRate
-	commitThreshold := deleteThreshold + g.config.CommitRate
+	//
+	// Rates vary by phase when phased generation is enabled.
+	deleteRate := g.config.DeleteRate
+	commitRate := g.config.CommitRate
+
+	if g.config.PhasedEnabled {
+		switch phase {
+		case PhaseFill:
+			// During Fill: lower commit rate for longer sessions, base delete rate
+			commitRate = g.config.FillPhaseCommitRate
+		case PhaseChurn:
+			// During Churn: higher delete rate for tombstone stress
+			deleteRate = g.config.ChurnPhaseDeleteRate
+		case PhaseRead:
+			// During Read: we rarely get here (low BeginWriteRate),
+			// but if we do, use base rates and commit quickly
+			commitRate = g.config.CommitRate + 10
+		}
+	}
+
+	deleteThreshold := deleteRate
+	commitThreshold := deleteThreshold + commitRate
 	closeThreshold := commitThreshold + g.config.WriterCloseRate
 
 	// Remaining percentage goes to Put (before reads).
