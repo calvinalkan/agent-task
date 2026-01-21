@@ -7,6 +7,9 @@
 // matches the simple in-memory model. They catch logic bugs in Get, Put,
 // Delete, Scan, and transaction handling - but NOT file format issues.
 //
+// Uses testutil.RunBehavior + OpGenerator for shared operation generation
+// and comparison logic with behavior_deterministic_seed_test.go.
+//
 // Failures here mean: "the API returned wrong results or wrong errors"
 
 package slotcache_test
@@ -19,10 +22,11 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil"
 )
 
-// maxFuzzOperations is imported from testutil.DefaultMaxFuzzOperations
-// to allow guard tests and seed helpers to share the same constant.
-
 // FuzzBehavior_ModelVsReal is a coverage-guided fuzz test for public behavior.
+//
+// Uses fixed options (KeySize=8, IndexSize=4, SlotCapacity=64) for deep
+// coverage on a single configuration. See FuzzBehavior_ModelVsReal_Options
+// for derived-options fuzzing.
 func FuzzBehavior_ModelVsReal(f *testing.F) {
 	// A small seed corpus helps the fuzzer reach deeper states quickly.
 	f.Add([]byte{})
@@ -49,32 +53,22 @@ func FuzzBehavior_ModelVsReal(f *testing.F) {
 			SlotCapacity: 64,
 		}
 
-		testHarness := testutil.NewHarness(t, options)
+		// Use DefaultOpGenConfig which matches original FuzzDecoder behavior.
+		cfg := testutil.DefaultOpGenConfig()
+		opGen := testutil.NewOpGenerator(fuzzBytes, options, &cfg)
 
-		defer func() {
-			_ = testHarness.Real.Cache.Close()
-		}()
-
-		decoder := testutil.NewFuzzDecoder(fuzzBytes, options)
-
-		// We track keys that were successfully written at least once.
-		// This increases the chance of hitting update/delete and prefix paths.
-		var previouslySeenKeys [][]byte
-
-		// Hard bound so one fuzz input cannot run forever.
-		const maximumOperations = testutil.DefaultMaxFuzzOperations
-
-		for operationIndex := 0; operationIndex < maximumOperations && decoder.HasMore(); operationIndex++ {
-			nextOperation := decoder.NextOp(testHarness, previouslySeenKeys)
-
-			modelResult := testutil.ApplyModel(testHarness, nextOperation)
-			realResult := testutil.ApplyReal(testHarness, nextOperation)
-
-			testutil.RememberPutKey(nextOperation, modelResult, options.KeySize, &previouslySeenKeys)
-
-			testutil.AssertOpMatch(t, nextOperation, modelResult, realResult)
-			testutil.CompareState(t, testHarness)
+		// Fuzz-optimized run config:
+		// - Heavy comparisons only on state-changing events (commit/close/reopen)
+		// - Light comparisons every 10 ops to maintain coverage without slowing throughput
+		runCfg := testutil.BehaviorRunConfig{
+			MaxOps:               testutil.DefaultMaxFuzzOperations,
+			LightCompareEveryN:   10, // Light check every 10 ops for throughput
+			HeavyCompareEveryN:   0,  // Disabled (use event-based instead)
+			CompareOnCommit:      true,
+			CompareOnCloseReopen: true,
 		}
+
+		testutil.RunBehavior(t, options, opGen, runCfg)
 	})
 }
 
@@ -86,6 +80,11 @@ func FuzzBehavior_ModelVsReal_OrderedKeys(f *testing.F) {
 	f.Add([]byte{0xFF})
 	f.Add([]byte("slotcache"))
 	f.Add(make([]byte, 64))
+
+	// Add curated behavior seeds from testutil.
+	for _, seed := range testutil.AllBehaviorSeeds() {
+		f.Add(seed.Data)
+	}
 
 	f.Fuzz(func(t *testing.T, fuzzBytes []byte) {
 		tmpDir := t.TempDir()
@@ -99,28 +98,19 @@ func FuzzBehavior_ModelVsReal_OrderedKeys(f *testing.F) {
 			OrderedKeys:  true,
 		}
 
-		testHarness := testutil.NewHarness(t, options)
+		// Use DefaultOpGenConfig which handles ordered mode automatically.
+		cfg := testutil.DefaultOpGenConfig()
+		opGen := testutil.NewOpGenerator(fuzzBytes, options, &cfg)
 
-		defer func() {
-			_ = testHarness.Real.Cache.Close()
-		}()
-
-		decoder := testutil.NewFuzzDecoder(fuzzBytes, options)
-
-		var previouslySeenKeys [][]byte
-
-		const maximumOperations = testutil.DefaultMaxFuzzOperations
-
-		for operationIndex := 0; operationIndex < maximumOperations && decoder.HasMore(); operationIndex++ {
-			nextOperation := decoder.NextOp(testHarness, previouslySeenKeys)
-
-			modelResult := testutil.ApplyModel(testHarness, nextOperation)
-			realResult := testutil.ApplyReal(testHarness, nextOperation)
-
-			testutil.RememberPutKey(nextOperation, modelResult, options.KeySize, &previouslySeenKeys)
-
-			testutil.AssertOpMatch(t, nextOperation, modelResult, realResult)
-			testutil.CompareState(t, testHarness)
+		// Fuzz-optimized run config (same as unordered).
+		runCfg := testutil.BehaviorRunConfig{
+			MaxOps:               testutil.DefaultMaxFuzzOperations,
+			LightCompareEveryN:   10,
+			HeavyCompareEveryN:   0,
+			CompareOnCommit:      true,
+			CompareOnCloseReopen: true,
 		}
+
+		testutil.RunBehavior(t, options, opGen, runCfg)
 	})
 }

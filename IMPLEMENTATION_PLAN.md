@@ -197,10 +197,10 @@ Keep seeds minimal and add a guard if they're hand-rolled.
   - [x] Iterate over option profiles from testutil.
   - [x] Use an `OpGenerator` config optimized for deeper state (lower invalid rate, longer writer sessions, mild collision mode).
   - [x] Configure light/heavy compare cadence (e.g., light every op, heavy on commit/close/reopen).
-- [ ] 2. Refactor behavior fuzz targets (`behavior_fuzz_test.go`) to use `RunBehavior`.
-  - [ ] Keep separate fuzz target (fixed config) for deep coverage.
-  - [ ] Use shared `RunBehavior` + `OpGenerator` config.
-  - [ ] Favor shorter heavy-compare cadence to keep fuzz throughput high.
+- [x] 2. Refactor behavior fuzz targets (`behavior_fuzz_test.go`) to use `RunBehavior`.
+  - [x] Keep separate fuzz target (fixed config) for deep coverage.
+  - [x] Use shared `RunBehavior` + `OpGenerator` config.
+  - [x] Favor shorter heavy-compare cadence to keep fuzz throughput high.
 - [ ] 3. Refactor behavior fuzz options (`behavior_fuzz_options_test.go`), keep separate from fixed-config fuzz.
   - [ ] Keep separate fuzz target (derived options) for edge configs.
   - [ ] Use shared `RunBehavior` + `OpGenerator` config.
