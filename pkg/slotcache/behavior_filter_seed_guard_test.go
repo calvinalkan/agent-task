@@ -27,14 +27,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/calvinalkan/agent-task/pkg/slotcache"
 	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil"
 )
 
 func Test_BehaviorFuzz_Emits_FilteredScan_When_Using_Curated_FilterSeeds(t *testing.T) {
 	t.Parallel()
 
-	// Use the centralized filter seeds from testutil.
 	seeds := testutil.FilterSeeds()
 
 	for _, tc := range seeds {
@@ -42,60 +40,9 @@ func Test_BehaviorFuzz_Emits_FilteredScan_When_Using_Curated_FilterSeeds(t *test
 			t.Parallel()
 
 			tmpDir := t.TempDir()
+			opts := testutil.DefaultGuardOptions(filepath.Join(tmpDir, tc.Name+".slc"))
 
-			opts := slotcache.Options{
-				Path:         filepath.Join(tmpDir, tc.Name+".slc"),
-				KeySize:      8,
-				IndexSize:    4,
-				SlotCapacity: 64,
-			}
-
-			h := testutil.NewHarness(t, opts)
-
-			defer func() { _ = h.Real.Cache.Close() }()
-
-			decoder := testutil.NewFuzzDecoder(tc.Data, opts)
-
-			var previouslySeenKeys [][]byte
-
-			const maxOps = testutil.DefaultMaxFuzzOperations
-
-			sawFilteredScan := false
-
-			for i := 0; i < maxOps && decoder.HasMore(); i++ {
-				op := decoder.NextOp(h, previouslySeenKeys)
-
-				if opHasNonNilFilter(op) {
-					sawFilteredScan = true
-				}
-
-				mRes := testutil.ApplyModel(h, op)
-				rRes := testutil.ApplyReal(h, op)
-
-				testutil.RememberPutKey(op, mRes, opts.KeySize, &previouslySeenKeys)
-
-				// Keeps harness state aligned and gives better failure output.
-				testutil.AssertOpMatch(t, op, mRes, rRes)
-			}
-
-			if !sawFilteredScan {
-				t.Fatalf("seed %q emitted no scan op with Filter != nil; update seed bytes in testutil/behavior_seeds.go", tc.Name)
-			}
+			testutil.AssertSeedEmitsFilteredScan(t, tc.Data, opts, testutil.DefaultMaxFuzzOperations)
 		})
-	}
-}
-
-func opHasNonNilFilter(op testutil.Operation) bool {
-	switch v := op.(type) {
-	case testutil.OpScan:
-		return v.Filter != nil
-	case testutil.OpScanPrefix:
-		return v.Filter != nil
-	case testutil.OpScanMatch:
-		return v.Filter != nil
-	case testutil.OpScanRange:
-		return v.Filter != nil
-	default:
-		return false
 	}
 }

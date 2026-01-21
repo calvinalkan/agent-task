@@ -207,10 +207,10 @@ Keep seeds minimal and add a guard if they're hand-rolled.
   - [x] Reduce per-iteration ops for heavier option profiles (large key/index sizes).
 
 ### Phase C — add regression guard tests
-- [ ] 1. Move/replace `behavior_filter_seed_guard_test.go` to use testutil helper.
-  - [ ] Move seeds to testutil.
-  - [ ] Use `testutil.AssertSeedEmitsFilteredScan`.
-  - [ ] Keep wrapper test in `pkg/slotcache` for slotcache-only test runs.
+- [x] 1. Move/replace `behavior_filter_seed_guard_test.go` to use testutil helper.
+  - [x] Move seeds to testutil.
+  - [x] Use `testutil.AssertSeedEmitsFilteredScan`.
+  - [x] Keep wrapper test in `pkg/slotcache` for slotcache-only test runs.
 - [ ] 2. Add guard tests for hand-rolled behavior seeds (A–H).
 - [ ] 3. Add guard tests for spec-fuzz seeds if new ones are added.
 

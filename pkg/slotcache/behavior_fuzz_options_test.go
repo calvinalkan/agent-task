@@ -71,7 +71,7 @@ func FuzzBehavior_ModelVsReal_FuzzOptions(f *testing.F) {
 //
 // The scaling factors are based on empirical observation:
 // - Large key/index sizes increase per-operation memory and comparison time
-// - Large slot capacities increase scan and state comparison time
+// - Large slot capacities increase scan and state comparison time.
 func scaleMaxOpsForOptions(opts slotcache.Options) int {
 	baseOps := testutil.DefaultMaxFuzzOperations // 200
 
