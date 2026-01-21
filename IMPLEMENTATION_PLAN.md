@@ -189,7 +189,7 @@ Keep seeds minimal and add a guard if they're hand-rolled.
 - [x] 5. Move `maxFuzzOperations` (or equivalent) into testutil so guards can reuse it.
 - [x] 6. Add `behavior_seeds.go` with curated seeds.
 - [x] 7. Add guard helpers in testutil (seed assertions + minimal trace inspection).
-- [ ] 8. Add a dedicated copy/aliasing regression test (or move copy checks into heavy-compare only).
+- [x] 8. Add a dedicated copy/aliasing regression test (or move copy checks into heavy-compare only).
 
 ### Phase B — update behavior tests
 - [ ] 1. Refactor deterministic tests (`behavior_deterministic_seed_test.go`) to use profiles + `RunBehavior`.
