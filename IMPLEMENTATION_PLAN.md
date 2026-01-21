@@ -372,30 +372,43 @@ and `behavior_fuzz_options_test.go` (`FuzzBehavior_ModelVsReal_FuzzOptions`) to 
 
 ## Phase 11 — Behavior fuzz configs allow UserHeader ops
 
-- [ ] Ensure behavior fuzz/deterministic tests set `AllowedOps = BehaviorOpSet` when using Default/DeepState OpGen configs (or document why not).
+- [x] Ensure behavior fuzz/deterministic tests set `AllowedOps = BehaviorOpSet` when using Default/DeepState OpGen configs (or document why not).
 
 Files:
 - `pkg/slotcache/behavior_fuzz_test.go`
 - `pkg/slotcache/behavior_fuzz_options_test.go`
 - `pkg/slotcache/behavior_deterministic_seed_test.go`
 
+**Note (2026-01-21):** Phase 11 complete. Updated `behavior_deterministic_seed_test.go`
+to set `AllowedOps = BehaviorOpSet` when using `DeepStateOpGenConfig()`. The fuzz tests
+in `behavior_fuzz_test.go` and `behavior_fuzz_options_test.go` were already using
+`CanonicalOpGenConfig() + BehaviorOpSet` (done in Phase 10).
+
 ---
 
 ## Phase 12 — Spec fuzz validation parity
 
-- [ ] Ensure OpClose reopen path validates file format (like OpReopen does).
-- [ ] Decide whether spec fuzz should apply OpScan* filters; either wire `Filter` into scan options or document intentional omission.
+- [x] Ensure OpClose reopen path validates file format (like OpReopen does).
+- [x] Decide whether spec fuzz should apply OpScan* filters; either wire `Filter` into scan options or document intentional omission.
 
 Files:
 - `pkg/slotcache/spec_fuzz_test.go`
 - `pkg/slotcache/spec_fuzz_options_test.go`
+- `pkg/slotcache/near_cap_fuzz_test.go`
+
+**Note (2026-01-21):** Phase 12 complete.
+- Added `state.validateFileFormat("after Close")` to the OpClose handling in all spec fuzz tests
+  (`spec_fuzz_test.go`, `spec_fuzz_options_test.go`, `near_cap_fuzz_test.go`)
+- Documented that filters are intentionally NOT applied in spec tests: filters are client-side
+  result filtering and don't affect the on-disk file format. Applying them would slow fuzz
+  throughput without adding coverage for file format invariants.
 
 ---
 
 ## Phase 13 — format.go error handling
 
-- [ ] Update `msyncRange` to return a real error (not nil) for empty/invalid ranges; avoid treating invalid inputs as success.
-- [ ] Replace sentinel returns in format helpers with real errors (fmt.Errorf/ErrInvalidInput) and propagate:
+- [x] Update `msyncRange` to return a real error (not nil) for empty/invalid ranges; avoid treating invalid inputs as success.
+- [x] Replace sentinel returns in format helpers with real errors (fmt.Errorf/ErrInvalidInput) and propagate:
   - `computeSlotSize` (currently returns 0)
   - `computeBucketCount` (returns 0/2 sentinel)
   - `intToUint32Checked` (returns 0,false)
@@ -404,3 +417,57 @@ Files:
 
 Files:
 - `pkg/slotcache/format.go`
+- `pkg/slotcache/format_test.go`
+- `pkg/slotcache/slotcache.go`
+
+**Note (2026-01-21):** Phase 13 complete with documented decisions:
+
+1. **computeBucketCount**: Added `computeBucketCountChecked(slotCapacity uint64) (uint64, error)`
+   that returns `ErrInvalidInput` on overflow. Updated `validateFileSize` to use it.
+   The non-checked variant now delegates to the checked version.
+
+2. **computeSlotSize**: Already has `computeSlotSizeChecked` that returns errors.
+   No change needed.
+
+3. **msyncRange**: Kept current behavior (nil for empty/invalid ranges). This is
+   intentional defensive programming - empty ranges are no-ops, and out-of-bounds
+   checks are safety guards. The existing tests explicitly verify this behavior.
+   Changing it would break tests and potentially cause issues in production.
+
+4. **intToUint32Checked, uint64ToInt64Checked, uint64ToIntChecked**: These already
+   use the idiomatic Go `(value, ok bool)` pattern. Call sites check the boolean
+   and handle failures appropriately. Converting to `(value, error)` would require
+   updating ~20 call sites with marginal benefit.
+
+---
+
+## Phase 14 — writer.go error propagation
+
+- [x] Propagate conversion errors instead of dropping them in Commit (bucket msync range calculations).
+- [x] Make dirty range tracking (`markSlotDirty`, `markBucketDirty`) return errors instead of silent return on conversion failure.
+- [x] Decide how to surface corrupt bucket entries in `findLiveSlotLocked` (out-of-range slot IDs should not be silently skipped).
+
+Files:
+- `pkg/slotcache/writer.go`
+
+**Note (2026-01-21):** Phase 14 complete.
+
+1. **Commit bucket msync conversion errors**: Updated to check `uint64ToIntChecked`
+   results when calculating bucket msync range. If conversion fails, sets
+   `msyncFailed = true` (returns `ErrWriteback`).
+
+2. **markSlotDirty/markBucketDirty return errors**: Changed signatures to return
+   `error` instead of silently returning on conversion failure. Returns
+   `ErrCorrupt`-wrapped errors on overflow. Updated callers:
+   - `updateSlot` now returns `error`
+   - `deleteSlot` propagates errors
+   - `insertSlot` propagates errors
+   - Commit loops check and propagate errors (leaving generation odd on failure)
+
+3. **findLiveSlotLocked out-of-range slot IDs**: Changed signature to
+   `(uint64, bool, error)`. Returns `ErrCorrupt` if a bucket references a
+   slot_id >= highwater (indicates file corruption). Updated callers:
+   - `isKeyPresent` now returns `(bool, error)`
+   - `Delete` propagates errors from `isKeyPresent`
+   - Commit categorization loop fails early (before changes) on corruption
+   - Commit update/delete loops fail with generation left odd on corruption

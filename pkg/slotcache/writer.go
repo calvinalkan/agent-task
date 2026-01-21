@@ -117,7 +117,11 @@ func (w *writer) Delete(key []byte) (bool, error) {
 	keyCopy := make([]byte, len(key))
 	copy(keyCopy, key)
 
-	wasPresent := w.isKeyPresent(keyCopy)
+	wasPresent, err := w.isKeyPresent(keyCopy)
+	if err != nil {
+		return false, err
+	}
+
 	w.bufferedOps = append(w.bufferedOps, bufferedOp{isPut: false, key: keyCopy})
 
 	return wasPresent, nil
@@ -151,7 +155,13 @@ func (w *writer) Commit() error {
 
 	for _, op := range finalOps {
 		// Check disk state only - don't consider buffered ops.
-		_, found := w.findLiveSlotLocked(op.key)
+		_, found, err := w.findLiveSlotLocked(op.key)
+		if err != nil {
+			w.closeByCommit()
+
+			return err
+		}
+
 		if op.isPut {
 			if found {
 				updates = append(updates, op)
@@ -225,9 +235,24 @@ func (w *writer) Commit() error {
 
 	// Step 3: Apply buffered ops to slots, buckets, and header counters.
 	for _, op := range updates {
-		slotID, found := w.findLiveSlotLocked(op.key)
+		slotID, found, err := w.findLiveSlotLocked(op.key)
+		if err != nil {
+			// Leave generation odd and fail fast. The file is corrupt and must be
+			// rebuilt by the caller.
+			w.cache.registry.mu.Unlock()
+			w.closeByCommit()
+
+			return err
+		}
+
 		if found {
-			w.updateSlot(slotID, op.revision, op.index)
+			err := w.updateSlot(slotID, op.revision, op.index)
+			if err != nil {
+				w.cache.registry.mu.Unlock()
+				w.closeByCommit()
+
+				return err
+			}
 		}
 	}
 
@@ -235,12 +260,19 @@ func (w *writer) Commit() error {
 	deleteCount := uint64(0)
 
 	for _, op := range deletes {
-		slotID, found := w.findLiveSlotLocked(op.key)
+		slotID, found, err := w.findLiveSlotLocked(op.key)
+		if err != nil {
+			w.cache.registry.mu.Unlock()
+			w.closeByCommit()
+
+			return err
+		}
+
 		if !found {
 			continue
 		}
 
-		err := w.deleteSlot(slotID, op.key)
+		err = w.deleteSlot(slotID, op.key)
 		if err != nil {
 			// Leave generation odd and fail fast. The file is corrupt and must be
 			// rebuilt by the caller.
@@ -357,12 +389,18 @@ func (w *writer) Commit() error {
 
 		// Sync buckets: all if rehash occurred, otherwise just dirty range.
 		if w.rehashOccurred {
-			bucketsStart, _ := uint64ToIntChecked(w.cache.bucketsOffset)
-			bucketsLen, _ := uint64ToIntChecked(w.cache.bucketCount * 16)
+			bucketsStart, ok1 := uint64ToIntChecked(w.cache.bucketsOffset)
+			bucketsLen, ok2 := uint64ToIntChecked(w.cache.bucketCount * 16)
 
-			err := msyncRange(w.cache.data, bucketsStart, bucketsLen)
-			if err != nil {
+			if !ok1 || !ok2 {
+				// Conversion overflow. Should not happen due to validation at open time,
+				// but if it does, we cannot reliably msync the bucket range.
 				msyncFailed = true
+			} else {
+				err := msyncRange(w.cache.data, bucketsStart, bucketsLen)
+				if err != nil {
+					msyncFailed = true
+				}
 			}
 		} else if w.minBucketOffset >= 0 {
 			err := msyncRange(w.cache.data, w.minBucketOffset, w.maxBucketOffset-w.minBucketOffset)
@@ -484,8 +522,10 @@ func (w *writer) resetDirtyTracking() {
 }
 
 // markSlotDirty expands the dirty slot range to include the given slot.
-// File layout is validated at open time to fit in int64, so conversions are safe.
-func (w *writer) markSlotDirty(slotID uint64) {
+// File layout is validated at open time to fit in int, so conversions should
+// not overflow. Returns an error if conversion fails (indicates corruption or
+// a bug in validation logic).
+func (w *writer) markSlotDirty(slotID uint64) error {
 	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 	slotEnd := slotOffset + uint64(w.cache.slotSize)
 
@@ -493,7 +533,8 @@ func (w *writer) markSlotDirty(slotID uint64) {
 	end, ok2 := uint64ToIntChecked(slotEnd)
 
 	if !ok1 || !ok2 {
-		return // Should never happen due to validation at open time.
+		return fmt.Errorf("markSlotDirty: slot %d offset overflow (offset=%d, end=%d): %w",
+			slotID, slotOffset, slotEnd, ErrCorrupt)
 	}
 
 	if w.minSlotOffset < 0 || off < w.minSlotOffset {
@@ -503,11 +544,15 @@ func (w *writer) markSlotDirty(slotID uint64) {
 	if end > w.maxSlotOffset {
 		w.maxSlotOffset = end
 	}
+
+	return nil
 }
 
 // markBucketDirty expands the dirty bucket range to include the given bucket.
-// File layout is validated at open time to fit in int64, so conversions are safe.
-func (w *writer) markBucketDirty(bucketIdx uint64) {
+// File layout is validated at open time to fit in int, so conversions should
+// not overflow. Returns an error if conversion fails (indicates corruption or
+// a bug in validation logic).
+func (w *writer) markBucketDirty(bucketIdx uint64) error {
 	bucketOffset := w.cache.bucketsOffset + bucketIdx*16
 	bucketEnd := bucketOffset + 16
 
@@ -515,7 +560,8 @@ func (w *writer) markBucketDirty(bucketIdx uint64) {
 	end, ok2 := uint64ToIntChecked(bucketEnd)
 
 	if !ok1 || !ok2 {
-		return // Should never happen due to validation at open time.
+		return fmt.Errorf("markBucketDirty: bucket %d offset overflow (offset=%d, end=%d): %w",
+			bucketIdx, bucketOffset, bucketEnd, ErrCorrupt)
 	}
 
 	if w.minBucketOffset < 0 || off < w.minBucketOffset {
@@ -525,10 +571,12 @@ func (w *writer) markBucketDirty(bucketIdx uint64) {
 	if end > w.maxBucketOffset {
 		w.maxBucketOffset = end
 	}
+
+	return nil
 }
 
 // updateSlot updates an existing slot with new revision and index.
-func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) {
+func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) error {
 	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 	keyPad := (8 - (w.cache.keySize % 8)) % 8
 	revOffset := slotOffset + 8 + uint64(w.cache.keySize) + uint64(keyPad)
@@ -541,7 +589,7 @@ func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) {
 		copy(w.cache.data[idxOffset:idxOffset+uint64(w.cache.indexSize)], index)
 	}
 
-	w.markSlotDirty(slotID)
+	return w.markSlotDirty(slotID)
 }
 
 // deleteSlot marks a slot as tombstoned and updates the bucket index.
@@ -571,14 +619,17 @@ func (w *writer) deleteSlot(slotID uint64, key []byte) error {
 		if slotPlusOne-1 == slotID {
 			// Found our bucket entry - tombstone it.
 			binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], ^uint64(0))
-			w.markBucketDirty(idx)
+
+			err := w.markBucketDirty(idx)
+			if err != nil {
+				return err
+			}
 
 			// Clear USED bit. Use atomic store to ensure readers see complete values.
 			slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 			atomicStoreUint64(w.cache.data[slotOffset:], 0)
-			w.markSlotDirty(slotID)
 
-			return nil
+			return w.markSlotDirty(slotID)
 		}
 	}
 
@@ -637,13 +688,20 @@ func (w *writer) insertSlot(slotID uint64, key []byte, revision int64, index []b
 		copy(w.cache.data[idxOffset:idxOffset+uint64(w.cache.indexSize)], index)
 	}
 
-	w.markSlotDirty(slotID)
+	err := w.markSlotDirty(slotID)
+	if err != nil {
+		return false, err
+	}
 
 	// Insert into the bucket index.
 	bucketOffset := w.cache.bucketsOffset + foundIdx*16
 	binary.LittleEndian.PutUint64(w.cache.data[bucketOffset:], hash)
 	binary.LittleEndian.PutUint64(w.cache.data[bucketOffset+8:], slotID+1)
-	w.markBucketDirty(foundIdx)
+
+	err = w.markBucketDirty(foundIdx)
+	if err != nil {
+		return false, err
+	}
 
 	return foundSlotPlusOne == ^uint64(0), nil
 }
@@ -746,7 +804,8 @@ func (w *writer) finalOps() []bufferedOp {
 
 // findLiveSlotLocked finds a live slot in the file.
 // Used during commit when we need the actual slot ID.
-func (w *writer) findLiveSlotLocked(key []byte) (uint64, bool) {
+// Returns an error if a corrupt bucket entry is encountered (slot ID >= highwater).
+func (w *writer) findLiveSlotLocked(key []byte) (uint64, bool, error) {
 	hash := fnv1a64(key)
 	mask := w.cache.bucketCount - 1
 	startIdx := hash & mask
@@ -758,7 +817,7 @@ func (w *writer) findLiveSlotLocked(key []byte) (uint64, bool) {
 
 		slotPlusOne := binary.LittleEndian.Uint64(w.cache.data[bucketOffset+8:])
 		if slotPlusOne == 0 {
-			return 0, false
+			return 0, false, nil
 		}
 
 		if slotPlusOne == ^uint64(0) {
@@ -767,7 +826,8 @@ func (w *writer) findLiveSlotLocked(key []byte) (uint64, bool) {
 
 		slotID := slotPlusOne - 1
 		if slotID >= highwater {
-			continue
+			return 0, false, fmt.Errorf("bucket %d references slot_id %d >= highwater %d: %w",
+				idx, slotID, highwater, ErrCorrupt)
 		}
 
 		storedHash := binary.LittleEndian.Uint64(w.cache.data[bucketOffset:])
@@ -785,23 +845,24 @@ func (w *writer) findLiveSlotLocked(key []byte) (uint64, bool) {
 
 		slotKey := w.cache.data[slotOffset+8 : slotOffset+8+uint64(w.cache.keySize)]
 		if bytes.Equal(slotKey, key) {
-			return slotID, true
+			return slotID, true, nil
 		}
 	}
 
-	return 0, false
+	return 0, false, nil
 }
 
 // isKeyPresent answers whether a key is live considering buffered ops.
-func (w *writer) isKeyPresent(key []byte) bool {
+// Returns an error if corruption is detected while probing the hash table.
+func (w *writer) isKeyPresent(key []byte) (bool, error) {
 	for i := len(w.bufferedOps) - 1; i >= 0; i-- {
 		op := w.bufferedOps[i]
 		if bytes.Equal(op.key, key) {
-			return op.isPut
+			return op.isPut, nil
 		}
 	}
 
-	_, found := w.findLiveSlotLocked(key)
+	_, found, err := w.findLiveSlotLocked(key)
 
-	return found
+	return found, err
 }
