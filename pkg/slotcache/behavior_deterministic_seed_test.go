@@ -13,6 +13,9 @@
 // - Higher delete rate (20%) for tombstone stress
 // - More eager BeginWrite (30%) to start writing sooner
 //
+// BehaviorOpSet is used to enable UserHeader operations (SetUserHeaderFlags,
+// SetUserHeaderData, UserHeader) which are excluded from the default CoreOpSet.
+//
 // Failures here mean: "the API returned wrong results or wrong errors"
 
 package slotcache_test
@@ -62,6 +65,7 @@ func Test_Slotcache_Matches_Model_When_Random_Operations_Applied(t *testing.T) {
 				fillRandom(randomNumberGenerator, fuzzBytes)
 
 				cfg := testutil.DeepStateOpGenConfig()
+				cfg.AllowedOps = testutil.BehaviorOpSet
 				opGen := testutil.NewOpGenerator(fuzzBytes, opts, &cfg)
 
 				runCfg := testutil.BehaviorRunConfig{
@@ -121,6 +125,7 @@ func Test_Slotcache_Matches_Model_When_Random_Operations_Applied_In_OrderedKeys_
 			fillRandom(randomNumberGenerator, fuzzBytes)
 
 			cfg := testutil.DeepStateOpGenConfig()
+			cfg.AllowedOps = testutil.BehaviorOpSet
 			opGen := testutil.NewOpGenerator(fuzzBytes, opts, &cfg)
 
 			runCfg := testutil.BehaviorRunConfig{
