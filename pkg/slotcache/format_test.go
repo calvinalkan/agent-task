@@ -2,6 +2,7 @@ package slotcache
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -292,6 +293,47 @@ func Test_ComputeBucketCount_Returns_Zero_When_Overflow(t *testing.T) {
 	got := computeBucketCount(overflowCapacity)
 	if got != 0 {
 		t.Errorf("computeBucketCount(%d) = %d, want 0 (overflow)", overflowCapacity, got)
+	}
+}
+
+func Test_ComputeBucketCountChecked_Returns_Error_When_Overflow(t *testing.T) {
+	t.Parallel()
+
+	// slot_capacity * 2 would overflow uint64
+	const overflowCapacity = (^uint64(0) >> 1) + 1 // maxUint64/2 + 1
+
+	_, err := computeBucketCountChecked(overflowCapacity)
+	if err == nil {
+		t.Error("computeBucketCountChecked should return error for overflow capacity")
+	}
+
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("computeBucketCountChecked error should wrap ErrInvalidInput, got %v", err)
+	}
+}
+
+func Test_ComputeBucketCountChecked_Returns_Valid_Count_When_No_Overflow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		slotCapacity uint64
+		want         uint64
+	}{
+		{slotCapacity: 0, want: 2},
+		{slotCapacity: 1, want: 2},
+		{slotCapacity: 64, want: 128},
+		{slotCapacity: 100, want: 256},
+	}
+
+	for _, tt := range tests {
+		got, err := computeBucketCountChecked(tt.slotCapacity)
+		if err != nil {
+			t.Errorf("computeBucketCountChecked(%d) returned error: %v", tt.slotCapacity, err)
+		}
+
+		if got != tt.want {
+			t.Errorf("computeBucketCountChecked(%d) = %d, want %d", tt.slotCapacity, got, tt.want)
+		}
 	}
 }
 

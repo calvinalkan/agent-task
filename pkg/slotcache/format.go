@@ -292,29 +292,46 @@ func align8U64(x uint64) uint64 {
 	return (x + 7) &^ 7
 }
 
-// computeBucketCount calculates the bucket count for a given slot capacity.
+// computeBucketCountChecked calculates the bucket count for a given slot capacity
+// and enforces implementation limits.
+//
 // bucket_count = nextPow2(slot_capacity * 2)
 // bucket_count must be >= 2 and a power of two.
 //
 // Per spec: "Implementations SHOULD size bucket_count = nextPowerOfTwo(slot_capacity * 2)
 // to maintain load factor ≤ 0.5."
 //
-// Returns 0 if slot_capacity * 2 would overflow.
-func computeBucketCount(slotCapacity uint64) uint64 {
+// Returns ErrInvalidInput if slot_capacity * 2 would overflow.
+func computeBucketCountChecked(slotCapacity uint64) (uint64, error) {
 	if slotCapacity == 0 {
-		return 2 // minimum valid bucket count
+		return 2, nil // minimum valid bucket count
 	}
 
 	// Check for overflow: slot_capacity * 2 > maxUint64
 	// Equivalent to: slot_capacity > maxUint64 / 2
 	const maxSafeCapacity = ^uint64(0) >> 1 // maxUint64 / 2
 	if slotCapacity > maxSafeCapacity {
-		return 0 // overflow
+		return 0, fmt.Errorf("slot_capacity %d causes bucket_count overflow: %w", slotCapacity, ErrInvalidInput)
 	}
 
 	needed := max(slotCapacity*2, 2)
 
-	return nextPow2(needed)
+	return nextPow2(needed), nil
+}
+
+// computeBucketCount calculates bucket count without returning an error.
+//
+// Callers MUST ensure slotCapacity has already been validated such that
+// slot_capacity * 2 does not overflow uint64.
+func computeBucketCount(slotCapacity uint64) uint64 {
+	count, err := computeBucketCountChecked(slotCapacity)
+	if err != nil {
+		// This should be impossible if Open() validation is correct.
+		// Return 0 to fail fast on later invariants rather than silently wrapping.
+		return 0
+	}
+
+	return count
 }
 
 // nextPow2 returns the smallest power of two >= value.

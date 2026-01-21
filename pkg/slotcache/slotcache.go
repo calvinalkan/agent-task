@@ -814,9 +814,9 @@ func validateFileLayoutFitsInt64(opts Options) error {
 
 	slotSize := uint64(slotSize32)
 
-	bucketCount := computeBucketCount(opts.SlotCapacity)
-	if bucketCount == 0 {
-		return fmt.Errorf("bucket_count overflows uint64: %w", ErrInvalidInput)
+	bucketCount, err := computeBucketCountChecked(opts.SlotCapacity)
+	if err != nil {
+		return err
 	}
 
 	// Check slots section: header_size + slot_capacity * slot_size
