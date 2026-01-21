@@ -409,33 +409,41 @@ func Test_HasReservedBytesSet_Returns_True_When_Reserved_Tail_Bytes_Are_Nonzero(
 	}
 }
 
-func Test_MsyncRange_Returns_Nil_When_Range_Is_Invalid(t *testing.T) {
+func Test_MsyncRange_Returns_Error_When_Range_Is_Invalid(t *testing.T) {
 	t.Parallel()
 
 	data := make([]byte, 4096)
 
-	// Empty length
+	// Empty length - should return ErrInvalidInput
 	err := msyncRange(data, 0, 0)
-	if err != nil {
-		t.Errorf("msyncRange with length=0 should return nil, got %v", err)
+	if err == nil {
+		t.Error("msyncRange with length=0 should return error")
+	} else if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("msyncRange with length=0 should wrap ErrInvalidInput, got %v", err)
 	}
 
-	// Negative length
+	// Negative length - should return ErrInvalidInput
 	err = msyncRange(data, 0, -1)
-	if err != nil {
-		t.Errorf("msyncRange with negative length should return nil, got %v", err)
+	if err == nil {
+		t.Error("msyncRange with negative length should return error")
+	} else if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("msyncRange with negative length should wrap ErrInvalidInput, got %v", err)
 	}
 
-	// Offset beyond data
+	// Offset beyond data - should return ErrInvalidInput
 	err = msyncRange(data, 5000, 100)
-	if err != nil {
-		t.Errorf("msyncRange with offset beyond data should return nil, got %v", err)
+	if err == nil {
+		t.Error("msyncRange with offset beyond data should return error")
+	} else if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("msyncRange with offset beyond data should wrap ErrInvalidInput, got %v", err)
 	}
 
-	// Negative offset
+	// Negative offset - should return ErrInvalidInput
 	err = msyncRange(data, -1, 100)
-	if err != nil {
-		t.Errorf("msyncRange with negative offset should return nil, got %v", err)
+	if err == nil {
+		t.Error("msyncRange with negative offset should return error")
+	} else if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("msyncRange with negative offset should wrap ErrInvalidInput, got %v", err)
 	}
 }
 

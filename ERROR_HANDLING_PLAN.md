@@ -38,8 +38,10 @@ Replace sentinel return patterns with real errors.
   and overflow instead of returning `2/0`).
   - Removed sentinel wrapper; renamed `computeBucketCountChecked` to `computeBucketCount`
   - All call sites updated to handle errors
-- Update `msyncRange` to return an error for empty/invalid ranges (no nil on
+- [x] Update `msyncRange` to return an error for empty/invalid ranges (no nil on
   invalid input).
+  - Returns `ErrInvalidInput` for: length <= 0, offset < 0, offset >= len(data)
+  - Callers must validate ranges before calling (invalid ranges indicate bugs)
 
 ### Files
 - `pkg/slotcache/format.go`
@@ -103,7 +105,7 @@ Update tests for new error behavior.
 - [x] Update `format_test.go`:
   - [x] `computeSlotSize` / `computeBucketCount` tests to expect errors instead of
     sentinel values.
-  - `msyncRange` tests to expect errors on invalid/empty ranges.
+  - [x] `msyncRange` tests to expect errors on invalid/empty ranges.
 - [x] Update any tests that call `newHeader` / `encodeSlot` directly.
 - Audit other tests for use of the old helper signatures.
 

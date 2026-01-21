@@ -574,10 +574,25 @@ var pageSize = unix.Getpagesize()
 
 // msyncRange performs a synchronous msync on the given byte range.
 // The range is automatically page-aligned to satisfy macOS requirements.
-// Returns nil if the range is empty or invalid.
+//
+// Returns ErrInvalidInput if:
+//   - length <= 0
+//   - offset < 0
+//   - offset >= len(data)
+//
+// Callers should validate ranges before calling msyncRange. Invalid ranges
+// indicate a bug in dirty-range tracking or file layout validation.
 func msyncRange(data []byte, offset, length int) error {
-	if length <= 0 || offset < 0 || offset >= len(data) {
-		return nil
+	if length <= 0 {
+		return fmt.Errorf("msyncRange: length %d <= 0: %w", length, ErrInvalidInput)
+	}
+
+	if offset < 0 {
+		return fmt.Errorf("msyncRange: offset %d < 0: %w", offset, ErrInvalidInput)
+	}
+
+	if offset >= len(data) {
+		return fmt.Errorf("msyncRange: offset %d >= data length %d: %w", offset, len(data), ErrInvalidInput)
 	}
 
 	// Clamp to data bounds.
@@ -594,7 +609,8 @@ func msyncRange(data []byte, offset, length int) error {
 
 	alignedLen := alignedEnd - alignedStart
 	if alignedLen <= 0 {
-		return nil
+		// This should not happen after the above validation, but guard anyway.
+		return fmt.Errorf("msyncRange: aligned length %d <= 0: %w", alignedLen, ErrInvalidInput)
 	}
 
 	err := unix.Msync(data[alignedStart:alignedStart+alignedLen], unix.MS_SYNC)
