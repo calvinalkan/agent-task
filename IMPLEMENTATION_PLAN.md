@@ -167,7 +167,7 @@ Acceptance:
 
 ## Phase 4 — Harness support for UserHeader ops (model-vs-real)
 
-- [ ] Extend `ApplyModel` and `ApplyReal` to handle:
+- [x] Extend `ApplyModel` and `ApplyReal` to handle:
   - `OpUserHeader`
   - `OpSetUserHeaderFlags`
   - `OpSetUserHeaderData`
@@ -175,7 +175,7 @@ Acceptance:
 Files:
 - `pkg/slotcache/internal/testutil/harness.go`
 
-- [ ] Extend `CompareState` (heavy compare) to also compare `UserHeader()` snapshots.
+- [x] Extend `CompareState` (heavy compare) to also compare `UserHeader()` snapshots.
   - Only if caches are open and not errored.
 
 Files:

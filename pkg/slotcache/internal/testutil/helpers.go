@@ -646,4 +646,22 @@ func CompareState(tb testing.TB, harness *Harness) {
 			}
 		}
 	}
+
+	// Compare UserHeader().
+	mHeader, mHeaderErr := harness.Model.Cache.UserHeader()
+	rHeader, rHeaderErr := harness.Real.Cache.UserHeader()
+
+	if !errorsMatch(mHeaderErr, rHeaderErr) {
+		tb.Fatalf("UserHeader() error mismatch\nmodel=%v\nreal=%v", mHeaderErr, rHeaderErr)
+	}
+
+	if mHeaderErr == nil {
+		if mHeader.Flags != rHeader.Flags {
+			tb.Fatalf("UserHeader().Flags mismatch\nmodel=%d\nreal=%d", mHeader.Flags, rHeader.Flags)
+		}
+
+		if mHeader.Data != rHeader.Data {
+			tb.Fatalf("UserHeader().Data mismatch\nmodel=%x\nreal=%x", mHeader.Data, rHeader.Data)
+		}
+	}
 }

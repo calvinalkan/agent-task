@@ -215,6 +215,29 @@ func ApplyModel(testHarness *Harness, operationValue Operation) OperationResult 
 
 		return ResReopen{CloseError: closeError, OpenError: nil}
 
+	case OpUserHeader:
+		header, headerError := testHarness.Model.Cache.UserHeader()
+
+		return ResUserHeader{Header: header, Error: headerError}
+
+	case OpSetUserHeaderFlags:
+		if testHarness.Model.Writer == nil {
+			panic("test harness bug: Writer.SetUserHeaderFlags without an active model writer")
+		}
+
+		setError := testHarness.Model.Writer.SetUserHeaderFlags(concreteOperation.Flags)
+
+		return ResErr{Error: setError}
+
+	case OpSetUserHeaderData:
+		if testHarness.Model.Writer == nil {
+			panic("test harness bug: Writer.SetUserHeaderData without an active model writer")
+		}
+
+		setError := testHarness.Model.Writer.SetUserHeaderData(concreteOperation.Data)
+
+		return ResErr{Error: setError}
+
 	default:
 		panic("unknown operation type")
 	}
@@ -350,6 +373,29 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 		}
 
 		return ResReopen{CloseError: closeError, OpenError: openError}
+
+	case OpUserHeader:
+		header, headerError := testHarness.Real.Cache.UserHeader()
+
+		return ResUserHeader{Header: header, Error: headerError}
+
+	case OpSetUserHeaderFlags:
+		if testHarness.Real.Writer == nil {
+			panic("test harness bug: Writer.SetUserHeaderFlags without an active real writer")
+		}
+
+		setError := testHarness.Real.Writer.SetUserHeaderFlags(concreteOperation.Flags)
+
+		return ResErr{Error: setError}
+
+	case OpSetUserHeaderData:
+		if testHarness.Real.Writer == nil {
+			panic("test harness bug: Writer.SetUserHeaderData without an active real writer")
+		}
+
+		setError := testHarness.Real.Writer.SetUserHeaderData(concreteOperation.Data)
+
+		return ResErr{Error: setError}
 
 	default:
 		panic("unknown operation type")
