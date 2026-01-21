@@ -211,7 +211,11 @@ Keep seeds minimal and add a guard if they're hand-rolled.
   - [x] Move seeds to testutil.
   - [x] Use `testutil.AssertSeedEmitsFilteredScan`.
   - [x] Keep wrapper test in `pkg/slotcache` for slotcache-only test runs.
-- [ ] 2. Add guard tests for hand-rolled behavior seeds (A–H).
+- [x] 2. Add guard tests for hand-rolled behavior seeds (A–H).
+  - [x] Fix core seeds (A-H) byte encoding to match FuzzDecoder protocol.
+  - [x] Add `behavior_core_seed_guard_test.go` with milestone assertions.
+  - [x] Each seed has individual guard test validating op sequence.
+  - [x] Combined test verifies all seeds emit BeginWrite.
 - [ ] 3. Add guard tests for spec-fuzz seeds if new ones are added.
 
 ### Phase D — spec fuzz seed improvements
@@ -219,7 +223,7 @@ Keep seeds minimal and add a guard if they're hand-rolled.
 - [ ] 2. Use testutil seed builder helper to reduce brittleness.
 
 ## Risk notes / gotchas
-- **Core seeds (A-H) need fixing:** Guard tests revealed that seeds in `behavior_seeds.go` (except filter seeds) have incorrect byte encoding. For example, they use `0x02` for Commit but the decoder needs choice in [60,75) range, so `0x3C` (60) is required. Filter seeds (`SeedFilteredScans`, `SeedFilterPagination`) are correctly encoded. Fix the core seeds before adding guard tests for them in Phase C.
+- **Core seeds (A-H) fixed:** Core seeds in `behavior_seeds.go` now use correct byte encoding matching the FuzzDecoder protocol. Each seed includes inline documentation of the encoding scheme.
 - **Determinism:** Changing `FuzzDecoder` logic impacts seed semantics. Guard tests prevent silent drift.
 - **Test visibility:** `internal/testutil` tests won't run with `go test ./pkg/slotcache`; keep wrapper tests in `pkg/slotcache` for guards.
 - **Seed corpus size:** keep curated spec seeds minimal so fuzz startup stays fast.
