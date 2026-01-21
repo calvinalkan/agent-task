@@ -53,7 +53,7 @@ func FuzzBehavior_ModelVsReal(f *testing.F) {
 			SlotCapacity: 64,
 		}
 
-		// Use DefaultOpGenConfig which matches original FuzzDecoder behavior.
+		// Use DefaultOpGenConfig for standard operation generation.
 		cfg := testutil.DefaultOpGenConfig()
 		opGen := testutil.NewOpGenerator(fuzzBytes, options, &cfg)
 

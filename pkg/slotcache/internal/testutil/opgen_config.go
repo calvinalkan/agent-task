@@ -151,7 +151,7 @@ const CoreOpSet = coreReadOps | coreLifecycleOps | coreWriterOps
 // OpGenConfig tunes the probabilities and behavior of OpGenerator.
 // All rate fields are percentages (0–100).
 //
-// Determinism: All weighting decisions consume bytes from FuzzDecoder,
+// Determinism: All weighting decisions consume bytes from ByteDecoder,
 // so fuzz minimization and fixed seeds remain stable.
 type OpGenConfig struct {
 	// InvalidKeyRate is the percentage of keys that should be invalid
@@ -256,7 +256,7 @@ type OpGenConfig struct {
 	AllowedOps OpSet
 }
 
-// DefaultOpGenConfig returns a config matching the original FuzzDecoder behavior.
+// DefaultOpGenConfig returns the default operation generator configuration.
 func DefaultOpGenConfig() OpGenConfig {
 	return OpGenConfig{
 		InvalidKeyRate:       15,
@@ -426,10 +426,10 @@ func (p Phase) String() string {
 	}
 }
 
-// OpGenerator wraps FuzzDecoder and applies configurable probability weights.
+// OpGenerator wraps ByteDecoder and applies configurable probability weights.
 // It implements OpSource for use with RunBehavior.
 type OpGenerator struct {
-	decoder *FuzzDecoder
+	decoder *ByteDecoder
 	config  OpGenConfig
 	options slotcache.Options
 
@@ -440,7 +440,7 @@ type OpGenerator struct {
 // NewOpGenerator creates an OpGenerator with the given config.
 func NewOpGenerator(fuzzBytes []byte, opts slotcache.Options, cfg *OpGenConfig) *OpGenerator {
 	return &OpGenerator{
-		decoder: NewFuzzDecoder(fuzzBytes, opts),
+		decoder: NewByteDecoder(fuzzBytes, opts),
 		config:  *cfg,
 		options: opts,
 	}

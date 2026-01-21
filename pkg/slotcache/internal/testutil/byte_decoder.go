@@ -6,15 +6,15 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
 )
 
-// FuzzDecoder interprets fuzz bytes as a deterministic stream of choices.
+// ByteDecoder interprets fuzz bytes as a deterministic stream of choices.
 //
 // IMPORTANT: The decoder must be deterministic *for a given input* so Go's fuzzer
 // can minimize failing inputs.
 //
-// FuzzDecoder provides low-level byte/value reading and key/index generation.
-// For operation generation, use OpGenerator which wraps FuzzDecoder and provides
+// ByteDecoder provides low-level byte/value reading and key/index generation.
+// For operation generation, use OpGenerator which wraps ByteDecoder and provides
 // configurable operation selection via the canonical OpGenerator protocol.
-type FuzzDecoder struct {
+type ByteDecoder struct {
 	rawBytes []byte
 	cursor   int
 
@@ -23,9 +23,9 @@ type FuzzDecoder struct {
 	orderedCounter uint32
 }
 
-// NewFuzzDecoder constructs a decoder for fuzz inputs.
-func NewFuzzDecoder(fuzzBytes []byte, options slotcache.Options) *FuzzDecoder {
-	return &FuzzDecoder{
+// NewByteDecoder constructs a decoder for fuzz inputs.
+func NewByteDecoder(fuzzBytes []byte, options slotcache.Options) *ByteDecoder {
+	return &ByteDecoder{
 		rawBytes:       fuzzBytes,
 		cursor:         0,
 		options:        options,
@@ -34,7 +34,7 @@ func NewFuzzDecoder(fuzzBytes []byte, options slotcache.Options) *FuzzDecoder {
 }
 
 // HasMore reports whether more fuzz bytes remain.
-func (decoder *FuzzDecoder) HasMore() bool {
+func (decoder *ByteDecoder) HasMore() bool {
 	return decoder.cursor < len(decoder.rawBytes)
 }
 
@@ -42,17 +42,17 @@ func (decoder *FuzzDecoder) HasMore() bool {
 //
 // This is exported so non-harness fuzz tests can reuse the same key-generation
 // distribution as the behavior harness.
-func (decoder *FuzzDecoder) NextKey(previouslySeenKeys [][]byte) []byte {
+func (decoder *ByteDecoder) NextKey(previouslySeenKeys [][]byte) []byte {
 	return decoder.genKey(decoder.options.KeySize, previouslySeenKeys)
 }
 
 // NextIndex generates an index (sometimes invalid length).
-func (decoder *FuzzDecoder) NextIndex() []byte {
+func (decoder *ByteDecoder) NextIndex() []byte {
 	return decoder.genIndex(decoder.options.IndexSize)
 }
 
 // NextByte returns the next byte in the stream (0 if exhausted).
-func (decoder *FuzzDecoder) NextByte() byte {
+func (decoder *ByteDecoder) NextByte() byte {
 	if decoder.cursor >= len(decoder.rawBytes) {
 		return 0
 	}
@@ -65,7 +65,7 @@ func (decoder *FuzzDecoder) NextByte() byte {
 
 // NextInt64 reads the next int64 value (little-endian, 8 bytes).
 // If the stream ends, missing bytes are treated as 0.
-func (decoder *FuzzDecoder) NextInt64() int64 {
+func (decoder *ByteDecoder) NextInt64() int64 {
 	var raw [8]byte
 	for index := range raw {
 		raw[index] = decoder.NextByte()
@@ -76,7 +76,7 @@ func (decoder *FuzzDecoder) NextInt64() int64 {
 
 // NextUint64 reads the next uint64 value (little-endian, 8 bytes).
 // If the stream ends, missing bytes are treated as 0.
-func (decoder *FuzzDecoder) NextUint64() uint64 {
+func (decoder *ByteDecoder) NextUint64() uint64 {
 	var raw [8]byte
 	for index := range raw {
 		raw[index] = decoder.NextByte()
@@ -104,7 +104,7 @@ func getInt64LE(buf []byte) int64 {
 
 // NextBytes reads exactly length bytes from the stream.
 // If the stream ends, remaining bytes are filled with 0.
-func (decoder *FuzzDecoder) NextBytes(length int) []byte {
+func (decoder *ByteDecoder) NextBytes(length int) []byte {
 	if length <= 0 {
 		return []byte{}
 	}
@@ -118,19 +118,19 @@ func (decoder *FuzzDecoder) NextBytes(length int) []byte {
 }
 
 // NextPrefix reads a variable-length prefix with length in [1..keySize].
-func (decoder *FuzzDecoder) NextPrefix(keySize int) []byte {
+func (decoder *ByteDecoder) NextPrefix(keySize int) []byte {
 	length := 1 + int(decoder.NextByte())%keySize
 
 	return decoder.NextBytes(length)
 }
 
 // nextBool returns a boolean derived from the next byte.
-func (decoder *FuzzDecoder) nextBool() bool {
+func (decoder *ByteDecoder) nextBool() bool {
 	return (decoder.NextByte() & 0x01) == 1
 }
 
 // genKey generates a key with a mix of invalid, reused, and new keys.
-func (decoder *FuzzDecoder) genKey(keySize int, previouslySeenKeys [][]byte) []byte {
+func (decoder *ByteDecoder) genKey(keySize int, previouslySeenKeys [][]byte) []byte {
 	// Key generation tries to balance:
 	//  - invalid inputs (exercise ErrInvalidInput paths)
 	//  - key reuse (exercise update/delete paths)
@@ -185,7 +185,7 @@ func (decoder *FuzzDecoder) genKey(keySize int, previouslySeenKeys [][]byte) []b
 }
 
 // nextOrderedKey generates a monotonically increasing key for ordered mode.
-func (decoder *FuzzDecoder) nextOrderedKey(keySize int) []byte {
+func (decoder *ByteDecoder) nextOrderedKey(keySize int) []byte {
 	if keySize <= 0 {
 		return []byte{}
 	}
@@ -209,7 +209,7 @@ func (decoder *FuzzDecoder) nextOrderedKey(keySize int) []byte {
 }
 
 // nextNonMonotonicOrderedKey generates a key that is intentionally out of order.
-func (decoder *FuzzDecoder) nextNonMonotonicOrderedKey(keySize int) []byte {
+func (decoder *ByteDecoder) nextNonMonotonicOrderedKey(keySize int) []byte {
 	if keySize <= 0 {
 		return []byte{}
 	}
@@ -247,7 +247,7 @@ func (decoder *FuzzDecoder) nextNonMonotonicOrderedKey(keySize int) []byte {
 }
 
 // genIndex generates an index with a mix of invalid and valid lengths.
-func (decoder *FuzzDecoder) genIndex(indexSize int) []byte {
+func (decoder *ByteDecoder) genIndex(indexSize int) []byte {
 	// Match property test distribution: 10% invalid length.
 	mode := decoder.NextByte()
 

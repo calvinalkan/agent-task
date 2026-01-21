@@ -4,7 +4,7 @@
 // still emit at least one scan operation with Filter != nil.
 //
 // Purpose:
-//   - Acts as a "tripwire" if the fuzz decoder's byte consumption changes
+//   - Acts as a "tripwire" if the OpGenerator's byte consumption changes
 //   - Ensures filter coverage is maintained in the fuzz corpus
 //   - Fails fast with a clear message if seeds need updating
 //

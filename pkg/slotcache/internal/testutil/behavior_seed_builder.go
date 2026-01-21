@@ -3,7 +3,7 @@
 // This file provides a builder for constructing seeds compatible with the
 // canonical OpGenerator protocol (CanonicalOpGenConfig + BehaviorOpSet).
 //
-// The OpGenerator consumes bytes differently than the legacy FuzzDecoder.NextOp:
+// The OpGenerator consumes bytes differently than a simple byte stream:
 //   - Phased generation affects probability thresholds
 //   - Different byte ranges trigger different operations
 //   - Key/index generation has different invalid-rate thresholds

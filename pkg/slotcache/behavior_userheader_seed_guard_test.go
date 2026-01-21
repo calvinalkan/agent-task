@@ -4,7 +4,7 @@
 // coverage still emit their intended operation sequences.
 //
 // Purpose:
-//   - Acts as a "tripwire" if the fuzz decoder's byte consumption changes
+//   - Acts as a "tripwire" if the OpGenerator's byte consumption changes
 //   - Ensures user header coverage is maintained in the fuzz corpus
 //   - Fails fast with a clear message if seeds need updating
 //

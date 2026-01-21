@@ -36,7 +36,7 @@ type SeedTrace struct {
 // It also validates model vs real behavior for each operation.
 //
 // Note: This uses the canonical OpGenerator protocol. Curated seeds must be
-// designed for OpGenerator, not the legacy FuzzDecoder.NextOp protocol.
+// designed for OpGenerator's byte consumption patterns.
 func RunSeedTrace(tb testing.TB, seed []byte, opts slotcache.Options, maxOps int) *SeedTrace {
 	tb.Helper()
 

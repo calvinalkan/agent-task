@@ -315,13 +315,23 @@ use the canonical OpGenerator protocol. Added:
 
 ## Phase 8 — Cleanup + naming
 
-- [ ] Rename `FuzzDecoder` → `ByteDecoder` (optional but recommended to reduce confusion).
-- [ ] Update docs/comments that claim any generator “matches FuzzDecoder behavior”.
-- [ ] Ensure all references to “FuzzDecoder protocol” are removed/replaced with “OpGenerator canonical protocol”.
+- [x] Rename `FuzzDecoder` → `ByteDecoder` (optional but recommended to reduce confusion).
+- [x] Update docs/comments that claim any generator "matches FuzzDecoder behavior".
+- [x] Ensure all references to "FuzzDecoder protocol" are removed/replaced with "OpGenerator canonical protocol".
 
 Files:
-- `pkg/slotcache/internal/testutil/fuzz_decoder.go`
+- `pkg/slotcache/internal/testutil/byte_decoder.go` (renamed from `fuzz_decoder.go`)
 - comments across `pkg/slotcache/*_test.go`
+
+**Note (2026-01-21):** Phase 8 complete. Renamed `FuzzDecoder` → `ByteDecoder` and
+`NewFuzzDecoder` → `NewByteDecoder`. Updated all references in:
+- `opgen_config.go` (type and constructor references, comments)
+- `behavior_seed_builder.go` (comment about byte consumption)
+- `seed_guard.go` (comment about canonical protocol)
+- `filter.go` (package doc)
+- `behavior_fuzz_test.go` (comment about DefaultOpGenConfig)
+- `behavior_userheader_seed_guard_test.go` (comment about tripwire)
+- `behavior_filter_seed_guard_test.go` (comment about tripwire)
 
 ---
 

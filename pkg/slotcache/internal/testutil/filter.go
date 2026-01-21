@@ -1,6 +1,6 @@
 // Package testutil provides test utilities for the slotcache package.
 // It includes harnesses for comparing the real implementation against
-// an in-memory behavioral model, fuzz decoders, and helper functions.
+// an in-memory behavioral model, byte decoders, and helper functions.
 package testutil
 
 import (
