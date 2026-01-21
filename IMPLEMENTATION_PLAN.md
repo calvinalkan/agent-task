@@ -84,7 +84,7 @@ Acceptance:
 
 ### 2.1 Decouple OpSource from Harness
 
-- [ ] Change `OpSource` interface to avoid depending on `*Harness`:
+- [x] Change `OpSource` interface to avoid depending on `*Harness`:
   - from `NextOp(h *Harness, seen [][]byte) Operation`
   - to `NextOp(writerActive bool, seen [][]byte) Operation`
 
@@ -94,8 +94,8 @@ Files:
 
 ### 2.2 Update RunBehavior
 
-- [ ] In `RunBehavior`, compute `writerActive := harness.Model.Writer != nil && harness.Real.Writer != nil`.
-- [ ] Call `src.NextOp(writerActive, previouslySeenKeys)`.
+- [x] In `RunBehavior`, compute `writerActive := harness.Model.Writer != nil && harness.Real.Writer != nil`.
+- [x] Call `src.NextOp(writerActive, previouslySeenKeys)`.
 
 Files:
 - `pkg/slotcache/internal/testutil/behavior_runner.go`

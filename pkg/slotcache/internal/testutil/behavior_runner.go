@@ -27,8 +27,12 @@ type BehaviorRunConfig struct {
 }
 
 // OpSource produces operations for RunBehavior.
+//
+// The writerActive parameter indicates whether both model and real writers
+// are currently active. This allows operation selection without coupling
+// to the Harness type.
 type OpSource interface {
-	NextOp(h *Harness, seen [][]byte) Operation
+	NextOp(writerActive bool, seen [][]byte) Operation
 }
 
 // RunBehavior executes a deterministic stream of operations and compares
@@ -48,7 +52,8 @@ func RunBehavior(tb testing.TB, opts slotcache.Options, src OpSource, cfg Behavi
 	var previouslySeenKeys [][]byte
 
 	for opIndex := 1; opIndex <= cfg.MaxOps; opIndex++ {
-		operationValue := src.NextOp(harness, previouslySeenKeys)
+		writerActive := harness.Model.Writer != nil && harness.Real.Writer != nil
+		operationValue := src.NextOp(writerActive, previouslySeenKeys)
 
 		modelResult := ApplyModel(harness, operationValue)
 		realResult := ApplyReal(harness, operationValue)

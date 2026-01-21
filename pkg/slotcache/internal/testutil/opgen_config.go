@@ -484,14 +484,16 @@ func (g *OpGenerator) CurrentPhase(seenCount int) Phase {
 	return PhaseRead
 }
 
-// NextOp implements OpSource. It chooses the next operation based on harness
-// state and the configured probability weights.
+// NextOp implements OpSource. It chooses the next operation based on whether
+// a writer is active and the configured probability weights.
+//
+// The writerActive parameter should be true when both model and real writers
+// are active (for behavior testing) or when the real writer is active (for
+// spec testing).
 //
 // When phased generation is enabled, operation selection is biased based on
 // the current phase (Fill → Churn → Read).
-func (g *OpGenerator) NextOp(h *Harness, seen [][]byte) Operation {
-	writerActive := h.Model.Writer != nil && h.Real.Writer != nil
-
+func (g *OpGenerator) NextOp(writerActive bool, seen [][]byte) Operation {
 	// Global ops: Reopen/Close can happen anytime (even with writer active,
 	// they return ErrBusy which is meaningful behavior to test).
 	roulette := g.decoder.NextByte()
@@ -509,13 +511,13 @@ func (g *OpGenerator) NextOp(h *Harness, seen [][]byte) Operation {
 	phase := g.CurrentPhase(len(seen))
 
 	if !writerActive {
-		return g.nextReaderOp(h, seen, phase)
+		return g.nextReaderOp(seen, phase)
 	}
 
-	return g.nextWriterOp(h, seen, phase)
+	return g.nextWriterOp(seen, phase)
 }
 
-func (g *OpGenerator) nextReaderOp(_ *Harness, seen [][]byte, phase Phase) Operation {
+func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase) Operation {
 	choice := g.decoder.NextByte() % 100
 
 	// BeginWrite rate varies by phase when phased generation is enabled.
@@ -580,7 +582,7 @@ func (g *OpGenerator) nextReaderOp(_ *Harness, seen [][]byte, phase Phase) Opera
 	}
 }
 
-func (g *OpGenerator) nextWriterOp(h *Harness, seen [][]byte, phase Phase) Operation {
+func (g *OpGenerator) nextWriterOp(seen [][]byte, phase Phase) Operation {
 	choice := g.decoder.NextByte() % 100
 
 	// Calculate thresholds from config.
@@ -630,11 +632,11 @@ func (g *OpGenerator) nextWriterOp(h *Harness, seen [][]byte, phase Phase) Opera
 		}
 	default:
 		// Remaining ~15% is read ops.
-		return g.nextWriterReadOp(h, seen)
+		return g.nextWriterReadOp(seen)
 	}
 }
 
-func (g *OpGenerator) nextWriterReadOp(_ *Harness, seen [][]byte) Operation {
+func (g *OpGenerator) nextWriterReadOp(seen [][]byte) Operation {
 	// Distribute among read ops: Get, Scan, ScanPrefix, ScanMatch, ScanRange.
 	choice := g.decoder.NextByte() % 100
 

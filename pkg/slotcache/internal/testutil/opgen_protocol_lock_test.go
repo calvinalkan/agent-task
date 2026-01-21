@@ -179,7 +179,8 @@ func Test_OpGenerator_Produces_Stable_Sequence_When_Using_Canonical_Config(t *te
 			t.Fatalf("generator exhausted at op %d, expected %s", i, expectedName)
 		}
 
-		op := gen.NextOp(harness, seen)
+		writerActive := harness.Model.Writer != nil && harness.Real.Writer != nil
+		op := gen.NextOp(writerActive, seen)
 		actualName := op.Name()
 
 		if actualName != expectedName {
