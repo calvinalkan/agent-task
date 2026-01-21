@@ -291,8 +291,8 @@ validation logic. The behavior fuzz tests in this file were already migrated.
 
 ### 7.3 Spec curated seeds
 
-- [ ] Replace `spec_seeds.go` builder to target the canonical OpGenerator protocol + spec op set.
-- [ ] Update `spec_seeds_test.go` to guard milestones (Invalidate + UserHeader setters).
+- [x] Replace `spec_seeds.go` builder to target the canonical OpGenerator protocol + spec op set.
+- [x] Update `spec_seeds_test.go` to guard milestones (Invalidate + UserHeader setters).
 
 Files:
 - `pkg/slotcache/internal/testutil/spec_seeds.go`
@@ -301,6 +301,15 @@ Files:
 Acceptance:
 - Spec fuzz tests compile and still validate format invariants.
 - Spec seeds + guards run on plain `go test`.
+
+**Note (2026-01-21):** Phase 7.3 complete. The `SpecSeedBuilder` now wraps
+`BehaviorSeedBuilder` and adds `Invalidate()` support for SpecOpSet. All seeds
+use the canonical OpGenerator protocol. Added:
+- `SpecSeedBuilder` with `Invalidate()` method
+- `RunSpecSeedTrace()` for spec seed tracing (uses SpecOpSet)
+- `IsInvalidate` predicate for guard tests
+- `InvalidateSeeds()` and `SpecUserHeaderSeeds()` collection functions
+- Milestone guard tests verifying seeds emit expected operations
 
 ---
 
@@ -339,3 +348,34 @@ Exit criteria:
 Files:
 - `pkg/slotcache/behavior_fuzz_test.go`
 - `pkg/slotcache/behavior_fuzz_options_test.go`
+
+---
+
+## Phase 11 — Behavior fuzz configs allow UserHeader ops
+
+- [ ] Ensure behavior fuzz/deterministic tests set `AllowedOps = BehaviorOpSet` when using Default/DeepState OpGen configs (or document why not).
+
+Files:
+- `pkg/slotcache/behavior_fuzz_test.go`
+- `pkg/slotcache/behavior_fuzz_options_test.go`
+- `pkg/slotcache/behavior_deterministic_seed_test.go`
+
+---
+
+## Phase 12 — Spec fuzz validation parity
+
+- [ ] Ensure OpClose reopen path validates file format (like OpReopen does).
+- [ ] Decide whether spec fuzz should apply OpScan* filters; either wire `Filter` into scan options or document intentional omission.
+
+Files:
+- `pkg/slotcache/spec_fuzz_test.go`
+- `pkg/slotcache/spec_fuzz_options_test.go`
+
+---
+
+## Phase 13 — msyncRange error handling
+
+- [ ] Update `msyncRange` to return a real error (not nil) for empty/invalid ranges; avoid treating invalid inputs as success.
+
+Files:
+- (locate msyncRange implementation)

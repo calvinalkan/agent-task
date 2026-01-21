@@ -75,6 +75,111 @@ func RunSeedTrace(tb testing.TB, seed []byte, opts slotcache.Options, maxOps int
 	return &SeedTrace{Entries: entries}
 }
 
+// RunSpecSeedTrace executes a seed through the OpGenerator with SpecOpSet.
+// Unlike RunSeedTrace, this allows Invalidate operations and only records
+// operations without model validation (since Invalidate is not modeled).
+//
+// The trace is useful for verifying that curated spec seeds emit expected
+// operations like Invalidate and user header setters.
+//
+// Note: This function does not use the behavior model because Invalidate
+// is terminal and would require modeling Open-can-fail semantics.
+func RunSpecSeedTrace(tb testing.TB, seed []byte, opts slotcache.Options, maxOps int) *SeedTrace {
+	tb.Helper()
+
+	cache, err := slotcache.Open(opts)
+	if err != nil {
+		tb.Fatalf("Open failed: %v", err)
+	}
+
+	tb.Cleanup(func() {
+		_ = cache.Close()
+	})
+
+	cfg := CanonicalOpGenConfig()
+	cfg.AllowedOps = SpecOpSet
+	opGen := NewOpGenerator(seed, opts, &cfg)
+
+	var writer slotcache.Writer
+
+	var previouslySeenKeys [][]byte
+
+	entries := make([]TraceEntry, 0, maxOps)
+
+	for i := 0; i < maxOps && opGen.HasMore(); i++ {
+		writerActive := writer != nil
+		op := opGen.NextOp(writerActive, previouslySeenKeys)
+
+		// Record the operation.
+		entries = append(entries, TraceEntry{
+			Op: op,
+			// No model results for spec traces.
+		})
+
+		// Apply to real cache to track state changes.
+		switch typedOp := op.(type) {
+		case OpBeginWrite:
+			if writer == nil {
+				writer, _ = cache.BeginWrite()
+			}
+
+		case OpPut:
+			if writer != nil {
+				putErr := writer.Put(typedOp.Key, typedOp.Revision, typedOp.Index)
+				if putErr == nil && len(typedOp.Key) == opts.KeySize {
+					previouslySeenKeys = append(previouslySeenKeys, append([]byte(nil), typedOp.Key...))
+				}
+			}
+
+		case OpCommit:
+			if writer != nil {
+				_ = writer.Commit()
+				writer = nil
+			}
+
+		case OpWriterClose:
+			if writer != nil {
+				_ = writer.Close()
+				writer = nil
+			}
+
+		case OpInvalidate:
+			// Invalidate is terminal; stop tracing after it.
+			_ = cache.Invalidate()
+
+			return &SeedTrace{Entries: entries}
+
+		case OpReopen:
+			if writer != nil {
+				continue // ErrBusy
+			}
+
+			closeErr := cache.Close()
+			if closeErr != nil {
+				continue
+			}
+
+			cache, err = slotcache.Open(opts)
+			if err != nil {
+				tb.Fatalf("Reopen failed: %v", err)
+			}
+
+		case OpClose:
+			closeErr := cache.Close()
+			if closeErr == nil {
+				cache, err = slotcache.Open(opts)
+				if err != nil {
+					tb.Fatalf("Reopen after Close failed: %v", err)
+				}
+
+				writer = nil
+			}
+		}
+	}
+
+	return &SeedTrace{Entries: entries}
+}
+
 // -----------------------------------------------------------------------------
 // Trace inspection helpers
 // -----------------------------------------------------------------------------
@@ -272,6 +377,13 @@ func IsSetUserHeaderFlags(op Operation) bool {
 // IsSetUserHeaderData returns true if the operation is Writer.SetUserHeaderData.
 func IsSetUserHeaderData(op Operation) bool {
 	_, ok := op.(OpSetUserHeaderData)
+
+	return ok
+}
+
+// IsInvalidate returns true if the operation is Invalidate.
+func IsInvalidate(op Operation) bool {
+	_, ok := op.(OpInvalidate)
 
 	return ok
 }
