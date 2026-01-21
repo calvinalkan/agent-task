@@ -255,20 +255,26 @@ Also added:
 
 ### 7.1 Replace actionByte protocol with OpGenerator ops
 
-- [ ] In `spec_fuzz_test.go`, replace the `actionByte%100` switch with:
+- [x] In `spec_fuzz_test.go`, replace the `actionByte%100` switch with:
   - `op := opGen.NextOp(writerActive, seen)` (spec op set)
   - apply op to real cache/writer
-- [ ] Maintain existing validation checkpoints:
+- [x] Maintain existing validation checkpoints:
   - validate file after successful reopen
   - validate file after commit (including ErrFull/ErrOutOfOrderInsert/ErrWriteback)
   - validate file after abort (`Writer.Close`)
   - validate file after invalidation
-- [ ] Keep reset-after-invalidate policy in the runner:
+- [x] Keep reset-after-invalidate policy in the runner:
   - Close, delete file, reopen, clear `writer` and `seen`
 
 Files:
 - `pkg/slotcache/spec_fuzz_test.go`
 - `pkg/slotcache/spec_fuzz_options_test.go`
+
+**Note (2026-01-21):** Phase 7.1 complete. Both spec fuzz tests now use
+`CanonicalOpGenConfig()` with `SpecOpSet` for operation generation. The
+`specFuzzState` helper struct encapsulates validation logic and reduces
+nesting. All validation checkpoints are preserved (reopen, commit, abort,
+invalidation).
 
 ### 7.2 Migrate near-cap spec fuzz
 

@@ -22,8 +22,101 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil"
 )
 
+// specFuzzState holds the mutable state for a spec fuzz test run.
+type specFuzzState struct {
+	t             *testing.T
+	cache         slotcache.Cache
+	writer        slotcache.Writer
+	seen          [][]byte
+	options       slotcache.Options
+	cacheFilePath string
+}
+
+// stateSnapshot captures Len and Scan results for comparison.
+type stateSnapshot struct {
+	length  int
+	lenErr  error
+	scan    []slotcache.Entry
+	scanErr error
+}
+
+// validateFileFormat validates the on-disk format and fails if invalid.
+func (s *specFuzzState) validateFileFormat(context string) {
+	validationErr := testutil.ValidateFile(s.cacheFilePath, s.options)
+	if validationErr != nil {
+		s.t.Fatalf("speccheck failed %s: %s", context, testutil.DescribeSpecOracleError(validationErr))
+	}
+}
+
+// snapshotState captures Len and Scan results for later comparison.
+func (s *specFuzzState) snapshotState() stateSnapshot {
+	length, lenErr := s.cache.Len()
+	scan, scanErr := s.cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+
+	return stateSnapshot{length: length, lenErr: lenErr, scan: scan, scanErr: scanErr}
+}
+
+// assertStateUnchanged verifies that Len and Scan haven't changed from the snapshot.
+func (s *specFuzzState) assertStateUnchanged(context string, before stateSnapshot) {
+	after := s.snapshotState()
+
+	if before.lenErr == nil && after.lenErr == nil && before.length != after.length {
+		s.t.Fatalf("%s changed Len(): before=%d after=%d", context, before.length, after.length)
+	}
+
+	if before.scanErr == nil && after.scanErr == nil {
+		if diff := testutil.DiffEntries(before.scan, after.scan); diff != "" {
+			s.t.Fatalf("%s changed Scan():\n%s", context, diff)
+		}
+	}
+}
+
+// handleCommit handles OpCommit with validation checkpoints.
+func (s *specFuzzState) handleCommit() {
+	if s.writer == nil {
+		return
+	}
+
+	before := s.snapshotState()
+
+	commitErr := s.writer.Commit()
+	s.writer = nil
+
+	// Validate file format after ANY commit attempt that should not corrupt.
+	if commitErr == nil ||
+		errors.Is(commitErr, slotcache.ErrWriteback) ||
+		errors.Is(commitErr, slotcache.ErrFull) ||
+		errors.Is(commitErr, slotcache.ErrOutOfOrderInsert) {
+		s.validateFileFormat("after commit")
+	}
+
+	// Stronger check: ErrFull / ErrOutOfOrderInsert must not partially publish.
+	if errors.Is(commitErr, slotcache.ErrFull) || errors.Is(commitErr, slotcache.ErrOutOfOrderInsert) {
+		s.assertStateUnchanged("commit failed but", before)
+	}
+}
+
+// handleWriterClose handles OpWriterClose with validation checkpoints.
+func (s *specFuzzState) handleWriterClose() {
+	if s.writer == nil {
+		return
+	}
+
+	before := s.snapshotState()
+
+	_ = s.writer.Close()
+	s.writer = nil
+
+	s.validateFileFormat("after Writer.Close()")
+	s.assertStateUnchanged("Writer.Close()", before)
+}
+
 // FuzzSpec_GenerativeUsage drives the real API using fuzz-derived operations
 // under a fixed, common configuration.
+//
+// Uses OpGenerator with SpecOpSet for operation generation, which includes
+// all operations including Invalidate. The spec oracle validates the on-disk
+// format at key checkpoints (reopen, commit, abort, invalidation).
 func FuzzSpec_GenerativeUsage(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte("commit"))
@@ -47,199 +140,136 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 
 		defer func() { _ = cache.Close() }()
 
-		decoder := testutil.NewFuzzDecoder(fuzzBytes, options)
+		// Use CanonicalOpGenConfig with SpecOpSet for spec fuzz tests.
+		// SpecOpSet includes all operations including Invalidate.
+		cfg := testutil.CanonicalOpGenConfig()
+		cfg.AllowedOps = testutil.SpecOpSet
+		opGen := testutil.NewOpGenerator(fuzzBytes, options, &cfg)
 
-		var (
-			writer slotcache.Writer
-			seen   [][]byte
-		)
+		state := &specFuzzState{
+			t:             t,
+			cache:         cache,
+			options:       options,
+			cacheFilePath: cacheFilePath,
+		}
 
 		const maximumSteps = 300
 
-		for stepIndex := 0; stepIndex < maximumSteps && decoder.HasMore(); stepIndex++ {
-			actionByte := decoder.NextByte()
+		for stepIndex := 0; stepIndex < maximumSteps && opGen.HasMore(); stepIndex++ {
+			writerActive := state.writer != nil
+			op := opGen.NextOp(writerActive, state.seen)
 
-			// ~3%: try a close/reopen cycle.
-			if actionByte%100 < 3 {
-				closeErr := cache.Close()
+			// Apply the operation and handle validation checkpoints.
+			switch typedOp := op.(type) {
+			case testutil.OpReopen:
+				closeErr := state.cache.Close()
 				if errors.Is(closeErr, slotcache.ErrBusy) {
-					// Writer still active: spec says Close must be non-blocking and return ErrBusy.
 					continue
 				}
 
 				var reopenErr error
 
-				cache, reopenErr = slotcache.Open(options)
+				state.cache, reopenErr = slotcache.Open(options)
 				if reopenErr != nil {
-					// If reopen fails, the fuzzer will minimize. Treat as a bug.
 					t.Fatalf("reopen failed: %v", reopenErr)
 				}
 
-				// If we successfully reopened, the file on disk must be valid.
-				validationErr := testutil.ValidateFile(cacheFilePath, options)
-				if validationErr != nil {
-					t.Fatalf("speccheck failed after reopen: %s", testutil.DescribeSpecOracleError(validationErr))
-				}
+				state.validateFileFormat("after reopen")
+				state.writer = nil
 
-				writer = nil
+			case testutil.OpClose:
+				closeErr := state.cache.Close()
+				if closeErr == nil {
+					var reopenErr error
 
-				continue
-			}
-
-			writerIsActive := writer != nil
-
-			if !writerIsActive {
-				// No writer: pick BeginWrite, Invalidate, or read-only ops.
-				switch actionByte % 100 {
-				case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22:
-					var beginErr error
-
-					writer, beginErr = cache.BeginWrite()
-					_ = beginErr // ErrBusy/ErrClosed is fine
-				case 23, 24, 25:
-					// ~3%: Invalidate (terminal state).
-					// After invalidation, reset the cache so fuzz iterations don't get stuck.
-					invalidateErr := cache.Invalidate()
-					if invalidateErr == nil || errors.Is(invalidateErr, slotcache.ErrInvalidated) {
-						// Validate file format after invalidation.
-						validationErr := testutil.ValidateFile(cacheFilePath, options)
-						if validationErr != nil {
-							t.Fatalf("speccheck failed after Invalidate: %s", testutil.DescribeSpecOracleError(validationErr))
-						}
-
-						// Reset: close, delete file, recreate.
-						_ = cache.Close()
-						_ = os.Remove(cacheFilePath)
-
-						var reopenErr error
-
-						cache, reopenErr = slotcache.Open(options)
-						if reopenErr != nil {
-							t.Fatalf("reopen after invalidation failed: %v", reopenErr)
-						}
-
-						writer = nil
-						seen = nil
+					state.cache, reopenErr = slotcache.Open(options)
+					if reopenErr != nil {
+						t.Fatalf("reopen after Close failed: %v", reopenErr)
 					}
-				case 26, 27, 28, 29, 30, 31, 32, 33, 34:
-					_, _ = cache.Len()
-				case 35, 36, 37, 38, 39, 40, 41, 42, 43, 44:
-					key := decoder.NextKey(seen)
-					_, _, _ = cache.Get(key)
-				case 45, 46, 47, 48, 49, 50, 51, 52, 53, 54:
-					_, _ = cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
-				default:
-					prefix := decoder.NextPrefix(options.KeySize)
-					_, _ = cache.ScanPrefix(prefix, slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+
+					state.writer = nil
 				}
 
-				continue
-			}
+			case testutil.OpInvalidate:
+				invalidateErr := state.cache.Invalidate()
+				if invalidateErr == nil || errors.Is(invalidateErr, slotcache.ErrInvalidated) {
+					state.validateFileFormat("after Invalidate")
 
-			// Writer is active: choose Put/Delete/Commit/Close/SetUserHeader, with more weight on Put.
-			switch actionByte % 100 {
-			case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-				10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-				20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
-				30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
-				40, 41, 42, 43, 44, 45:
-				key := decoder.NextKey(seen)
-				idx := decoder.NextIndex()
+					// Reset: close, delete file, recreate.
+					_ = state.cache.Close()
+					_ = os.Remove(cacheFilePath)
 
-				rev := decoder.NextInt64()
+					var reopenErr error
 
-				err := writer.Put(key, rev, idx)
-				if err == nil && len(key) == options.KeySize {
-					seen = append(seen, append([]byte(nil), key...))
+					state.cache, reopenErr = slotcache.Open(options)
+					if reopenErr != nil {
+						t.Fatalf("reopen after invalidation failed: %v", reopenErr)
+					}
+
+					state.writer = nil
+					state.seen = nil
 				}
 
-			case 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
-				56, 57, 58, 59, 60:
-				key := decoder.NextKey(seen)
-				_, _ = writer.Delete(key)
+			case testutil.OpBeginWrite:
+				if state.writer == nil {
+					state.writer, _ = state.cache.BeginWrite()
+				}
 
-			case 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74:
-				// Snapshot committed state before commit so we can verify failed commits
-				// don't partially publish changes.
-				beforeLen, beforeLenErr := cache.Len()
-				beforeScan, beforeScanErr := cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+			case testutil.OpLen:
+				_, _ = state.cache.Len()
 
-				commitErr := writer.Commit()
-				writer = nil
+			case testutil.OpGet:
+				_, _, _ = state.cache.Get(typedOp.Key)
 
-				// Validate file format after ANY commit attempt that should not corrupt.
-				if commitErr == nil ||
-					errors.Is(commitErr, slotcache.ErrWriteback) ||
-					errors.Is(commitErr, slotcache.ErrFull) ||
-					errors.Is(commitErr, slotcache.ErrOutOfOrderInsert) {
-					validationErr := testutil.ValidateFile(cacheFilePath, options)
-					if validationErr != nil {
-						t.Fatalf("speccheck failed after commit (err=%v): %s", commitErr, testutil.DescribeSpecOracleError(validationErr))
+			case testutil.OpScan:
+				_, _ = state.cache.Scan(typedOp.Options)
+
+			case testutil.OpScanPrefix:
+				_, _ = state.cache.ScanPrefix(typedOp.Prefix, typedOp.Options)
+
+			case testutil.OpScanMatch:
+				_, _ = state.cache.ScanMatch(typedOp.Spec, typedOp.Options)
+
+			case testutil.OpScanRange:
+				_, _ = state.cache.ScanRange(typedOp.Start, typedOp.End, typedOp.Options)
+
+			case testutil.OpUserHeader:
+				_, _ = state.cache.UserHeader()
+
+			case testutil.OpPut:
+				if state.writer != nil {
+					err := state.writer.Put(typedOp.Key, typedOp.Revision, typedOp.Index)
+					if err == nil && len(typedOp.Key) == options.KeySize {
+						state.seen = append(state.seen, append([]byte(nil), typedOp.Key...))
 					}
 				}
 
-				// Stronger check: ErrFull / ErrOutOfOrderInsert must not partially publish.
-				if errors.Is(commitErr, slotcache.ErrFull) || errors.Is(commitErr, slotcache.ErrOutOfOrderInsert) {
-					afterLen, afterLenErr := cache.Len()
-					afterScan, afterScanErr := cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
-
-					if beforeLenErr == nil && afterLenErr == nil && beforeLen != afterLen {
-						t.Fatalf("commit failed (%v) but Len() changed: before=%d after=%d", commitErr, beforeLen, afterLen)
-					}
-
-					if beforeScanErr == nil && afterScanErr == nil {
-						if diff := testutil.DiffEntries(beforeScan, afterScan); diff != "" {
-							t.Fatalf("commit failed (%v) but Scan() changed:\n%s", commitErr, diff)
-						}
-					}
+			case testutil.OpDelete:
+				if state.writer != nil {
+					_, _ = state.writer.Delete(typedOp.Key)
 				}
 
-			case 75, 76, 77, 78, 79, 80, 81, 82:
-				// Abort: file must remain valid and state unchanged.
-				beforeLen, beforeLenErr := cache.Len()
-				beforeScan, beforeScanErr := cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
+			case testutil.OpCommit:
+				state.handleCommit()
 
-				_ = writer.Close()
-				writer = nil
+			case testutil.OpWriterClose:
+				state.handleWriterClose()
 
-				validationErr := testutil.ValidateFile(cacheFilePath, options)
-				if validationErr != nil {
-					t.Fatalf("speccheck failed after Writer.Close(): %s", testutil.DescribeSpecOracleError(validationErr))
+			case testutil.OpSetUserHeaderFlags:
+				if state.writer != nil {
+					_ = state.writer.SetUserHeaderFlags(typedOp.Flags)
 				}
 
-				afterLen, afterLenErr := cache.Len()
-				afterScan, afterScanErr := cache.Scan(slotcache.ScanOptions{Reverse: false, Offset: 0, Limit: 0})
-
-				if beforeLenErr == nil && afterLenErr == nil && beforeLen != afterLen {
-					t.Fatalf("Writer.Close() changed Len(): before=%d after=%d", beforeLen, afterLen)
+			case testutil.OpSetUserHeaderData:
+				if state.writer != nil {
+					_ = state.writer.SetUserHeaderData(typedOp.Data)
 				}
-
-				if beforeScanErr == nil && afterScanErr == nil {
-					if diff := testutil.DiffEntries(beforeScan, afterScan); diff != "" {
-						t.Fatalf("Writer.Close() changed Scan():\n%s", diff)
-					}
-				}
-
-			case 83, 84, 85, 86:
-				// ~4%: SetUserHeaderFlags
-				flags := decoder.NextUint64()
-				_ = writer.SetUserHeaderFlags(flags)
-
-			case 87, 88, 89, 90:
-				// ~4%: SetUserHeaderData
-				var data [slotcache.UserDataSize]byte
-				copy(data[:], decoder.NextBytes(slotcache.UserDataSize))
-				_ = writer.SetUserHeaderData(data)
-
-			default:
-				// Mix in a few reads while writer active; they should observe committed state.
-				_, _ = cache.Len()
 			}
 		}
 
 		// If the fuzzer left a writer open, abort it.
-		if writer != nil {
-			_ = writer.Close()
+		if state.writer != nil {
+			_ = state.writer.Close()
 		}
 	})
 }
