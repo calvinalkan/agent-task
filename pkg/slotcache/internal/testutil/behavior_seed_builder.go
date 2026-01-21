@@ -209,14 +209,15 @@ func (b *BehaviorSeedBuilder) ScanPrefix(prefix []byte) *BehaviorSeedBuilder {
 //   - prefixThreshold = 68 + scale(15) = 68 + 9 = 77
 //   - matchThreshold = 77 + scale(15) = 77 + 9 = 86
 //   - rangeThreshold = 86 + scale(10) = 86 + 6 = 92
-//   - Len is in range [92, 100) → choice=0x5C (92)
+//   - userHeaderThreshold = 92 + scale(5) = 92 + 3 = 95
+//   - Len is in range [95, 100) → choice=0x60 (96)
 func (b *BehaviorSeedBuilder) Len() *BehaviorSeedBuilder {
 	if b.writerActive {
 		return b
 	}
 
 	b.addOpGenRoulette()
-	b.data = append(b.data, 0x5C) // choice=92 → Len in reader mode (Fill phase)
+	b.data = append(b.data, 0x60) // choice=96 → Len in reader mode (Fill phase)
 
 	return b
 }

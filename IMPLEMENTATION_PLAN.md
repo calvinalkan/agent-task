@@ -189,10 +189,10 @@ Acceptance:
 
 ## Phase 5 — OpGenerator: add header ops + allowed op sets
 
-- [ ] Add generation of `OpUserHeader` (read) in reader-mode (low probability).
-- [ ] Add generation of `OpSetUserHeaderFlags`/`OpSetUserHeaderData` while writer active (low probability).
-- [ ] Gate these op types behind `AllowedOps`.
-- [ ] Add `OpInvalidate` generation behind `AllowedOps` (spec profile only).
+- [x] Add generation of `OpUserHeader` (read) in reader-mode (low probability).
+- [x] Add generation of `OpSetUserHeaderFlags`/`OpSetUserHeaderData` while writer active (low probability).
+- [x] Gate these op types behind `AllowedOps`.
+- [x] Add `OpInvalidate` generation behind `AllowedOps` (spec profile only).
 
 Files:
 - `pkg/slotcache/internal/testutil/opgen_config.go`
@@ -200,6 +200,17 @@ Files:
 Acceptance:
 - Behavior fuzz targets can now hit header operations naturally.
 - Spec fuzz targets can now hit invalidation and user header ops via the same generator.
+
+**Note (2026-01-21):** Phase 5 complete. OpGenerator now generates:
+- `OpUserHeader` (~5% of reader ops when allowed via `OpKindUserHeader`)
+- `OpSetUserHeaderFlags` (~3% of writer ops when allowed)
+- `OpSetUserHeaderData` (~2% of writer ops when allowed)
+- `OpInvalidate` (~2% globally when allowed via `OpKindInvalidate`, spec-only)
+
+All ops are gated by `AllowedOps` (defaults to `CoreOpSet` which excludes these).
+`BehaviorOpSet` includes UserHeader ops; `SpecOpSet` includes all including Invalidate.
+The `BehaviorSeedBuilder.Len()` method was updated to use choice=96 to account for
+the new `UserHeader` range in the reader op distribution.
 
 ---
 

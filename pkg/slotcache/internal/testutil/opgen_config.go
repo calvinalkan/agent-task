@@ -494,11 +494,18 @@ func (g *OpGenerator) CurrentPhase(seenCount int) Phase {
 // When phased generation is enabled, operation selection is biased based on
 // the current phase (Fill → Churn → Read).
 func (g *OpGenerator) NextOp(writerActive bool, seen [][]byte) Operation {
-	// Global ops: Reopen/Close can happen anytime (even with writer active,
+	allowed := g.effectiveAllowedOps()
+
+	// Global ops: Reopen/Close/Invalidate can happen anytime (even with writer active,
 	// they return ErrBusy which is meaningful behavior to test).
 	roulette := g.decoder.NextByte()
 	reopenThreshold := byte(float64(256) * float64(g.config.ReopenRate) / 100.0)
 	closeThreshold := reopenThreshold + byte(float64(256)*float64(g.config.CloseRate)/100.0)
+
+	// Invalidate gets ~2% of the global ops budget (only when allowed).
+	// It's spec-only and terminal, so we keep the rate low.
+	invalidateRate := 2
+	invalidateThreshold := closeThreshold + byte(float64(256)*float64(invalidateRate)/100.0)
 
 	if roulette < reopenThreshold {
 		return OpReopen{}
@@ -508,16 +515,30 @@ func (g *OpGenerator) NextOp(writerActive bool, seen [][]byte) Operation {
 		return OpClose{}
 	}
 
+	if roulette < invalidateThreshold && allowed.Contains(OpKindInvalidate) {
+		return OpInvalidate{}
+	}
+
 	phase := g.CurrentPhase(len(seen))
 
 	if !writerActive {
-		return g.nextReaderOp(seen, phase)
+		return g.nextReaderOp(seen, phase, allowed)
 	}
 
-	return g.nextWriterOp(seen, phase)
+	return g.nextWriterOp(seen, phase, allowed)
 }
 
-func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase) Operation {
+// effectiveAllowedOps returns the operation set to use for filtering.
+// If AllowedOps is zero (default), returns CoreOpSet.
+func (g *OpGenerator) effectiveAllowedOps() OpSet {
+	if g.config.AllowedOps == 0 {
+		return CoreOpSet
+	}
+
+	return g.config.AllowedOps
+}
+
+func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase, allowed OpSet) Operation {
 	choice := g.decoder.NextByte() % 100
 
 	// BeginWrite rate varies by phase when phased generation is enabled.
@@ -541,6 +562,8 @@ func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase) Operation {
 	// Original distribution (when BeginWriteRate=20):
 	//   Get: 10%, Scan: 20%, ScanPrefix: 15%, ScanMatch: 15%, ScanRange: 10%, Len: 10%
 	// We scale these proportionally.
+	//
+	// When UserHeader is allowed, we allocate ~5% of remaining to it (from Len's share).
 	remaining := 100 - beginWriteRate
 	scale := func(pct int) int { return pct * remaining / 80 }
 
@@ -549,6 +572,9 @@ func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase) Operation {
 	prefixThreshold := scanThreshold + scale(15)
 	matchThreshold := prefixThreshold + scale(15)
 	rangeThreshold := matchThreshold + scale(10)
+
+	// UserHeader gets ~5% of remaining (carved from Len's original 10%).
+	userHeaderThreshold := rangeThreshold + scale(5)
 
 	switch {
 	case choice < byte(getThreshold):
@@ -577,18 +603,23 @@ func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase) Operation {
 			Filter:  g.nextFilterSpec(seen),
 			Options: g.nextScanOpts(),
 		}
+	case choice < byte(userHeaderThreshold) && allowed.Contains(OpKindUserHeader):
+		return OpUserHeader{}
 	default:
 		return OpLen{}
 	}
 }
 
-func (g *OpGenerator) nextWriterOp(seen [][]byte, phase Phase) Operation {
+func (g *OpGenerator) nextWriterOp(seen [][]byte, phase Phase, allowed OpSet) Operation {
 	choice := g.decoder.NextByte() % 100
 
 	// Calculate thresholds from config.
 	// Original distribution: Put=45%, Delete=15%, Commit=15%, WriterClose=10%, reads=15%
 	// We now use configurable rates for Delete/Commit/WriterClose,
 	// with Put taking the remainder before reads.
+	//
+	// When user header ops are allowed, we allocate ~5% combined for them
+	// (carved from the Put budget).
 	//
 	// Rates vary by phase when phased generation is enabled.
 	deleteRate := g.config.DeleteRate
@@ -613,6 +644,12 @@ func (g *OpGenerator) nextWriterOp(seen [][]byte, phase Phase) Operation {
 	commitThreshold := deleteThreshold + commitRate
 	closeThreshold := commitThreshold + g.config.WriterCloseRate
 
+	// User header ops get ~5% combined (2.5% each), carved from Put budget.
+	// SetUserHeaderFlags: 2-3%
+	// SetUserHeaderData: 2-3%
+	setFlagsThreshold := closeThreshold + 3
+	setDataThreshold := setFlagsThreshold + 2
+
 	// Remaining percentage goes to Put (before reads).
 	// Reads get ~15% as in original.
 	putEnd := 100 - 15 // Put ends where reads start
@@ -624,6 +661,10 @@ func (g *OpGenerator) nextWriterOp(seen [][]byte, phase Phase) Operation {
 		return OpCommit{}
 	case choice < byte(closeThreshold):
 		return OpWriterClose{}
+	case choice < byte(setFlagsThreshold) && allowed.Contains(OpKindSetUserHeaderFlags):
+		return OpSetUserHeaderFlags{Flags: g.decoder.NextUint64()}
+	case choice < byte(setDataThreshold) && allowed.Contains(OpKindSetUserHeaderData):
+		return OpSetUserHeaderData{Data: g.nextUserData()}
 	case choice < byte(putEnd):
 		return OpPut{
 			Key:      g.genKey(seen),
@@ -983,4 +1024,15 @@ func (g *OpGenerator) nextScanOpts() slotcache.ScanOptions {
 		Offset:  offset,
 		Limit:   limit,
 	}
+}
+
+// nextUserData generates 64 bytes of user header data from fuzz bytes.
+func (g *OpGenerator) nextUserData() [slotcache.UserDataSize]byte {
+	var data [slotcache.UserDataSize]byte
+
+	for i := range data {
+		data[i] = g.decoder.NextByte()
+	}
+
+	return data
 }
