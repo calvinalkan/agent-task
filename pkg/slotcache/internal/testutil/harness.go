@@ -453,6 +453,24 @@ func AssertOpMatch(tb testing.TB, operationValue Operation, modelResult Operatio
 			tb.Fatalf("%s: open error mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.OpenError, realTyped.OpenError)
 		}
 
+	case ResUserHeader:
+		realTyped, ok := realResult.(ResUserHeader)
+		if !ok {
+			panic("test harness bug: real result type does not match model result type")
+		}
+
+		if !errorsMatch(modelTyped.Error, realTyped.Error) {
+			tb.Fatalf("%s: error mismatch\nmodel=%v\nreal=%v", operationValue.String(), modelTyped.Error, realTyped.Error)
+		}
+
+		if modelTyped.Header.Flags != realTyped.Header.Flags {
+			tb.Fatalf("%s: flags mismatch\nmodel=%d\nreal=%d", operationValue.String(), modelTyped.Header.Flags, realTyped.Header.Flags)
+		}
+
+		if modelTyped.Header.Data != realTyped.Header.Data {
+			tb.Fatalf("%s: data mismatch\nmodel=%x\nreal=%x", operationValue.String(), modelTyped.Header.Data, realTyped.Header.Data)
+		}
+
 	default:
 		panic("unknown result type")
 	}

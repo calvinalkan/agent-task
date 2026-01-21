@@ -58,18 +58,18 @@ Acceptance:
 
 ### 1.1 Add new Operation types
 
-- [ ] Add `OpUserHeader` (cache read)
-- [ ] Add `OpSetUserHeaderFlags` (writer staging)
-- [ ] Add `OpSetUserHeaderData` (writer staging)
-- [ ] Add `OpInvalidate` (cache operation; spec-only for now)
+- [x] Add `OpUserHeader` (cache read)
+- [x] Add `OpSetUserHeaderFlags` (writer staging)
+- [x] Add `OpSetUserHeaderData` (writer staging)
+- [x] Add `OpInvalidate` (cache operation; spec-only for now)
 
 Files:
 - `pkg/slotcache/internal/testutil/ops.go`
 
 ### 1.2 Add new OperationResult types + comparisons
 
-- [ ] Add `ResUserHeader` (contains `slotcache.UserHeader` + `error`)
-- [ ] Extend `AssertOpMatch` to compare `UserHeader` results (flags + 64B data) and errors.
+- [x] Add `ResUserHeader` (contains `slotcache.UserHeader` + `error`)
+- [x] Extend `AssertOpMatch` to compare `UserHeader` results (flags + 64B data) and errors.
 
 Files:
 - `pkg/slotcache/internal/testutil/harness.go`

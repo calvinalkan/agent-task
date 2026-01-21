@@ -174,6 +174,49 @@ type OpWriterClose struct{}
 func (OpWriterClose) Name() string   { return "Writer.Close" }
 func (OpWriterClose) String() string { return "Writer.Close()" }
 
+// OpSetUserHeaderFlags represents a Writer.SetUserHeaderFlags call.
+type OpSetUserHeaderFlags struct {
+	Flags uint64
+}
+
+// Name returns the operation name.
+func (OpSetUserHeaderFlags) Name() string { return "Writer.SetUserHeaderFlags" }
+func (operation OpSetUserHeaderFlags) String() string {
+	return fmt.Sprintf("Writer.SetUserHeaderFlags(%d)", operation.Flags)
+}
+
+// OpSetUserHeaderData represents a Writer.SetUserHeaderData call.
+type OpSetUserHeaderData struct {
+	Data [slotcache.UserDataSize]byte
+}
+
+// Name returns the operation name.
+func (OpSetUserHeaderData) Name() string { return "Writer.SetUserHeaderData" }
+func (operation OpSetUserHeaderData) String() string {
+	return fmt.Sprintf("Writer.SetUserHeaderData(%x)", operation.Data)
+}
+
+// -----------------------------------------------------------------------------
+// Cache operations that may invalidate or read user header.
+// -----------------------------------------------------------------------------
+
+// OpUserHeader represents a Cache.UserHeader() call.
+type OpUserHeader struct{}
+
+// Name returns the operation name.
+func (OpUserHeader) Name() string   { return "UserHeader" }
+func (OpUserHeader) String() string { return "UserHeader()" }
+
+// OpInvalidate represents a Cache.Invalidate() call.
+//
+// This operation is spec-only for now (not modeled in behavior tests).
+// Invalidation is terminal — after this, all operations return ErrInvalidated.
+type OpInvalidate struct{}
+
+// Name returns the operation name.
+func (OpInvalidate) Name() string   { return "Invalidate" }
+func (OpInvalidate) String() string { return "Invalidate()" }
+
 // -----------------------------------------------------------------------------
 // Typed operation results.
 // -----------------------------------------------------------------------------
@@ -230,3 +273,11 @@ type ResReopen struct {
 }
 
 func (ResReopen) isResult() {}
+
+// ResUserHeader captures a UserHeader() result.
+type ResUserHeader struct {
+	Header slotcache.UserHeader
+	Error  error
+}
+
+func (ResUserHeader) isResult() {}
