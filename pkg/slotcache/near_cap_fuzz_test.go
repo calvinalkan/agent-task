@@ -115,6 +115,8 @@ func FuzzSpec_GenerativeUsage_NearCapConfig(f *testing.F) {
 			case testutil.OpClose:
 				closeErr := state.cache.Close()
 				if closeErr == nil {
+					state.validateFileFormat("after Close")
+
 					var reopenErr error
 
 					state.cache, reopenErr = slotcache.Open(options)

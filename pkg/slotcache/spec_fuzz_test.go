@@ -8,6 +8,11 @@
 // checks all format invariants (header CRC, slot layout, bucket integrity,
 // probe sequences).
 //
+// NOTE: OpScan* operations include generated Filter specs, but filters are
+// intentionally NOT applied in spec tests. Filters are client-side result
+// filtering and don't affect the on-disk file format. Applying them would
+// slow fuzz throughput without adding coverage for file format invariants.
+//
 // Failures here mean: "the file format violates the spec".
 
 package slotcache_test
@@ -180,6 +185,8 @@ func FuzzSpec_GenerativeUsage(f *testing.F) {
 			case testutil.OpClose:
 				closeErr := state.cache.Close()
 				if closeErr == nil {
+					state.validateFileFormat("after Close")
+
 					var reopenErr error
 
 					state.cache, reopenErr = slotcache.Open(options)
