@@ -248,12 +248,14 @@ func Open(opts Options) (Cache, error) {
 	}
 
 	// Validate KeySize and IndexSize fit in uint32 (on-disk format constraint).
-	if _, ok := intToUint32Checked(opts.KeySize); !ok {
-		return nil, fmt.Errorf("key_size %d exceeds uint32 max: %w", opts.KeySize, ErrInvalidInput)
+	_, err := intToUint32Checked(opts.KeySize)
+	if err != nil {
+		return nil, fmt.Errorf("key_size %d: %w", opts.KeySize, err)
 	}
 
-	if _, ok := intToUint32Checked(opts.IndexSize); !ok {
-		return nil, fmt.Errorf("index_size %d exceeds uint32 max: %w", opts.IndexSize, ErrInvalidInput)
+	_, err = intToUint32Checked(opts.IndexSize)
+	if err != nil {
+		return nil, fmt.Errorf("index_size %d: %w", opts.IndexSize, err)
 	}
 
 	switch opts.Writeback {
@@ -734,9 +736,9 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 		return nil, fmt.Errorf("buckets_offset %d != expected %d: %w", bucketsOffset, expectedBucketsOffset, ErrCorrupt)
 	}
 
-	expectedMinSize, ok := uint64ToInt64Checked(bucketsOffset + bucketCount*16)
-	if !ok {
-		return nil, fmt.Errorf("computed file size overflows int64: %w", ErrCorrupt)
+	expectedMinSize, err := uint64ToInt64Checked(bucketsOffset + bucketCount*16)
+	if err != nil {
+		return nil, fmt.Errorf("computed file size: %w", ErrCorrupt)
 	}
 
 	if size < expectedMinSize {
@@ -776,7 +778,7 @@ func validateAndOpenExisting(fd int, headerBuf []byte, size int64, opts Options)
 	// This is a cheap O(1) check that fails-fast on common corruptions without scanning
 	// the full bucket table. Per spec: "Implementations MAY sample-check a small number
 	// of buckets for out-of-range slot IDs."
-	err := sampleBucketsForCorruption(fd, bucketsOffset, bucketCount, slotHighwater)
+	err = sampleBucketsForCorruption(fd, bucketsOffset, bucketCount, slotHighwater)
 	if err != nil {
 		return nil, err
 	}
@@ -847,13 +849,15 @@ func validateFileLayoutFitsInt64(opts Options) error {
 	}
 
 	// Must fit in int64 for ftruncate/stat and friends.
-	if _, ok := uint64ToInt64Checked(fileSize); !ok {
-		return fmt.Errorf("file size %d exceeds int64 max: %w", fileSize, ErrInvalidInput)
+	_, err = uint64ToInt64Checked(fileSize)
+	if err != nil {
+		return fmt.Errorf("file size %d: %w", fileSize, err)
 	}
 
 	// Must fit in int for mmap length and Go slice sizing.
-	if _, ok := uint64ToIntChecked(fileSize); !ok {
-		return fmt.Errorf("file size %d exceeds max int %d: %w", fileSize, maxInt, ErrInvalidInput)
+	_, err = uint64ToIntChecked(fileSize)
+	if err != nil {
+		return fmt.Errorf("file size %d: %w", fileSize, err)
 	}
 
 	return nil
@@ -957,10 +961,10 @@ func sampleBucketsForCorruption(fd int, bucketsOffset, bucketCount, slotHighwate
 	for i := uint64(0); i < bucketCount; i += step {
 		offsetU64 := bucketsOffset + i*16
 
-		offset, ok := uint64ToInt64Checked(offsetU64)
-		if !ok {
+		offset, err := uint64ToInt64Checked(offsetU64)
+		if err != nil {
 			// Should never happen: file layout was already validated.
-			return fmt.Errorf("bucket offset overflows int64: %w", ErrCorrupt)
+			return fmt.Errorf("bucket offset: %w", ErrCorrupt)
 		}
 
 		n, err := syscall.Pread(fd, bucketBuf, offset)
@@ -1115,8 +1119,8 @@ func (c *cache) Len() (int, error) {
 			return 0, invErr
 		}
 
-		result, ok := uint64ToIntChecked(count)
-		if !ok {
+		result, convErr := uint64ToIntChecked(count)
+		if convErr != nil {
 			invErr := c.checkInvariantViolation(g1)
 			c.registry.mu.RUnlock()
 

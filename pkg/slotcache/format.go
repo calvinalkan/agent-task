@@ -51,46 +51,46 @@ const (
 )
 
 // intToUint32Checked converts a non-negative int to uint32.
-// Returns (result, true) on success, (0, false) if the value doesn't fit.
+// Returns ErrInvalidInput if the value is negative or exceeds uint32 max.
 //
-// Callers should validate inputs upfront via Open() and reject with ErrInvalidInput
-// if this returns false. This function exists to avoid unsafe silent truncation.
-func intToUint32Checked(v int) (uint32, bool) {
+// Callers should validate inputs upfront via Open() and reject with ErrInvalidInput.
+// This function exists to avoid unsafe silent truncation.
+func intToUint32Checked(v int) (uint32, error) {
 	if v < 0 {
-		return 0, false
+		return 0, fmt.Errorf("int %d is negative, cannot convert to uint32: %w", v, ErrInvalidInput)
 	}
 
 	// Convert through uint64 to avoid gosec G115 warning.
 	u64 := uint64(v)
 
 	if u64 > uint64(maxUint32) {
-		return 0, false
+		return 0, fmt.Errorf("int %d exceeds uint32 max: %w", v, ErrInvalidInput)
 	}
 
-	return uint32(u64), true
+	return uint32(u64), nil
 }
 
 // uint64ToInt64Checked converts uint64 to int64.
-// Returns (result, true) on success, (0, false) if the value exceeds maxInt64.
+// Returns ErrInvalidInput if the value exceeds maxInt64.
 //
 // Used for file sizes and offsets. Callers should validate configurations upfront
 // to ensure computed sizes fit in int64.
-func uint64ToInt64Checked(v uint64) (int64, bool) {
+func uint64ToInt64Checked(v uint64) (int64, error) {
 	if v > uint64(maxInt64) {
-		return 0, false
+		return 0, fmt.Errorf("uint64 %d exceeds int64 max: %w", v, ErrInvalidInput)
 	}
 
-	return int64(v), true
+	return int64(v), nil
 }
 
 // uint64ToIntChecked converts uint64 to int.
-// Returns (result, true) on success, (0, false) if the value exceeds maxInt.
-func uint64ToIntChecked(v uint64) (int, bool) {
+// Returns ErrInvalidInput if the value exceeds maxInt.
+func uint64ToIntChecked(v uint64) (int, error) {
 	if v > uint64(maxInt) {
-		return 0, false
+		return 0, fmt.Errorf("uint64 %d exceeds int max: %w", v, ErrInvalidInput)
 	}
 
-	return int(v), true
+	return int(v), nil
 }
 
 // fnv1a64 computes the FNV-1a 64-bit hash over key bytes.

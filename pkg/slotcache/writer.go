@@ -389,10 +389,10 @@ func (w *writer) Commit() error {
 
 		// Sync buckets: all if rehash occurred, otherwise just dirty range.
 		if w.rehashOccurred {
-			bucketsStart, ok1 := uint64ToIntChecked(w.cache.bucketsOffset)
-			bucketsLen, ok2 := uint64ToIntChecked(w.cache.bucketCount * 16)
+			bucketsStart, err1 := uint64ToIntChecked(w.cache.bucketsOffset)
+			bucketsLen, err2 := uint64ToIntChecked(w.cache.bucketCount * 16)
 
-			if !ok1 || !ok2 {
+			if err1 != nil || err2 != nil {
 				// Conversion overflow. Should not happen due to validation at open time,
 				// but if it does, we cannot reliably msync the bucket range.
 				msyncFailed = true
@@ -529,10 +529,10 @@ func (w *writer) markSlotDirty(slotID uint64) error {
 	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 	slotEnd := slotOffset + uint64(w.cache.slotSize)
 
-	off, ok1 := uint64ToIntChecked(slotOffset)
-	end, ok2 := uint64ToIntChecked(slotEnd)
+	off, err1 := uint64ToIntChecked(slotOffset)
+	end, err2 := uint64ToIntChecked(slotEnd)
 
-	if !ok1 || !ok2 {
+	if err1 != nil || err2 != nil {
 		return fmt.Errorf("markSlotDirty: slot %d offset overflow (offset=%d, end=%d): %w",
 			slotID, slotOffset, slotEnd, ErrCorrupt)
 	}
@@ -556,10 +556,10 @@ func (w *writer) markBucketDirty(bucketIdx uint64) error {
 	bucketOffset := w.cache.bucketsOffset + bucketIdx*16
 	bucketEnd := bucketOffset + 16
 
-	off, ok1 := uint64ToIntChecked(bucketOffset)
-	end, ok2 := uint64ToIntChecked(bucketEnd)
+	off, err1 := uint64ToIntChecked(bucketOffset)
+	end, err2 := uint64ToIntChecked(bucketEnd)
 
-	if !ok1 || !ok2 {
+	if err1 != nil || err2 != nil {
 		return fmt.Errorf("markBucketDirty: bucket %d offset overflow (offset=%d, end=%d): %w",
 			bucketIdx, bucketOffset, bucketEnd, ErrCorrupt)
 	}
