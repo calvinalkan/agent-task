@@ -1,8 +1,7 @@
 // Filter seed guard test.
 //
 // This test verifies that the fuzz corpus seeds for filter coverage
-// (seedBehaviorFilteredScans, seedBehaviorFilterPagination) still emit
-// at least one scan operation with Filter != nil.
+// still emit at least one scan operation with Filter != nil.
 //
 // Purpose:
 //   - Acts as a "tripwire" if the fuzz decoder's byte consumption changes
@@ -13,8 +12,8 @@
 //  1. The seed bytes no longer trigger the filter code path, OR
 //  2. The decoder's nextFilterSpec or scan op byte consumption changed
 //
-// Fix by updating the seed bytes in behavior_filter_seeddata_test.go to
-// match the current decoder behavior.
+// Fix by updating the seed bytes in internal/testutil/behavior_seeds.go
+// to match the current decoder behavior.
 
 package slotcache_test
 
@@ -29,22 +28,17 @@ import (
 func Test_BehaviorFuzz_Emits_FilteredScan_When_Using_Curated_FilterSeeds(t *testing.T) {
 	t.Parallel()
 
-	seeds := []struct {
-		name string
-		data []byte
-	}{
-		{name: "FilteredScans", data: seedBehaviorFilteredScans},
-		{name: "FilterPagination", data: seedBehaviorFilterPagination},
-	}
+	// Use the centralized filter seeds from testutil.
+	seeds := testutil.FilterSeeds()
 
 	for _, tc := range seeds {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 
 			tmpDir := t.TempDir()
 
 			opts := slotcache.Options{
-				Path:         filepath.Join(tmpDir, tc.name+".slc"),
+				Path:         filepath.Join(tmpDir, tc.Name+".slc"),
 				KeySize:      8,
 				IndexSize:    4,
 				SlotCapacity: 64,
@@ -54,7 +48,7 @@ func Test_BehaviorFuzz_Emits_FilteredScan_When_Using_Curated_FilterSeeds(t *test
 
 			defer func() { _ = h.Real.Cache.Close() }()
 
-			decoder := testutil.NewFuzzDecoder(tc.data, opts)
+			decoder := testutil.NewFuzzDecoder(tc.Data, opts)
 
 			var previouslySeenKeys [][]byte
 
@@ -79,7 +73,7 @@ func Test_BehaviorFuzz_Emits_FilteredScan_When_Using_Curated_FilterSeeds(t *test
 			}
 
 			if !sawFilteredScan {
-				t.Fatalf("seed %q emitted no scan op with Filter != nil; update seed bytes or decoder", tc.name)
+				t.Fatalf("seed %q emitted no scan op with Filter != nil; update seed bytes in testutil/behavior_seeds.go", tc.Name)
 			}
 		})
 	}
