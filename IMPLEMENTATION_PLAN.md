@@ -201,10 +201,10 @@ Keep seeds minimal and add a guard if they're hand-rolled.
   - [x] Keep separate fuzz target (fixed config) for deep coverage.
   - [x] Use shared `RunBehavior` + `OpGenerator` config.
   - [x] Favor shorter heavy-compare cadence to keep fuzz throughput high.
-- [ ] 3. Refactor behavior fuzz options (`behavior_fuzz_options_test.go`), keep separate from fixed-config fuzz.
-  - [ ] Keep separate fuzz target (derived options) for edge configs.
-  - [ ] Use shared `RunBehavior` + `OpGenerator` config.
-  - [ ] Reduce per-iteration ops for heavier option profiles (large key/index sizes).
+- [x] 3. Refactor behavior fuzz options (`behavior_fuzz_options_test.go`), keep separate from fixed-config fuzz.
+  - [x] Keep separate fuzz target (derived options) for edge configs.
+  - [x] Use shared `RunBehavior` + `OpGenerator` config.
+  - [x] Reduce per-iteration ops for heavier option profiles (large key/index sizes).
 
 ### Phase C — add regression guard tests
 - [ ] 1. Move/replace `behavior_filter_seed_guard_test.go` to use testutil helper.
