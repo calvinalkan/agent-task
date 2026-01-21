@@ -24,7 +24,6 @@ type Harness struct {
 	Options slotcache.Options
 	Model   HarnessModel
 	Real    HarnessReal
-
 	Scratch HarnessScratch
 }
 
