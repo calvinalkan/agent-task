@@ -188,7 +188,7 @@ Keep seeds minimal and add a guard if they're hand-rolled.
 - [x] 4. Add `options_profiles.go` with deterministic profile templates (Path injected per run).
 - [x] 5. Move `maxFuzzOperations` (or equivalent) into testutil so guards can reuse it.
 - [x] 6. Add `behavior_seeds.go` with curated seeds.
-- [ ] 7. Add guard helpers in testutil (seed assertions + minimal trace inspection).
+- [x] 7. Add guard helpers in testutil (seed assertions + minimal trace inspection).
 - [ ] 8. Add a dedicated copy/aliasing regression test (or move copy checks into heavy-compare only).
 
 ### Phase B — update behavior tests
@@ -219,6 +219,7 @@ Keep seeds minimal and add a guard if they're hand-rolled.
 - [ ] 2. Use testutil seed builder helper to reduce brittleness.
 
 ## Risk notes / gotchas
+- **Core seeds (A-H) need fixing:** Guard tests revealed that seeds in `behavior_seeds.go` (except filter seeds) have incorrect byte encoding. For example, they use `0x02` for Commit but the decoder needs choice in [60,75) range, so `0x3C` (60) is required. Filter seeds (`SeedFilteredScans`, `SeedFilterPagination`) are correctly encoded. Fix the core seeds before adding guard tests for them in Phase C.
 - **Determinism:** Changing `FuzzDecoder` logic impacts seed semantics. Guard tests prevent silent drift.
 - **Test visibility:** `internal/testutil` tests won't run with `go test ./pkg/slotcache`; keep wrapper tests in `pkg/slotcache` for guards.
 - **Seed corpus size:** keep curated spec seeds minimal so fuzz startup stays fast.
