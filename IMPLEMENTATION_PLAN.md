@@ -182,8 +182,8 @@ Keep seeds minimal and add a guard if they're hand-rolled.
 ## Detailed task breakdown
 
 ### Phase A — testutil infrastructure
-- [ ] 1. Add `behavior_runner.go` with `RunBehavior` and light/heavy compare scheduling.
-- [ ] 2. Add `opgen_config.go` + `OpGenerator` (wrapper around `FuzzDecoder`).
+- [x] 1. Add `behavior_runner.go` with `RunBehavior` and light/heavy compare scheduling.
+- [x] 2. Add `opgen_config.go` + `OpGenerator` (wrapper around `FuzzDecoder`).
 - [ ] 3. Add optional phased generation logic (byte-driven, deterministic) with small-scan bias.
 - [ ] 4. Add `options_profiles.go` with deterministic profile templates (Path injected per run).
 - [ ] 5. Move `maxFuzzOperations` (or equivalent) into testutil so guards can reuse it.
