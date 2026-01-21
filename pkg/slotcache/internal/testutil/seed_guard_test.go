@@ -7,8 +7,16 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil"
 )
 
-// These tests verify the guard helper infrastructure works correctly.
-// They use the known-working FilteredScans seed as the reference.
+// These tests verify the guard helper INFRASTRUCTURE works correctly.
+// They answer: "Does RunSeedTrace capture ops? Does HasOpSequence work?"
+//
+// These are NOT the actual seed guards. The real guards live in
+// pkg/slotcache/ (e.g., behavior_filter_seed_guard_test.go) so they run
+// with `go test ./pkg/slotcache`. Tests here only run with:
+//
+//	go test ./pkg/slotcache/internal/testutil
+//
+// which is not part of typical CI/development workflows.
 //
 // NOTE: Some core behavior seeds (A-H) have incorrect byte encoding and
 // will be fixed separately. The guard helpers are designed to catch

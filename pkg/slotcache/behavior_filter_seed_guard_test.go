@@ -14,6 +14,12 @@
 //
 // Fix by updating the seed bytes in internal/testutil/behavior_seeds.go
 // to match the current decoder behavior.
+//
+// WHY THIS LIVES IN pkg/slotcache (not internal/testutil):
+// Guard tests must run with `go test ./pkg/slotcache` to catch regressions
+// during normal development. Tests in internal/testutil/ only run when
+// explicitly targeting that package, which isn't part of typical workflows.
+// The helpers live in testutil; the guards that USE them live here.
 
 package slotcache_test
 
