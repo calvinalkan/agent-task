@@ -2,7 +2,7 @@
 //
 // These byte sequences are constructed to exercise specific code paths in
 // spec_fuzz_test.go. They use a different protocol than behavior seeds because
-// the spec fuzz test uses a custom actionByte dispatch rather than FuzzDecoder.NextOp.
+// the spec fuzz test uses a custom actionByte dispatch rather than OpGenerator.
 //
 // Protocol reference (from spec_fuzz_test.go):
 //

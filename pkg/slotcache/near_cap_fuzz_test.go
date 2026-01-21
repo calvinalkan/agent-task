@@ -277,12 +277,15 @@ func FuzzBehavior_ModelVsReal_NearCapConfig(f *testing.F) {
 
 		defer func() { _ = h.Real.Cache.Close() }()
 
-		decoder := testutil.NewFuzzDecoder(fuzzBytes, options)
+		cfg := testutil.CanonicalOpGenConfig()
+		cfg.AllowedOps = testutil.BehaviorOpSet
+		opGen := testutil.NewOpGenerator(fuzzBytes, options, &cfg)
 
 		var previouslySeenKeys [][]byte
 
-		for opIndex := 0; opIndex < testutil.DefaultMaxFuzzOperations && decoder.HasMore(); opIndex++ {
-			op := decoder.NextOp(h, previouslySeenKeys)
+		for opIndex := 0; opIndex < testutil.DefaultMaxFuzzOperations && opGen.HasMore(); opIndex++ {
+			writerActive := h.Model.Writer != nil && h.Real.Writer != nil
+			op := opGen.NextOp(writerActive, previouslySeenKeys)
 
 			modelResult := testutil.ApplyModel(h, op)
 			realResult := testutil.ApplyReal(h, op)
@@ -318,12 +321,15 @@ func FuzzBehavior_ModelVsReal_NearCapConfig_OrderedKeys(f *testing.F) {
 
 		defer func() { _ = h.Real.Cache.Close() }()
 
-		decoder := testutil.NewFuzzDecoder(fuzzBytes, options)
+		cfg := testutil.CanonicalOpGenConfig()
+		cfg.AllowedOps = testutil.BehaviorOpSet
+		opGen := testutil.NewOpGenerator(fuzzBytes, options, &cfg)
 
 		var previouslySeenKeys [][]byte
 
-		for opIndex := 0; opIndex < testutil.DefaultMaxFuzzOperations && decoder.HasMore(); opIndex++ {
-			op := decoder.NextOp(h, previouslySeenKeys)
+		for opIndex := 0; opIndex < testutil.DefaultMaxFuzzOperations && opGen.HasMore(); opIndex++ {
+			writerActive := h.Model.Writer != nil && h.Real.Writer != nil
+			op := opGen.NextOp(writerActive, previouslySeenKeys)
 
 			modelResult := testutil.ApplyModel(h, op)
 			realResult := testutil.ApplyReal(h, op)

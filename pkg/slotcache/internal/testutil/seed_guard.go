@@ -32,8 +32,11 @@ type SeedTrace struct {
 	Entries []TraceEntry
 }
 
-// RunSeedTrace executes a seed through the decoder and records all operations.
+// RunSeedTrace executes a seed through the OpGenerator and records all operations.
 // It also validates model vs real behavior for each operation.
+//
+// Note: This uses the canonical OpGenerator protocol. Curated seeds must be
+// designed for OpGenerator, not the legacy FuzzDecoder.NextOp protocol.
 func RunSeedTrace(tb testing.TB, seed []byte, opts slotcache.Options, maxOps int) *SeedTrace {
 	tb.Helper()
 
@@ -42,14 +45,17 @@ func RunSeedTrace(tb testing.TB, seed []byte, opts slotcache.Options, maxOps int
 		_ = harness.Real.Cache.Close()
 	})
 
-	decoder := NewFuzzDecoder(seed, opts)
+	cfg := CanonicalOpGenConfig()
+	cfg.AllowedOps = BehaviorOpSet
+	opGen := NewOpGenerator(seed, opts, &cfg)
 
 	var previouslySeenKeys [][]byte
 
 	entries := make([]TraceEntry, 0, maxOps)
 
-	for i := 0; i < maxOps && decoder.HasMore(); i++ {
-		op := decoder.NextOp(harness, previouslySeenKeys)
+	for i := 0; i < maxOps && opGen.HasMore(); i++ {
+		writerActive := harness.Model.Writer != nil && harness.Real.Writer != nil
+		op := opGen.NextOp(writerActive, previouslySeenKeys)
 
 		modelResult := ApplyModel(harness, op)
 		realResult := ApplyReal(harness, op)

@@ -80,13 +80,16 @@ func Test_Metamorphic_LastWriteWins_When_Buffer_Reduced(t *testing.T) {
 
 			defer func() { _ = h.Real.Cache.Close() }()
 
-			decoder := testutil.NewFuzzDecoder(baseBytes, options)
+			cfg := testutil.CanonicalOpGenConfig()
+			cfg.AllowedOps = testutil.BehaviorOpSet
+			opGen := testutil.NewOpGenerator(baseBytes, options, &cfg)
 
 			var keys [][]byte
 
 			baseOps := 100
-			for i := 0; i < baseOps && decoder.HasMore(); i++ {
-				op := decoder.NextOp(h, keys)
+			for i := 0; i < baseOps && opGen.HasMore(); i++ {
+				writerActive := h.Model.Writer != nil && h.Real.Writer != nil
+				op := opGen.NextOp(writerActive, keys)
 
 				mRes := testutil.ApplyModel(h, op)
 				rRes := testutil.ApplyReal(h, op)

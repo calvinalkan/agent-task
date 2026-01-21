@@ -102,15 +102,15 @@ Files:
 
 ### 2.3 Remove `FuzzDecoder.NextOp`
 
-- [ ] Delete `func (decoder *FuzzDecoder) NextOp(...) Operation`.
-- [ ] Remove/relocate any helper methods that only existed for `NextOp` op selection.
+- [x] Delete `func (decoder *FuzzDecoder) NextOp(...) Operation`.
+- [x] Remove/relocate any helper methods that only existed for `NextOp` op selection.
 
 Files:
 - `pkg/slotcache/internal/testutil/fuzz_decoder.go`
 
 ### 2.4 Update remaining call sites that used `decoder.NextOp`
 
-- [ ] Replace inline `decoder.NextOp(...)` loops with `OpGenerator`.
+- [x] Replace inline `decoder.NextOp(...)` loops with `OpGenerator`.
 
 Likely files:
 - `pkg/slotcache/near_cap_fuzz_test.go` (behavior near-cap)
@@ -120,6 +120,11 @@ Likely files:
 Acceptance:
 - `grep -R "NextOp("` shows only `OpGenerator.NextOp` (and any interface method declarations).
 - No test depends on the legacy op protocol.
+
+**Note (2026-01-21):** As part of completing 2.3/2.4, behavior seeds were also
+rewritten for the OpGenerator protocol (partial Phase 6 work). A new
+`BehaviorSeedBuilder` was added to construct seeds compatible with the
+canonical OpGenerator protocol.
 
 ---
 
@@ -202,14 +207,18 @@ Acceptance:
 
 ### 6.1 Behavior seeds
 
-- [ ] Rewrite `behavior_seeds.go` to document and encode seeds for the **canonical OpGenerator protocol** (not FuzzDecoder).
-- [ ] Update guard tests to decode via `OpGenerator` (canonical config + behavior op set).
+- [x] Rewrite `behavior_seeds.go` to document and encode seeds for the **canonical OpGenerator protocol** (not FuzzDecoder).
+- [x] Update guard tests to decode via `OpGenerator` (canonical config + behavior op set).
 
 Files:
 - `pkg/slotcache/internal/testutil/behavior_seeds.go`
+- `pkg/slotcache/internal/testutil/behavior_seed_builder.go` (NEW)
 - `pkg/slotcache/internal/testutil/seed_guard.go`
 - `pkg/slotcache/behavior_core_seed_guard_test.go`
 - `pkg/slotcache/behavior_filter_seed_guard_test.go`
+
+**Note:** This was completed as part of Phase 2.3/2.4 since the call site updates
+required the seeds to work with the new protocol.
 
 ### 6.2 Add at least two new curated header seeds
 
