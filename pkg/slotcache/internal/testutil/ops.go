@@ -1,10 +1,115 @@
 package testutil
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
 )
+
+// -----------------------------------------------------------------------------
+// Filter DSL for deterministic fuzz testing
+// -----------------------------------------------------------------------------
+//
+// ScanOptions.Filter is a func(Entry) bool - functions can't be derived from
+// fuzz bytes or compared between model and real. FilterSpec solves this:
+//
+//  1. OpGenerator reads fuzz bytes → creates FilterSpec (e.g. RevisionMask with Mask=0xFF)
+//  2. BuildFilter(spec) → func(Entry) bool
+//  3. Same FilterSpec goes to both model and real → identical filtering → comparable results
+
+// filterKind represents the type of filter to apply.
+type filterKind uint8
+
+// Filter kinds for the deterministic filter DSL.
+const (
+	filterAll filterKind = iota
+	filterNone
+	filterRevisionMask
+	filterIndexByteEq
+	filterKeyPrefixEq // byte prefix at offset 0
+)
+
+// FilterSpec describes a filter to apply during scans.
+type FilterSpec struct {
+	Kind filterKind
+
+	// RevisionMask: (Revision & Mask) == Want
+	Mask int64
+	Want int64
+
+	// IndexByteEq: Index[Offset] == Byte
+	Offset int
+	Byte   byte
+
+	// KeyPrefixEq: bytes.HasPrefix(Key, Prefix)
+	Prefix []byte
+}
+
+func (f FilterSpec) String() string {
+	switch f.Kind {
+	case filterAll:
+		return "All"
+	case filterNone:
+		return "None"
+	case filterRevisionMask:
+		return fmt.Sprintf("RevisionMask(mask=0x%X,want=0x%X)", f.Mask, f.Want)
+	case filterIndexByteEq:
+		return fmt.Sprintf("IndexByteEq(offset=%d,byte=0x%02X)", f.Offset, f.Byte)
+	case filterKeyPrefixEq:
+		return fmt.Sprintf("KeyPrefixEq(%x)", f.Prefix)
+	default:
+		return fmt.Sprintf("Unknown(kind=%d)", f.Kind)
+	}
+}
+
+// buildFilter creates a filter function from a FilterSpec.
+func buildFilter(spec FilterSpec) func(slotcache.Entry) bool {
+	switch spec.Kind {
+	case filterNone:
+		return func(slotcache.Entry) bool { return false }
+
+	case filterRevisionMask:
+		mask := spec.Mask
+		want := spec.Want
+
+		// Keep it non-degenerate + never panic.
+		if mask == 0 {
+			return func(slotcache.Entry) bool { return true }
+		}
+
+		return func(e slotcache.Entry) bool {
+			return (e.Revision & mask) == want
+		}
+
+	case filterIndexByteEq:
+		offset := spec.Offset
+		targetByte := spec.Byte
+
+		return func(e slotcache.Entry) bool {
+			if offset < 0 || offset >= len(e.Index) {
+				return false
+			}
+
+			return e.Index[offset] == targetByte
+		}
+
+	case filterKeyPrefixEq:
+		// Copy so the spec is stable even if caller mutates input slice.
+		prefix := append([]byte(nil), spec.Prefix...)
+
+		return func(e slotcache.Entry) bool {
+			if len(prefix) == 0 || len(prefix) > len(e.Key) {
+				return false
+			}
+
+			return bytes.HasPrefix(e.Key, prefix)
+		}
+
+	default: // filterAll and unknown kinds
+		return func(slotcache.Entry) bool { return true }
+	}
+}
 
 // Operation is a single public-API call we apply to both the model and the real cache.
 //

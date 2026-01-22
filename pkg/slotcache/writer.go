@@ -28,9 +28,18 @@ type bufferedOp struct {
 	index    []byte
 }
 
-// writer is the concrete implementation of [Writer].
-type writer struct {
-	cache       *cache
+// Writer is a buffered write session for modifying the cache.
+//
+// Operations are buffered in memory and applied atomically on [Writer.Commit].
+// If the same key is modified multiple times, the last operation wins.
+//
+// Writer methods are NOT thread-safe. Always call [Writer.Close] to release resources.
+//
+// A Writer must be obtained via [Cache.Writer]; the zero value is not usable.
+type Writer struct {
+	_ [0]func() // prevent external construction
+
+	cache       *Cache
 	bufferedOps []bufferedOp
 	isClosed    atomic.Bool // atomic for safe concurrent Close() during Commit()
 	lock        *fs.Lock
@@ -58,8 +67,13 @@ type writer struct {
 	rehashOccurred  bool // if true, all buckets were rewritten
 }
 
-// Put buffers a put operation for the given key.
-func (w *writer) Put(key []byte, revision int64, index []byte) error {
+// Put stages an upsert operation.
+//
+// If the key exists, the entry is updated. Otherwise, a new entry is
+// allocated at commit time.
+//
+// Possible errors: [ErrClosed], [ErrInvalidInput], [ErrBufferFull].
+func (w *Writer) Put(key []byte, revision int64, index []byte) error {
 	w.cache.mu.RLock()
 	defer w.cache.mu.RUnlock()
 
@@ -99,8 +113,12 @@ func (w *writer) Put(key []byte, revision int64, index []byte) error {
 	return nil
 }
 
-// Delete buffers a delete operation for the given key.
-func (w *writer) Delete(key []byte) (bool, error) {
+// Delete stages a deletion.
+//
+// Returns true if the key exists (considering buffered ops), false otherwise.
+//
+// Possible errors: [ErrClosed], [ErrInvalidInput], [ErrBufferFull].
+func (w *Writer) Delete(key []byte) (bool, error) {
 	w.cache.mu.RLock()
 	defer w.cache.mu.RUnlock()
 
@@ -134,33 +152,18 @@ func (w *writer) Delete(key []byte) (bool, error) {
 
 // Commit applies all buffered operations atomically.
 //
-//  1. Preflight (no locks held except cache.mu read lock)
-//     - Check closed/invalidated state
-//     - Compute final ops (last-wins per key)
-//     - Categorize into updates, inserts, deletes based on disk state
-//     - Validate capacity and ordered-keys constraints
-//     - Any preflight failure indicate corruption and close the writer and returns an error
+// After success, changes are visible to readers. If [WritebackSync] is
+// enabled, changes are also durable.
 //
-//  2. Publish (registry.mu write lock held)
-//     - Set generation to odd (signals "write in progress" to readers)
-//     - Apply all changes to mmap'd data (slots, buckets, counters)
-//     - Optionally rehash if tombstone threshold exceeded
-//     - Update header CRC
-//     - Set generation to even (publishes changes atomically)
-//     - In WritebackSync mode, msync barriers ensure durability
+// After Commit, further operations return [ErrClosed].
 //
-//  3. Cleanup
-//     - Release registry lock
-//     - Close writer (releases file lock, clears writerOwner)
-//
-// On any error during publish, generation is left odd and the file must be
-// rebuilt by the caller (readers will see ErrCorrupt or ErrBusy).
-func (w *writer) Commit() error {
+// Possible errors: [ErrClosed], [ErrFull], [ErrOutOfOrderInsert], [ErrWriteback], [ErrCorrupt], [ErrInvalidated].
+func (w *Writer) Commit() error {
 	w.cache.mu.RLock()
 	defer w.cache.mu.RUnlock()
 
 	// =========================================================================
-	// Phase 1: Preflight checks (no registry lock)
+	// Phase 1: Preflight checks (no registry entry lock)
 	// =========================================================================
 
 	// cache.isClosed check is defensive: cache.Close() returns ErrBusy if a
@@ -186,6 +189,7 @@ func (w *writer) Commit() error {
 	// Categorize operations based on DISK state only (not buffered ops).
 	// This determines whether each Put is an update (key exists) or insert (new key).
 	var updates, inserts, deletes []bufferedOp
+
 	for _, op := range finalOps {
 		_, found, err := w.findLiveSlotLocked(op.key)
 		if err != nil {
@@ -210,6 +214,7 @@ func (w *writer) Commit() error {
 
 	// Capacity check: ensure we have room for new inserts.
 	highwater := w.cache.readSlotHighwater()
+
 	newInserts := uint64(len(inserts))
 	if highwater+newInserts > w.cache.slotCapacity {
 		w.closeLocked()
@@ -240,14 +245,14 @@ func (w *writer) Commit() error {
 	}
 
 	// =========================================================================
-	// Phase 2: Publish changes (registry lock held)
+	// Phase 2: Publish changes (registry entry lock held)
 	// =========================================================================
 
 	var msyncFailed bool
 
 	syncMode := w.cache.writeback == WritebackSync
 
-	w.cache.registry.mu.Lock()
+	w.cache.registryEntry.mu.Lock()
 
 	// Step 1: Publish odd generation (signals write-in-progress to readers).
 	oldGen := w.cache.readGeneration()
@@ -268,7 +273,7 @@ func (w *writer) Commit() error {
 	for _, op := range updates {
 		slotID, found, err := w.findLiveSlotLocked(op.key)
 		if err != nil {
-			w.cache.registry.mu.Unlock()
+			w.cache.registryEntry.mu.Unlock()
 			w.closeLocked()
 
 			return err
@@ -277,7 +282,7 @@ func (w *writer) Commit() error {
 		if found {
 			err := w.updateSlot(slotID, op.revision, op.index)
 			if err != nil {
-				w.cache.registry.mu.Unlock()
+				w.cache.registryEntry.mu.Unlock()
 				w.closeLocked()
 
 				return err
@@ -291,7 +296,7 @@ func (w *writer) Commit() error {
 	for _, op := range deletes {
 		slotID, found, err := w.findLiveSlotLocked(op.key)
 		if err != nil {
-			w.cache.registry.mu.Unlock()
+			w.cache.registryEntry.mu.Unlock()
 			w.closeLocked()
 
 			return err
@@ -301,8 +306,9 @@ func (w *writer) Commit() error {
 			continue
 		}
 
-		if err := w.deleteSlot(slotID, op.key); err != nil {
-			w.cache.registry.mu.Unlock()
+		err = w.deleteSlot(slotID, op.key)
+		if err != nil {
+			w.cache.registryEntry.mu.Unlock()
 			w.closeLocked()
 
 			return err
@@ -318,7 +324,7 @@ func (w *writer) Commit() error {
 	for _, op := range inserts {
 		filled, err := w.insertSlot(slotID, op.key, op.revision, op.index)
 		if err != nil {
-			w.cache.registry.mu.Unlock()
+			w.cache.registryEntry.mu.Unlock()
 			w.closeLocked()
 
 			return err
@@ -334,7 +340,7 @@ func (w *writer) Commit() error {
 	// Step 3d: Update header counters.
 	oldLiveCount := binary.LittleEndian.Uint64(w.cache.data[offLiveCount:])
 	if oldLiveCount < deleteCount {
-		w.cache.registry.mu.Unlock()
+		w.cache.registryEntry.mu.Unlock()
 		w.closeLocked()
 
 		return fmt.Errorf("live_count underflow (old=%d deletes=%d): %w", oldLiveCount, deleteCount, ErrCorrupt)
@@ -351,7 +357,7 @@ func (w *writer) Commit() error {
 	newTombstones := oldTombstones + deleteCount
 
 	if newTombstones < filledTombstones {
-		w.cache.registry.mu.Unlock()
+		w.cache.registryEntry.mu.Unlock()
 		w.closeLocked()
 
 		return fmt.Errorf("bucket_tombstones underflow (old=%d deletes=%d filled=%d): %w",
@@ -403,11 +409,15 @@ func (w *writer) Commit() error {
 
 			if err1 != nil || err2 != nil {
 				msyncFailed = true
-			} else if err := msyncRange(w.cache.data, bucketsStart, bucketsLen); err != nil {
-				msyncFailed = true
+			} else {
+				err := msyncRange(w.cache.data, bucketsStart, bucketsLen)
+				if err != nil {
+					msyncFailed = true
+				}
 			}
 		} else if w.minBucketOffset >= 0 {
-			if err := msyncRange(w.cache.data, w.minBucketOffset, w.maxBucketOffset-w.minBucketOffset); err != nil {
+			err := msyncRange(w.cache.data, w.minBucketOffset, w.maxBucketOffset-w.minBucketOffset)
+			if err != nil {
 				msyncFailed = true
 			}
 		}
@@ -425,7 +435,7 @@ func (w *writer) Commit() error {
 		}
 	}
 
-	w.cache.registry.mu.Unlock()
+	w.cache.registryEntry.mu.Unlock()
 
 	// =========================================================================
 	// Phase 3: Cleanup
@@ -441,7 +451,13 @@ func (w *writer) Commit() error {
 }
 
 // Close releases resources and discards uncommitted changes.
-func (w *writer) Close() error {
+//
+// Close is idempotent. Always call Close, even after [Writer.Commit].
+func (w *Writer) Close() error {
+	if w == nil {
+		return ErrClosed
+	}
+
 	if w.isClosed.Load() {
 		return nil
 	}
@@ -453,10 +469,12 @@ func (w *writer) Close() error {
 
 // SetUserHeaderFlags stages a change to the user header flags.
 //
-// The new value is buffered and only published on successful Commit().
-// If Commit() fails (e.g., ErrFull, ErrOutOfOrderInsert), the change is discarded.
+// The new value is published atomically on [Writer.Commit].
+// If Commit fails (e.g., [ErrFull]), the change is discarded.
 // Setting flags does not affect the user data bytes.
-func (w *writer) SetUserHeaderFlags(flags uint64) error {
+//
+// Possible errors: [ErrClosed], [ErrInvalidated].
+func (w *Writer) SetUserHeaderFlags(flags uint64) error {
 	w.cache.mu.RLock()
 	defer w.cache.mu.RUnlock()
 
@@ -480,10 +498,12 @@ func (w *writer) SetUserHeaderFlags(flags uint64) error {
 
 // SetUserHeaderData stages a change to the user header data.
 //
-// The new value is buffered and only published on successful Commit().
-// If Commit() fails (e.g., ErrFull, ErrOutOfOrderInsert), the change is discarded.
+// The new value is published atomically on [Writer.Commit].
+// If Commit fails (e.g., [ErrFull]), the change is discarded.
 // Setting data does not affect the user flags.
-func (w *writer) SetUserHeaderData(data [UserDataSize]byte) error {
+//
+// Possible errors: [ErrClosed], [ErrInvalidated].
+func (w *Writer) SetUserHeaderData(data [UserDataSize]byte) error {
 	w.cache.mu.RLock()
 	defer w.cache.mu.RUnlock()
 
@@ -506,7 +526,7 @@ func (w *writer) SetUserHeaderData(data [UserDataSize]byte) error {
 }
 
 // resetDirtyTracking initializes dirty range tracking for a new commit.
-func (w *writer) resetDirtyTracking() {
+func (w *Writer) resetDirtyTracking() {
 	w.minSlotOffset = -1
 	w.maxSlotOffset = -1
 	w.minBucketOffset = -1
@@ -518,7 +538,7 @@ func (w *writer) resetDirtyTracking() {
 // File layout is validated at open time to fit in int, so conversions should
 // not overflow. Returns an error if conversion fails (indicates corruption or
 // a bug in validation logic).
-func (w *writer) markSlotDirty(slotID uint64) error {
+func (w *Writer) markSlotDirty(slotID uint64) error {
 	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 	slotEnd := slotOffset + uint64(w.cache.slotSize)
 
@@ -545,7 +565,7 @@ func (w *writer) markSlotDirty(slotID uint64) error {
 // File layout is validated at open time to fit in int, so conversions should
 // not overflow. Returns an error if conversion fails (indicates corruption or
 // a bug in validation logic).
-func (w *writer) markBucketDirty(bucketIdx uint64) error {
+func (w *Writer) markBucketDirty(bucketIdx uint64) error {
 	bucketOffset := w.cache.bucketsOffset + bucketIdx*16
 	bucketEnd := bucketOffset + 16
 
@@ -569,7 +589,7 @@ func (w *writer) markBucketDirty(bucketIdx uint64) error {
 }
 
 // updateSlot updates an existing slot with new revision and index.
-func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) error {
+func (w *Writer) updateSlot(slotID uint64, revision int64, index []byte) error {
 	slotOffset := w.cache.slotsOffset + slotID*uint64(w.cache.slotSize)
 	keyPad := (8 - (w.cache.keySize % 8)) % 8
 	revOffset := slotOffset + 8 + uint64(w.cache.keySize) + uint64(keyPad)
@@ -586,7 +606,7 @@ func (w *writer) updateSlot(slotID uint64, revision int64, index []byte) error {
 }
 
 // deleteSlot marks a slot as tombstoned and updates the bucket index.
-func (w *writer) deleteSlot(slotID uint64, key []byte) error {
+func (w *Writer) deleteSlot(slotID uint64, key []byte) error {
 	// Find and tombstone the bucket entry first. If the bucket entry cannot be
 	// found, the file is corrupt (a live slot must be reachable via the bucket
 	// probe sequence) and we must not silently proceed.
@@ -633,7 +653,7 @@ func (w *writer) deleteSlot(slotID uint64, key []byte) error {
 // insertSlot allocates a new slot and inserts into the bucket index.
 //
 // Returns whether the insertion filled a TOMBSTONE bucket.
-func (w *writer) insertSlot(slotID uint64, key []byte, revision int64, index []byte) (bool, error) {
+func (w *Writer) insertSlot(slotID uint64, key []byte, revision int64, index []byte) (bool, error) {
 	// Find an available bucket first so we never silently "fall through" and
 	// publish a slot that isn't reachable via the hash index.
 	hash := fnv1a64(key)
@@ -709,7 +729,7 @@ func (w *writer) insertSlot(slotID uint64, key []byte, revision int64, index []b
 // entire cache from source of truth is the recommended approach.
 //
 // Called during Commit when bucket_tombstones/bucket_count > rehashThreshold.
-func (w *writer) rehashBuckets(highwater uint64) {
+func (w *Writer) rehashBuckets(highwater uint64) {
 	// Step 1: Clear all buckets to EMPTY (slot_plus_one = 0).
 	for i := range w.cache.bucketCount {
 		bucketOffset := w.cache.bucketsOffset + i*16
@@ -757,23 +777,23 @@ func (w *writer) rehashBuckets(highwater uint64) {
 }
 
 // closeLocked releases writer resources and clears the in-process writer guard.
-// Acquires registry.mu internally to clear writerOwner.
-func (w *writer) closeLocked() {
+// Acquires fileRegistryEntry.mu internally to clear activeWriter.
+func (w *Writer) closeLocked() {
 	w.isClosed.Store(true)
 	w.bufferedOps = nil
 
 	// Release in-process guard.
-	w.cache.registry.mu.Lock()
-	w.cache.registry.writerOwner = nil
-	w.cache.registry.mu.Unlock()
+	w.cache.registryEntry.mu.Lock()
+	w.cache.registryEntry.activeWriter = nil
+	w.cache.registryEntry.mu.Unlock()
 
 	// Release file lock.
-	releaseWriterLock(w.lock)
+	releaseWriteLock(w.lock)
 	w.lock = nil
 }
 
 // finalOps returns the last operation per key, in original order.
-func (w *writer) finalOps() []bufferedOp {
+func (w *Writer) finalOps() []bufferedOp {
 	lastIndex := make(map[string]int)
 
 	for i, op := range w.bufferedOps {
@@ -794,7 +814,7 @@ func (w *writer) finalOps() []bufferedOp {
 // findLiveSlotLocked finds a live slot in the file.
 // Used during commit when we need the actual slot ID.
 // Returns an error if a corrupt bucket entry is encountered (slot ID >= highwater).
-func (w *writer) findLiveSlotLocked(key []byte) (uint64, bool, error) {
+func (w *Writer) findLiveSlotLocked(key []byte) (uint64, bool, error) {
 	hash := fnv1a64(key)
 	mask := w.cache.bucketCount - 1
 	startIdx := hash & mask
@@ -843,7 +863,7 @@ func (w *writer) findLiveSlotLocked(key []byte) (uint64, bool, error) {
 
 // isKeyPresent answers whether a key is live considering buffered ops.
 // Returns an error if corruption is detected while probing the hash table.
-func (w *writer) isKeyPresent(key []byte) (bool, error) {
+func (w *Writer) isKeyPresent(key []byte) (bool, error) {
 	for i := len(w.bufferedOps) - 1; i >= 0; i-- {
 		op := w.bufferedOps[i]
 		if bytes.Equal(op.key, key) {

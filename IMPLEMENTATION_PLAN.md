@@ -38,7 +38,7 @@ This makes it hard to reason about seeds, guard tests, and what coverage we actu
 ## Phase 0 — Design + invariants
 
 - [x] Define `OpKind` + `OpSet` (bitmask) for allowed ops.
-  - Files: `pkg/slotcache/internal/testutil/opgen_config.go`
+  - Files: `pkg/slotcache/internal/testutil/opgenerator.go`
 - [x] Add two explicit profiles:
   - `BehaviorOpSet` (no invalidation; include user header ops)
   - `SpecOpSet` (includes invalidation + user header ops)
@@ -90,7 +90,7 @@ Acceptance:
 
 Files:
 - `pkg/slotcache/internal/testutil/behavior_runner.go`
-- `pkg/slotcache/internal/testutil/opgen_config.go`
+- `pkg/slotcache/internal/testutil/opgenerator.go`
 
 ### 2.2 Update RunBehavior
 
@@ -195,7 +195,7 @@ Acceptance:
 - [x] Add `OpInvalidate` generation behind `AllowedOps` (spec profile only).
 
 Files:
-- `pkg/slotcache/internal/testutil/opgen_config.go`
+- `pkg/slotcache/internal/testutil/opgenerator.go`
 
 Acceptance:
 - Behavior fuzz targets can now hit header operations naturally.
@@ -325,7 +325,7 @@ Files:
 
 **Note (2026-01-21):** Phase 8 complete. Renamed `FuzzDecoder` → `ByteDecoder` and
 `NewFuzzDecoder` → `NewByteDecoder`. Updated all references in:
-- `opgen_config.go` (type and constructor references, comments)
+- `opgenerator.go` (type and constructor references, comments)
 - `behavior_seed_builder.go` (comment about byte consumption)
 - `seed_guard.go` (comment about canonical protocol)
 - `filter.go` (package doc)

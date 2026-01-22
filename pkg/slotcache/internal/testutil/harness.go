@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -10,6 +11,89 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
 	"github.com/calvinalkan/agent-task/pkg/slotcache/internal/testutil/model"
 )
+
+// DefaultMaxFuzzOperations is the default maximum number of operations
+// to run in a single fuzz iteration or deterministic behavior test.
+//
+// This value is shared across behavior fuzz tests, guard tests, and seed
+// helpers to ensure consistent operation counts when validating seeds.
+//
+// The value of 200 provides enough depth to exercise multi-operation
+// sequences (writer sessions, scan iterations, close/reopen cycles) while
+// keeping individual fuzz iterations fast enough for good throughput.
+const DefaultMaxFuzzOperations = 200
+
+// BehaviorRunConfig configures a model-vs-real behavior test run.
+//
+// Heavy comparisons (CompareState) can be triggered two ways:
+//   - Cadence-based: every HeavyCompareEveryN operations (set to 0 to disable)
+//   - Event-based: after commits (CompareOnCommit) or close/reopen (CompareOnCloseReopen)
+//
+// Light comparisons (CompareStateLight) run every LightCompareEveryN operations.
+type BehaviorRunConfig struct {
+	// MaxOps is the maximum number of operations to execute.
+	MaxOps int
+
+	// LightCompareEveryN runs CompareStateLight every N operations (0 to disable).
+	LightCompareEveryN int
+
+	// HeavyCompareEveryN runs CompareState every N operations (0 to disable).
+	HeavyCompareEveryN int
+
+	// CompareOnCommit runs CompareState after Writer.Commit.
+	CompareOnCommit bool
+
+	// CompareOnCloseReopen runs CompareState after Close/Reopen.
+	CompareOnCloseReopen bool
+}
+
+// OpSource produces operations for RunBehavior.
+//
+// The writerActive parameter indicates whether both model and real writers
+// are currently active. This allows operation selection without coupling
+// to the Harness type.
+type OpSource interface {
+	NextOp(writerActive bool, seen [][]byte) Operation
+}
+
+// RunBehavior executes a deterministic stream of operations and compares
+// the public API behavior between the model and the real cache.
+func RunBehavior(tb testing.TB, opts slotcache.Options, src OpSource, cfg BehaviorRunConfig) {
+	tb.Helper()
+
+	if cfg.MaxOps <= 0 {
+		tb.Fatalf("RunBehavior requires MaxOps > 0")
+	}
+
+	harness := NewHarness(tb, opts)
+	tb.Cleanup(func() {
+		_ = harness.Real.Cache.Close()
+	})
+
+	var previouslySeenKeys [][]byte
+
+	for opIndex := 1; opIndex <= cfg.MaxOps; opIndex++ {
+		writerActive := harness.Model.Writer != nil && harness.Real.Writer != nil
+		operationValue := src.NextOp(writerActive, previouslySeenKeys)
+
+		modelResult := ApplyModel(harness, operationValue)
+		realResult := ApplyReal(harness, operationValue)
+
+		RememberPutKey(operationValue, modelResult, opts.KeySize, &previouslySeenKeys)
+
+		AssertOpMatch(tb, operationValue, modelResult, realResult)
+
+		if shouldRunHeavyCompare(operationValue, opIndex, cfg) {
+			CompareState(tb, harness)
+
+			continue
+		}
+
+		if shouldRunLightCompare(opIndex, cfg) {
+			CompareStateLight(tb, harness)
+		}
+	}
+}
 
 // Harness holds:
 //   - a simple in-memory model (committed state + optional active writer), and
@@ -55,8 +139,8 @@ type HarnessModel struct {
 
 // HarnessReal holds the real implementation state.
 type HarnessReal struct {
-	Cache  slotcache.Cache
-	Writer slotcache.Writer
+	Cache  *slotcache.Cache
+	Writer *slotcache.Writer
 }
 
 // NewHarness constructs a model-vs-real harness for the given options.
@@ -102,7 +186,7 @@ func ApplyModel(testHarness *Harness, operationValue Operation) OperationResult 
 	case OpScan:
 		opts := concreteOperation.Options
 		if concreteOperation.Filter != nil {
-			opts.Filter = BuildFilter(*concreteOperation.Filter)
+			opts.Filter = buildFilter(*concreteOperation.Filter)
 		}
 
 		modelEntries, scanError := testHarness.Model.Cache.Scan(opts)
@@ -115,7 +199,7 @@ func ApplyModel(testHarness *Harness, operationValue Operation) OperationResult 
 	case OpScanPrefix:
 		opts := concreteOperation.Options
 		if concreteOperation.Filter != nil {
-			opts.Filter = BuildFilter(*concreteOperation.Filter)
+			opts.Filter = buildFilter(*concreteOperation.Filter)
 		}
 
 		modelEntries, scanError := testHarness.Model.Cache.ScanPrefix(concreteOperation.Prefix, opts)
@@ -128,7 +212,7 @@ func ApplyModel(testHarness *Harness, operationValue Operation) OperationResult 
 	case OpScanMatch:
 		opts := concreteOperation.Options
 		if concreteOperation.Filter != nil {
-			opts.Filter = BuildFilter(*concreteOperation.Filter)
+			opts.Filter = buildFilter(*concreteOperation.Filter)
 		}
 
 		modelEntries, scanError := testHarness.Model.Cache.ScanMatch(concreteOperation.Spec, opts)
@@ -141,7 +225,7 @@ func ApplyModel(testHarness *Harness, operationValue Operation) OperationResult 
 	case OpScanRange:
 		opts := concreteOperation.Options
 		if concreteOperation.Filter != nil {
-			opts.Filter = BuildFilter(*concreteOperation.Filter)
+			opts.Filter = buildFilter(*concreteOperation.Filter)
 		}
 
 		modelEntries, scanError := testHarness.Model.Cache.ScanRange(concreteOperation.Start, concreteOperation.End, opts)
@@ -259,7 +343,7 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 	case OpScan:
 		opts := concreteOperation.Options
 		if concreteOperation.Filter != nil {
-			opts.Filter = BuildFilter(*concreteOperation.Filter)
+			opts.Filter = buildFilter(*concreteOperation.Filter)
 		}
 
 		entries, scanError := testHarness.Real.Cache.Scan(opts)
@@ -272,7 +356,7 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 	case OpScanPrefix:
 		opts := concreteOperation.Options
 		if concreteOperation.Filter != nil {
-			opts.Filter = BuildFilter(*concreteOperation.Filter)
+			opts.Filter = buildFilter(*concreteOperation.Filter)
 		}
 
 		entries, scanError := testHarness.Real.Cache.ScanPrefix(concreteOperation.Prefix, opts)
@@ -285,7 +369,7 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 	case OpScanMatch:
 		opts := concreteOperation.Options
 		if concreteOperation.Filter != nil {
-			opts.Filter = BuildFilter(*concreteOperation.Filter)
+			opts.Filter = buildFilter(*concreteOperation.Filter)
 		}
 
 		entries, scanError := testHarness.Real.Cache.ScanMatch(concreteOperation.Spec, opts)
@@ -298,7 +382,7 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 	case OpScanRange:
 		opts := concreteOperation.Options
 		if concreteOperation.Filter != nil {
-			opts.Filter = BuildFilter(*concreteOperation.Filter)
+			opts.Filter = buildFilter(*concreteOperation.Filter)
 		}
 
 		entries, scanError := testHarness.Real.Cache.ScanRange(concreteOperation.Start, concreteOperation.End, opts)
@@ -309,7 +393,7 @@ func ApplyReal(testHarness *Harness, operationValue Operation) OperationResult {
 		return ResScan{Entries: entries, Error: nil}
 
 	case OpBeginWrite:
-		writerHandle, beginError := testHarness.Real.Cache.BeginWrite()
+		writerHandle, beginError := testHarness.Real.Cache.Writer()
 		if beginError == nil {
 			testHarness.Real.Writer = writerHandle
 		}
@@ -522,10 +606,27 @@ func AssertOpMatch(tb testing.TB, operationValue Operation, modelResult Operatio
 	}
 }
 
+// RememberKey appends key to keyHistory if it is a valid key and is not
+// already present.
+func RememberKey(key []byte, keySize int, keyHistory *[][]byte) {
+	if len(key) != keySize {
+		return
+	}
+
+	for _, existing := range *keyHistory {
+		if bytes.Equal(existing, key) {
+			return
+		}
+	}
+
+	*keyHistory = append(*keyHistory, append([]byte(nil), key...))
+}
+
 // RememberPutKey appends the Put key to keyHistory if:
 //   - the operation is a Put
 //   - the model result is success (err == nil)
 //   - the key length is correct (so it's actually usable later)
+//   - the key was not already present in keyHistory
 //
 // We use the MODEL result here intentionally: if model vs real disagree, the test
 // will already fail at AssertOpMatch.
@@ -544,9 +645,41 @@ func RememberPutKey(operationValue Operation, modelResult OperationResult, keySi
 		return
 	}
 
-	if len(putOperation.Key) != keySize {
-		return
+	RememberKey(putOperation.Key, keySize, keyHistory)
+}
+
+// Fnv1a64 computes the FNV-1a 64-bit hash over key bytes.
+func fnv1a64(keyBytes []byte) uint64 {
+	const (
+		offsetBasis = 14695981039346656037
+		prime       = 1099511628211
+	)
+
+	var hash uint64 = offsetBasis
+
+	for _, b := range keyBytes {
+		hash ^= uint64(b)
+		hash *= prime
 	}
 
-	*keyHistory = append(*keyHistory, append([]byte(nil), putOperation.Key...))
+	return hash
+}
+
+func shouldRunHeavyCompare(operationValue Operation, opIndex int, cfg BehaviorRunConfig) bool {
+	if cfg.HeavyCompareEveryN > 0 && opIndex%cfg.HeavyCompareEveryN == 0 {
+		return true
+	}
+
+	switch operationValue.(type) {
+	case OpCommit:
+		return cfg.CompareOnCommit
+	case OpClose, OpReopen:
+		return cfg.CompareOnCloseReopen
+	default:
+		return false
+	}
+}
+
+func shouldRunLightCompare(opIndex int, cfg BehaviorRunConfig) bool {
+	return cfg.LightCompareEveryN > 0 && opIndex%cfg.LightCompareEveryN == 0
 }

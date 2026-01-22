@@ -263,6 +263,8 @@ linters:
         - pattern: '^os\.ExpandEnv$'
           msg: "os.ExpandEnv bypasses env abstraction - use the env map passed to Run() instead."
   exclusions:
+    paths:
+      - cmd/sloty/main.go
     rules:
       - path: _test\.go
         linters:
@@ -277,7 +279,7 @@ linters:
         linters:
           - forbidigo
       # Allow time.Sleep in readBackoff (hot path optimization - avoids timer allocation)
-      - path: pkg/slotcache/slotcache\.go
+      - path: pkg/slotcache/cache\.go
         text: "time\\.Sleep"
         linters:
           - forbidigo
@@ -360,8 +362,8 @@ linters:
       - path: pkg/slotcache/format_test\.go
         linters:
           - testpackage
-      # Allow math/rand/v2 for deterministic seeded testing in slotcache
-      - path: pkg/slotcache/behavior_.*_test\.go
+      # Allow math/rand/v2 for deterministic seeded testing
+      - path: _test\.go
         text: "math/rand"
         linters:
           - depguard

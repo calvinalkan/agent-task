@@ -66,11 +66,11 @@ FUZZ_TARGET ?=
 define run_fuzz_tests
 	@if [ -n "$(FUZZ_TARGET)" ]; then \
 		echo "==> Fuzzing $(FUZZ_TARGET) in $(1) for $(FUZZ_TIME)"; \
-		$(GO) test -fuzz="^$(FUZZ_TARGET)$$" -fuzztime=$(FUZZ_TIME) $(1) || exit 1; \
+		$(GO) test -run=^$$ -fuzz="^$(FUZZ_TARGET)$$" -fuzztime=$(FUZZ_TIME) $(1) || exit 1; \
 	else \
 		for test in $$(grep -h "^func Fuzz" $(2) 2>/dev/null | sed 's/func \(Fuzz[^(]*\).*/\1/'); do \
 			echo "==> Fuzzing $$test in $(1) for $(FUZZ_TIME)"; \
-			$(GO) test -fuzz="^$$test$$" -fuzztime=$(FUZZ_TIME) $(1) || exit 1; \
+			$(GO) test -run=^$$ -fuzz="^$$test$$" -fuzztime=$(FUZZ_TIME) $(1) || exit 1; \
 		done; \
 	fi
 endef

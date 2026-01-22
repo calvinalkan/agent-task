@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"github.com/calvinalkan/agent-task/pkg/slotcache"
 )
@@ -23,7 +24,7 @@ const (
 	OpKindScanPrefix                            // OpKindScanPrefix is the ScanPrefix(prefix, opts) operation.
 	OpKindScanMatch                             // OpKindScanMatch is the ScanMatch(spec, opts) operation.
 	OpKindScanRange                             // OpKindScanRange is the ScanRange(start, end, opts) operation.
-	OpKindUserHeader                            // OpKindUserHeader is the UserHeader() cache read (Phase 1).
+	OpKindUserHeader                            // OpKindUserHeader is the UserHeader() cache read.
 	OpKindClose                                 // OpKindClose is the Cache.Close() operation.
 	OpKindReopen                                // OpKindReopen simulates a process restart.
 	OpKindBeginWrite                            // OpKindBeginWrite is the BeginWrite() operation.
@@ -31,13 +32,10 @@ const (
 	OpKindWriterClose                           // OpKindWriterClose is the Writer.Close() operation.
 	OpKindPut                                   // OpKindPut is the Writer.Put() mutation operation.
 	OpKindDelete                                // OpKindDelete is the Writer.Delete() mutation operation.
-	OpKindSetUserHeaderFlags                    // OpKindSetUserHeaderFlags is writer staging (Phase 1).
-	OpKindSetUserHeaderData                     // OpKindSetUserHeaderData is writer staging (Phase 1).
+	OpKindSetUserHeaderFlags                    // OpKindSetUserHeaderFlags is writer staging.
+	OpKindSetUserHeaderData                     // OpKindSetUserHeaderData is writer staging.
 	OpKindInvalidate                            // OpKindInvalidate is the cache.Invalidate() spec-only op.
 )
-
-// unknownOpKind is returned by OpKind.String() for unrecognized values.
-const unknownOpKind = "Unknown"
 
 // String returns a human-readable name for the OpKind.
 func (k OpKind) String() string {
@@ -77,7 +75,7 @@ func (k OpKind) String() string {
 	case OpKindInvalidate:
 		return "Invalidate"
 	default:
-		return unknownOpKind
+		panic(fmt.Sprintf("unknown OpKind %d", k))
 	}
 }
 
@@ -88,16 +86,6 @@ type OpSet uint32
 // Contains reports whether the set contains the given operation kind.
 func (s OpSet) Contains(k OpKind) bool {
 	return s&OpSet(k) != 0
-}
-
-// Add returns a new set with the given operation kind added.
-func (s OpSet) Add(k OpKind) OpSet {
-	return s | OpSet(k)
-}
-
-// Remove returns a new set with the given operation kind removed.
-func (s OpSet) Remove(k OpKind) OpSet {
-	return s &^ OpSet(k)
 }
 
 // Pre-defined operation sets for different testing profiles.
@@ -113,36 +101,24 @@ const (
 	coreWriterOps = OpSet(OpKindBeginWrite | OpKindCommit | OpKindWriterClose |
 		OpKindPut | OpKindDelete)
 
-	// userHeaderReadOps contains user header read operations (Phase 1).
+	// userHeaderReadOps contains user header read operations.
 	userHeaderReadOps = OpSet(OpKindUserHeader)
 
-	// userHeaderWriteOps contains user header staging operations (Phase 1).
+	// userHeaderWriteOps contains user header staging operations.
 	userHeaderWriteOps = OpSet(OpKindSetUserHeaderFlags | OpKindSetUserHeaderData)
 
 	// specOnlyOps contains operations only valid for spec testing.
 	specOnlyOps = OpSet(OpKindInvalidate)
 )
 
-// BehaviorOpSet is the operation set for behavior model-vs-real testing.
-// It includes all operations except Invalidate (which is terminal and
-// would require modeling Open-can-fail semantics).
-//
-// NOTE: UserHeader ops are included in the set definition but won't be
-// generated until Phase 1 adds the corresponding Operation types.
+// BehaviorOpSet is the operation set for behavior testing (model vs real).
+// Includes all ops except Invalidate (which is terminal and not modeled).
 const BehaviorOpSet = coreReadOps | coreLifecycleOps | coreWriterOps |
 	userHeaderReadOps | userHeaderWriteOps
 
 // SpecOpSet is the operation set for spec oracle testing.
-// It includes all operations including Invalidate.
-//
-// NOTE: UserHeader and Invalidate ops are included in the set definition
-// but won't be generated until Phase 1 adds the corresponding Operation types.
+// Includes all operations including Invalidate.
 const SpecOpSet = BehaviorOpSet | specOnlyOps
-
-// CoreOpSet is the operation set containing only currently-implemented operations.
-// This excludes UserHeader, SetUserHeaderFlags, SetUserHeaderData, and Invalidate
-// which will be added in Phase 1.
-const CoreOpSet = coreReadOps | coreLifecycleOps | coreWriterOps
 
 // -----------------------------------------------------------------------------
 // OpGenConfig — configurable operation generator.
@@ -151,7 +127,7 @@ const CoreOpSet = coreReadOps | coreLifecycleOps | coreWriterOps
 // OpGenConfig tunes the probabilities and behavior of OpGenerator.
 // All rate fields are percentages (0–100).
 //
-// Determinism: All weighting decisions consume bytes from ByteDecoder,
+// Determinism: All weighting decisions consume bytes from ByteStream,
 // so fuzz minimization and fixed seeds remain stable.
 type OpGenConfig struct {
 	// InvalidKeyRate is the percentage of keys that should be invalid
@@ -194,6 +170,34 @@ type OpGenConfig struct {
 	// BeginWriteRate is the percentage of reader-mode ops that should attempt
 	// BeginWrite. Higher values create more write sessions. Default: 20.
 	BeginWriteRate int
+
+	// InvalidateRate is the percentage of global ops (roulette byte space) that
+	// should be Invalidate.
+	//
+	// This is evaluated on the global roulette byte after Reopen/Close.
+	// It only has an effect when AllowedOps includes OpKindInvalidate.
+	// Default: 2.
+	InvalidateRate int
+
+	// ReaderUserHeaderRate is the share of reader-mode non-BeginWrite ops that
+	// should be UserHeader.
+	//
+	// The reader-mode operation distribution uses a fixed base weighting model
+	// (historically summing to 80). This field is a weight in that same model.
+	// Default: 5.
+	ReaderUserHeaderRate int
+
+	// WriterReadRate is the percentage of writer-mode ops that should be read ops
+	// (Get/Scan/ScanPrefix/ScanMatch/ScanRange). Default: 15.
+	WriterReadRate int
+
+	// WriterSetUserHeaderFlagsRate is the percentage of writer-mode ops that should
+	// be Writer.SetUserHeaderFlags. Default: 3.
+	WriterSetUserHeaderFlagsRate int
+
+	// WriterSetUserHeaderDataRate is the percentage of writer-mode ops that should
+	// be Writer.SetUserHeaderData. Default: 2.
+	WriterSetUserHeaderDataRate int
 
 	// SmallScanLimitBias biases scan Limit toward small values (0-3).
 	// When true (default), scans use small limits to keep tests fast.
@@ -248,39 +252,9 @@ type OpGenConfig struct {
 	// --- Operation filtering ---
 
 	// AllowedOps specifies which operation kinds the generator may emit.
-	// If zero (the default), all currently-implemented ops are allowed
-	// (equivalent to CoreOpSet).
-	//
-	// Use BehaviorOpSet for behavior model-vs-real testing.
+	// If zero (the default), defaults to BehaviorOpSet.
 	// Use SpecOpSet for spec oracle testing (includes Invalidate).
 	AllowedOps OpSet
-}
-
-// DefaultOpGenConfig returns the default operation generator configuration.
-func DefaultOpGenConfig() OpGenConfig {
-	return OpGenConfig{
-		InvalidKeyRate:       15,
-		InvalidIndexRate:     10,
-		InvalidScanOptsRate:  10,
-		DeleteRate:           15,
-		CommitRate:           15,
-		WriterCloseRate:      10,
-		NonMonotonicRate:     6,
-		ReopenRate:           5,
-		CloseRate:            5,
-		BeginWriteRate:       20,
-		SmallScanLimitBias:   true,
-		KeyReuseMinThreshold: 4,
-		KeyReuseMaxThreshold: 32,
-		// Phased generation disabled by default.
-		PhasedEnabled:           false,
-		FillPhaseEnd:            60,
-		ChurnPhaseEnd:           85,
-		FillPhaseBeginWriteRate: 50,
-		FillPhaseCommitRate:     8,
-		ChurnPhaseDeleteRate:    35,
-		ReadPhaseBeginWriteRate: 5,
-	}
 }
 
 // DeepStateOpGenConfig returns a config optimized for deeper state exploration.
@@ -288,19 +262,24 @@ func DefaultOpGenConfig() OpGenConfig {
 // slot allocation and tombstone stress.
 func DeepStateOpGenConfig() OpGenConfig {
 	return OpGenConfig{
-		InvalidKeyRate:       5,
-		InvalidIndexRate:     5,
-		InvalidScanOptsRate:  5,
-		DeleteRate:           20, // More tombstones
-		CommitRate:           10, // Longer sessions
-		WriterCloseRate:      5,  // Fewer discards
-		NonMonotonicRate:     3,  // Fewer order violations in ordered mode
-		ReopenRate:           3,
-		CloseRate:            3,
-		BeginWriteRate:       30, // More eager to start writing
-		SmallScanLimitBias:   true,
-		KeyReuseMinThreshold: 4,
-		KeyReuseMaxThreshold: 32,
+		InvalidKeyRate:               5,
+		InvalidIndexRate:             5,
+		InvalidScanOptsRate:          5,
+		DeleteRate:                   20, // More tombstones
+		CommitRate:                   10, // Longer sessions
+		WriterCloseRate:              5,  // Fewer discards
+		NonMonotonicRate:             3,  // Fewer order violations in ordered mode
+		ReopenRate:                   3,
+		CloseRate:                    3,
+		BeginWriteRate:               30, // More eager to start writing
+		InvalidateRate:               2,
+		ReaderUserHeaderRate:         5,
+		WriterReadRate:               15,
+		WriterSetUserHeaderFlagsRate: 3,
+		WriterSetUserHeaderDataRate:  2,
+		SmallScanLimitBias:           true,
+		KeyReuseMinThreshold:         4,
+		KeyReuseMaxThreshold:         32,
 		// Phased generation disabled by default.
 		PhasedEnabled:           false,
 		FillPhaseEnd:            60,
@@ -309,82 +288,6 @@ func DeepStateOpGenConfig() OpGenConfig {
 		FillPhaseCommitRate:     8,
 		ChurnPhaseDeleteRate:    35,
 		ReadPhaseBeginWriteRate: 5,
-	}
-}
-
-// PhasedOpGenConfig returns a config with phased generation enabled.
-// Uses a Fill → Churn → Read strategy based on cache fill level.
-//
-// Fill phase (0–60%): Aggressively populate the cache with puts
-// Churn phase (60–85%): Mix of puts/deletes to stress tombstone handling
-// Read phase (85–100%): Focus on reads to validate final state.
-func PhasedOpGenConfig() OpGenConfig {
-	return OpGenConfig{
-		InvalidKeyRate:       5, // Low invalid rate for deeper state
-		InvalidIndexRate:     5,
-		InvalidScanOptsRate:  5,
-		DeleteRate:           15, // Base delete rate (overridden in Churn)
-		CommitRate:           15, // Base commit rate (overridden in Fill)
-		WriterCloseRate:      5,  // Fewer discards
-		NonMonotonicRate:     3,  // Fewer order violations
-		ReopenRate:           3,
-		CloseRate:            3,
-		BeginWriteRate:       20, // Base rate (overridden per phase)
-		SmallScanLimitBias:   true,
-		KeyReuseMinThreshold: 4,
-		KeyReuseMaxThreshold: 32,
-		// Phased generation enabled.
-		PhasedEnabled:           true,
-		FillPhaseEnd:            60,
-		ChurnPhaseEnd:           85,
-		FillPhaseBeginWriteRate: 50, // Aggressive writes during Fill
-		FillPhaseCommitRate:     8,  // Longer sessions for more puts
-		ChurnPhaseDeleteRate:    35, // Heavy deletes during Churn
-		ReadPhaseBeginWriteRate: 5,  // Minimal writes during Read
-	}
-}
-
-// CanonicalOpGenConfig returns the frozen configuration for fuzz targets and
-// seed guard tests.
-//
-// IMPORTANT: All fuzz-seeded behavior and spec tests MUST use this config to
-// ensure curated seeds remain meaningful. Any change to this config's values
-// will break seed guards and require explicit seed migration.
-//
-// The canonical config uses phased generation for better state coverage:
-//   - Fill phase (0–60%): Heavy writes to populate the cache
-//   - Churn phase (60–85%): Mix of puts/deletes for tombstone stress
-//   - Read phase (85–100%): Heavy reads to validate final state
-//
-// AllowedOps defaults to CoreOpSet (zero value). Callers should set
-// AllowedOps to BehaviorOpSet or SpecOpSet depending on their test type.
-func CanonicalOpGenConfig() OpGenConfig {
-	return OpGenConfig{
-		// Frozen probability rates — DO NOT CHANGE without updating seeds.
-		InvalidKeyRate:       5,
-		InvalidIndexRate:     5,
-		InvalidScanOptsRate:  5,
-		DeleteRate:           15,
-		CommitRate:           15,
-		WriterCloseRate:      5,
-		NonMonotonicRate:     3,
-		ReopenRate:           3,
-		CloseRate:            3,
-		BeginWriteRate:       20,
-		SmallScanLimitBias:   true,
-		KeyReuseMinThreshold: 4,
-		KeyReuseMaxThreshold: 32,
-		// Phased generation enabled for better coverage.
-		PhasedEnabled:           true,
-		FillPhaseEnd:            60,
-		ChurnPhaseEnd:           85,
-		FillPhaseBeginWriteRate: 50,
-		FillPhaseCommitRate:     8,
-		ChurnPhaseDeleteRate:    35,
-		ReadPhaseBeginWriteRate: 5,
-		// AllowedOps defaults to zero (CoreOpSet).
-		// Callers set BehaviorOpSet or SpecOpSet as needed.
-		AllowedOps: 0,
 	}
 }
 
@@ -422,14 +325,14 @@ func (p Phase) String() string {
 	case PhaseRead:
 		return "Read"
 	default:
-		return unknownOpKind
+		panic(fmt.Sprintf("unknown Phase %d", p))
 	}
 }
 
-// OpGenerator wraps ByteDecoder and applies configurable probability weights.
+// OpGenerator wraps ByteStream and applies configurable probability weights.
 // It implements OpSource for use with RunBehavior.
 type OpGenerator struct {
-	decoder *ByteDecoder
+	stream  *ByteStream
 	config  OpGenConfig
 	options slotcache.Options
 
@@ -440,7 +343,7 @@ type OpGenerator struct {
 // NewOpGenerator creates an OpGenerator with the given config.
 func NewOpGenerator(fuzzBytes []byte, opts slotcache.Options, cfg *OpGenConfig) *OpGenerator {
 	return &OpGenerator{
-		decoder: NewByteDecoder(fuzzBytes, opts),
+		stream:  NewByteStream(fuzzBytes),
 		config:  *cfg,
 		options: opts,
 	}
@@ -448,7 +351,7 @@ func NewOpGenerator(fuzzBytes []byte, opts slotcache.Options, cfg *OpGenConfig) 
 
 // HasMore reports whether more fuzz bytes remain.
 func (g *OpGenerator) HasMore() bool {
-	return g.decoder.HasMore()
+	return g.stream.HasMore()
 }
 
 // CurrentPhase returns the current generation phase based on cache fill level.
@@ -498,14 +401,13 @@ func (g *OpGenerator) NextOp(writerActive bool, seen [][]byte) Operation {
 
 	// Global ops: Reopen/Close/Invalidate can happen anytime (even with writer active,
 	// they return ErrBusy which is meaningful behavior to test).
-	roulette := g.decoder.NextByte()
-	reopenThreshold := byte(float64(256) * float64(g.config.ReopenRate) / 100.0)
-	closeThreshold := reopenThreshold + byte(float64(256)*float64(g.config.CloseRate)/100.0)
+	roulette := int(g.stream.NextByte())
+	reopenThreshold := (256 * g.config.ReopenRate) / 100
+	closeThreshold := reopenThreshold + (256*g.config.CloseRate)/100
 
-	// Invalidate gets ~2% of the global ops budget (only when allowed).
-	// It's spec-only and terminal, so we keep the rate low.
-	invalidateRate := 2
-	invalidateThreshold := closeThreshold + byte(float64(256)*float64(invalidateRate)/100.0)
+	// Invalidate is spec-only and terminal, so we keep the rate low.
+	invalidateRate := g.config.InvalidateRate
+	invalidateThreshold := closeThreshold + (256*invalidateRate)/100
 
 	if roulette < reopenThreshold {
 		return OpReopen{}
@@ -529,17 +431,17 @@ func (g *OpGenerator) NextOp(writerActive bool, seen [][]byte) Operation {
 }
 
 // effectiveAllowedOps returns the operation set to use for filtering.
-// If AllowedOps is zero (default), returns CoreOpSet.
+// If AllowedOps is zero (default), returns BehaviorOpSet.
 func (g *OpGenerator) effectiveAllowedOps() OpSet {
 	if g.config.AllowedOps == 0 {
-		return CoreOpSet
+		return BehaviorOpSet
 	}
 
 	return g.config.AllowedOps
 }
 
 func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase, allowed OpSet) Operation {
-	choice := g.decoder.NextByte() % 100
+	choice := g.stream.NextByte() % 100
 
 	// BeginWrite rate varies by phase when phased generation is enabled.
 	beginWriteRate := g.config.BeginWriteRate
@@ -573,8 +475,8 @@ func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase, allowed OpSet) Op
 	matchThreshold := prefixThreshold + scale(15)
 	rangeThreshold := matchThreshold + scale(10)
 
-	// UserHeader gets ~5% of remaining (carved from Len's original 10%).
-	userHeaderThreshold := rangeThreshold + scale(5)
+	// UserHeader gets a small share of the remaining ops (carved from Len's share).
+	userHeaderThreshold := rangeThreshold + scale(g.config.ReaderUserHeaderRate)
 
 	switch {
 	case choice < byte(getThreshold):
@@ -611,7 +513,7 @@ func (g *OpGenerator) nextReaderOp(seen [][]byte, phase Phase, allowed OpSet) Op
 }
 
 func (g *OpGenerator) nextWriterOp(seen [][]byte, phase Phase, allowed OpSet) Operation {
-	choice := g.decoder.NextByte() % 100
+	choice := g.stream.NextByte() % 100
 
 	// Calculate thresholds from config.
 	// Original distribution: Put=45%, Delete=15%, Commit=15%, WriterClose=10%, reads=15%
@@ -644,15 +546,12 @@ func (g *OpGenerator) nextWriterOp(seen [][]byte, phase Phase, allowed OpSet) Op
 	commitThreshold := deleteThreshold + commitRate
 	closeThreshold := commitThreshold + g.config.WriterCloseRate
 
-	// User header ops get ~5% combined (2.5% each), carved from Put budget.
-	// SetUserHeaderFlags: 2-3%
-	// SetUserHeaderData: 2-3%
-	setFlagsThreshold := closeThreshold + 3
-	setDataThreshold := setFlagsThreshold + 2
+	// User header ops are carved from the Put budget.
+	setFlagsThreshold := closeThreshold + g.config.WriterSetUserHeaderFlagsRate
+	setDataThreshold := setFlagsThreshold + g.config.WriterSetUserHeaderDataRate
 
 	// Remaining percentage goes to Put (before reads).
-	// Reads get ~15% as in original.
-	putEnd := 100 - 15 // Put ends where reads start
+	putEnd := 100 - g.config.WriterReadRate // Put ends where reads start
 
 	switch {
 	case choice < byte(deleteThreshold):
@@ -662,24 +561,24 @@ func (g *OpGenerator) nextWriterOp(seen [][]byte, phase Phase, allowed OpSet) Op
 	case choice < byte(closeThreshold):
 		return OpWriterClose{}
 	case choice < byte(setFlagsThreshold) && allowed.Contains(OpKindSetUserHeaderFlags):
-		return OpSetUserHeaderFlags{Flags: g.decoder.NextUint64()}
+		return OpSetUserHeaderFlags{Flags: g.stream.NextUint64()}
 	case choice < byte(setDataThreshold) && allowed.Contains(OpKindSetUserHeaderData):
 		return OpSetUserHeaderData{Data: g.nextUserData()}
 	case choice < byte(putEnd):
 		return OpPut{
 			Key:      g.genKey(seen),
-			Revision: g.decoder.NextInt64(),
+			Revision: g.stream.NextInt64(),
 			Index:    g.genIndex(),
 		}
 	default:
-		// Remaining ~15% is read ops.
+		// Remaining writer read budget is read ops.
 		return g.nextWriterReadOp(seen)
 	}
 }
 
 func (g *OpGenerator) nextWriterReadOp(seen [][]byte) Operation {
 	// Distribute among read ops: Get, Scan, ScanPrefix, ScanMatch, ScanRange.
-	choice := g.decoder.NextByte() % 100
+	choice := g.stream.NextByte() % 100
 
 	switch {
 	case choice < 35:
@@ -714,21 +613,21 @@ func (g *OpGenerator) nextWriterReadOp(seen [][]byte) Operation {
 // genKey generates a key with configurable invalid rate.
 func (g *OpGenerator) genKey(seen [][]byte) []byte {
 	keySize := g.options.KeySize
-	mode := g.decoder.NextByte()
+	mode := g.stream.NextByte()
 
 	// Invalid key rate.
-	invalidThreshold := byte(float64(256) * float64(g.config.InvalidKeyRate) / 100.0)
-	if mode < invalidThreshold {
-		if g.decoder.NextByte()&1 == 0 {
+	invalidThreshold := (256 * g.config.InvalidKeyRate) / 100
+	if int(mode) < invalidThreshold {
+		if g.stream.NextByte()&1 == 0 {
 			return nil
 		}
 		// Wrong length.
-		wrongLen := int(g.decoder.NextByte()) % (keySize + 2)
+		wrongLen := int(g.stream.NextByte()) % (keySize + 2)
 		if wrongLen == keySize {
 			wrongLen = keySize + 1
 		}
 
-		return g.decoder.NextBytes(wrongLen)
+		return g.stream.NextBytes(wrongLen)
 	}
 
 	// Reuse rate depends on how many keys we've seen.
@@ -742,22 +641,22 @@ func (g *OpGenerator) genKey(seen [][]byte) []byte {
 	}
 
 	if len(seen) > 0 && mode < reuseThreshold {
-		idx := int(g.decoder.NextByte()) % len(seen)
+		idx := int(g.stream.NextByte()) % len(seen)
 
 		return append([]byte(nil), seen[idx]...)
 	}
 
 	// New valid key.
 	if g.options.OrderedKeys {
-		nonMonoThreshold := byte(float64(256) * float64(100-g.config.NonMonotonicRate) / 100.0)
-		if mode < nonMonoThreshold {
+		nonMonoThreshold := (256 * (100 - g.config.NonMonotonicRate)) / 100
+		if int(mode) < nonMonoThreshold {
 			return g.nextOrderedKey(keySize)
 		}
 
 		return g.nextNonMonotonicOrderedKey(keySize)
 	}
 
-	return g.decoder.NextBytes(keySize)
+	return g.stream.NextBytes(keySize)
 }
 
 func (g *OpGenerator) nextOrderedKey(keySize int) []byte {
@@ -791,7 +690,7 @@ func (g *OpGenerator) nextNonMonotonicOrderedKey(keySize int) []byte {
 		return g.nextOrderedKey(keySize)
 	}
 
-	delta := min(uint32(g.decoder.NextByte()%16)+1, g.orderedCounter)
+	delta := min(uint32(g.stream.NextByte()%16)+1, g.orderedCounter)
 	base := g.orderedCounter - delta
 
 	key := make([]byte, keySize)
@@ -808,7 +707,7 @@ func (g *OpGenerator) nextNonMonotonicOrderedKey(keySize int) []byte {
 	copy(key[:4], tmp[:])
 
 	if keySize > 4 {
-		key[keySize-1] = g.decoder.NextByte() | 1
+		key[keySize-1] = g.stream.NextByte() | 1
 	}
 
 	return key
@@ -817,28 +716,28 @@ func (g *OpGenerator) nextNonMonotonicOrderedKey(keySize int) []byte {
 // genIndex generates an index with configurable invalid rate.
 func (g *OpGenerator) genIndex() []byte {
 	indexSize := g.options.IndexSize
-	mode := g.decoder.NextByte()
+	mode := g.stream.NextByte()
 
-	invalidThreshold := byte(float64(256) * float64(g.config.InvalidIndexRate) / 100.0)
-	if mode < invalidThreshold {
-		wrongLen := int(g.decoder.NextByte()) % (indexSize + 2)
+	invalidThreshold := (256 * g.config.InvalidIndexRate) / 100
+	if int(mode) < invalidThreshold {
+		wrongLen := int(g.stream.NextByte()) % (indexSize + 2)
 		if wrongLen == indexSize {
 			wrongLen = indexSize + 1
 		}
 
-		return g.decoder.NextBytes(wrongLen)
+		return g.stream.NextBytes(wrongLen)
 	}
 
-	return g.decoder.NextBytes(indexSize)
+	return g.stream.NextBytes(indexSize)
 }
 
 func (g *OpGenerator) derivePrefixFromKeys(seen [][]byte) []byte {
 	keySize := g.options.KeySize
-	mode := g.decoder.NextByte()
+	mode := g.stream.NextByte()
 
 	// ~20% invalid.
 	if mode < 52 {
-		invalidMode := int(g.decoder.NextByte()) % 3
+		invalidMode := int(g.stream.NextByte()) % 3
 		switch invalidMode {
 		case 1:
 			return []byte{}
@@ -850,25 +749,25 @@ func (g *OpGenerator) derivePrefixFromKeys(seen [][]byte) []byte {
 	}
 
 	if len(seen) > 0 {
-		idx := int(g.decoder.NextByte()) % len(seen)
+		idx := int(g.stream.NextByte()) % len(seen)
 		key := seen[idx]
-		prefixLen := 1 + (int(g.decoder.NextByte()) % keySize)
+		prefixLen := 1 + (int(g.stream.NextByte()) % keySize)
 
 		return append([]byte(nil), key[:prefixLen]...)
 	}
 
-	prefixLen := 1 + (int(g.decoder.NextByte()) % keySize)
+	prefixLen := 1 + (int(g.stream.NextByte()) % keySize)
 
-	return g.decoder.NextBytes(prefixLen)
+	return g.stream.NextBytes(prefixLen)
 }
 
 func (g *OpGenerator) nextPrefixSpec(seen [][]byte) slotcache.Prefix {
 	keySize := g.options.KeySize
-	mode := g.decoder.NextByte()
+	mode := g.stream.NextByte()
 
 	// ~20% invalid.
 	if mode < 52 {
-		invalidMode := int(g.decoder.NextByte()) % 5
+		invalidMode := int(g.stream.NextByte()) % 5
 		switch invalidMode {
 		case 0:
 			return slotcache.Prefix{Offset: keySize, Bits: 0, Bytes: []byte{0x00}}
@@ -883,19 +782,19 @@ func (g *OpGenerator) nextPrefixSpec(seen [][]byte) slotcache.Prefix {
 		}
 	}
 
-	keyOffset := int(g.decoder.NextByte()) % keySize
+	keyOffset := int(g.stream.NextByte()) % keySize
 	maxPrefixBytes := keySize - keyOffset
 
 	// 50% byte-aligned, 50% bit-granular.
-	if g.decoder.NextByte()&1 == 1 {
-		prefixLen := 1 + (int(g.decoder.NextByte()) % maxPrefixBytes)
+	if g.stream.NextByte()&1 == 1 {
+		prefixLen := 1 + (int(g.stream.NextByte()) % maxPrefixBytes)
 		prefixBytes := g.derivePrefixBytes(prefixLen, seen, keyOffset)
 
 		return slotcache.Prefix{Offset: keyOffset, Bits: 0, Bytes: prefixBytes}
 	}
 
 	maxBits := maxPrefixBytes * 8
-	prefixBits := 1 + (int(g.decoder.NextByte()) % maxBits)
+	prefixBits := 1 + (int(g.stream.NextByte()) % maxBits)
 	needBytes := (prefixBits + 7) / 8
 	prefixBytes := g.derivePrefixBytes(needBytes, seen, keyOffset)
 
@@ -903,8 +802,8 @@ func (g *OpGenerator) nextPrefixSpec(seen [][]byte) slotcache.Prefix {
 }
 
 func (g *OpGenerator) derivePrefixBytes(length int, seen [][]byte, keyOffset int) []byte {
-	if len(seen) > 0 && g.decoder.NextByte() < 192 {
-		idx := int(g.decoder.NextByte()) % len(seen)
+	if len(seen) > 0 && g.stream.NextByte() < 192 {
+		idx := int(g.stream.NextByte()) % len(seen)
 
 		key := seen[idx]
 		if keyOffset+length <= len(key) {
@@ -912,16 +811,16 @@ func (g *OpGenerator) derivePrefixBytes(length int, seen [][]byte, keyOffset int
 		}
 	}
 
-	return g.decoder.NextBytes(length)
+	return g.stream.NextBytes(length)
 }
 
 func (g *OpGenerator) nextRangeBound(seen [][]byte) []byte {
 	keySize := g.options.KeySize
-	mode := g.decoder.NextByte()
+	mode := g.stream.NextByte()
 
 	// ~10% invalid bounds.
 	if mode < 26 {
-		if g.decoder.NextByte()&1 == 0 {
+		if g.stream.NextByte()&1 == 0 {
 			return []byte{}
 		}
 
@@ -934,76 +833,76 @@ func (g *OpGenerator) nextRangeBound(seen [][]byte) []byte {
 	}
 
 	if len(seen) > 0 && mode < 200 {
-		idx := int(g.decoder.NextByte()) % len(seen)
+		idx := int(g.stream.NextByte()) % len(seen)
 		key := seen[idx]
-		length := 1 + (int(g.decoder.NextByte()) % keySize)
+		length := 1 + (int(g.stream.NextByte()) % keySize)
 
 		return append([]byte(nil), key[:length]...)
 	}
 
-	length := 1 + (int(g.decoder.NextByte()) % keySize)
+	length := 1 + (int(g.stream.NextByte()) % keySize)
 
-	return g.decoder.NextBytes(length)
+	return g.stream.NextBytes(length)
 }
 
 func (g *OpGenerator) nextFilterSpec(seen [][]byte) *FilterSpec {
 	// ~30% of scans get a filter.
-	if g.decoder.NextByte()%10 >= 3 {
+	if g.stream.NextByte()%10 >= 3 {
 		return nil
 	}
 
-	kind := FilterKind(g.decoder.NextByte() % 5)
+	kind := filterKind(g.stream.NextByte() % 5)
 	keySize := g.options.KeySize
 	indexSize := g.options.IndexSize
 
 	switch kind {
-	case FilterNone:
-		return &FilterSpec{Kind: FilterNone}
+	case filterNone:
+		return &FilterSpec{Kind: filterNone}
 
-	case FilterRevisionMask:
+	case filterRevisionMask:
 		masks := []int64{1, 3, 7, 15}
-		mask := masks[int(g.decoder.NextByte())%len(masks)]
-		want := int64(g.decoder.NextByte()) & mask
+		mask := masks[int(g.stream.NextByte())%len(masks)]
+		want := int64(g.stream.NextByte()) & mask
 
-		return &FilterSpec{Kind: FilterRevisionMask, Mask: mask, Want: want}
+		return &FilterSpec{Kind: filterRevisionMask, Mask: mask, Want: want}
 
-	case FilterIndexByteEq:
+	case filterIndexByteEq:
 		if indexSize <= 0 {
-			return &FilterSpec{Kind: FilterAll}
+			return &FilterSpec{Kind: filterAll}
 		}
 
-		offset := int(g.decoder.NextByte()) % indexSize
-		b := g.decoder.NextByte()
+		offset := int(g.stream.NextByte()) % indexSize
+		b := g.stream.NextByte()
 
-		return &FilterSpec{Kind: FilterIndexByteEq, Offset: offset, Byte: b}
+		return &FilterSpec{Kind: filterIndexByteEq, Offset: offset, Byte: b}
 
-	case FilterKeyPrefixEq:
+	case filterKeyPrefixEq:
 		maxPrefixLen := min(keySize, 4)
 		if maxPrefixLen <= 0 {
-			return &FilterSpec{Kind: FilterAll}
+			return &FilterSpec{Kind: filterAll}
 		}
 
-		prefixLen := 1 + int(g.decoder.NextByte())%maxPrefixLen
-		if len(seen) > 0 && g.decoder.NextByte() < 200 {
-			k := seen[int(g.decoder.NextByte())%len(seen)]
+		prefixLen := 1 + int(g.stream.NextByte())%maxPrefixLen
+		if len(seen) > 0 && g.stream.NextByte() < 200 {
+			k := seen[int(g.stream.NextByte())%len(seen)]
 
-			return &FilterSpec{Kind: FilterKeyPrefixEq, Prefix: append([]byte(nil), k[:prefixLen]...)}
+			return &FilterSpec{Kind: filterKeyPrefixEq, Prefix: append([]byte(nil), k[:prefixLen]...)}
 		}
 
-		return &FilterSpec{Kind: FilterKeyPrefixEq, Prefix: g.decoder.NextBytes(prefixLen)}
+		return &FilterSpec{Kind: filterKeyPrefixEq, Prefix: g.stream.NextBytes(prefixLen)}
 
 	default:
-		return &FilterSpec{Kind: FilterAll}
+		return &FilterSpec{Kind: filterAll}
 	}
 }
 
 func (g *OpGenerator) nextScanOpts() slotcache.ScanOptions {
-	mode := g.decoder.NextByte()
+	mode := g.stream.NextByte()
 
 	// Invalid rate.
-	invalidThreshold := byte(float64(256) * float64(g.config.InvalidScanOptsRate) / 100.0)
-	if mode < invalidThreshold {
-		if g.decoder.NextByte()&1 == 0 {
+	invalidThreshold := (256 * g.config.InvalidScanOptsRate) / 100
+	if int(mode) < invalidThreshold {
+		if g.stream.NextByte()&1 == 0 {
 			return slotcache.ScanOptions{Reverse: false, Offset: -1, Limit: 0}
 		}
 
@@ -1012,15 +911,15 @@ func (g *OpGenerator) nextScanOpts() slotcache.ScanOptions {
 
 	var offset, limit int
 	if g.config.SmallScanLimitBias {
-		offset = int(g.decoder.NextByte() % 5)
-		limit = int(g.decoder.NextByte() % 4) // 0..3 (0 = unlimited)
+		offset = int(g.stream.NextByte() % 5)
+		limit = int(g.stream.NextByte() % 4) // 0..3 (0 = unlimited)
 	} else {
-		offset = int(g.decoder.NextByte())
-		limit = int(g.decoder.NextByte())
+		offset = int(g.stream.NextByte())
+		limit = int(g.stream.NextByte())
 	}
 
 	return slotcache.ScanOptions{
-		Reverse: g.decoder.NextByte()&1 == 1,
+		Reverse: g.stream.NextByte()&1 == 1,
 		Offset:  offset,
 		Limit:   limit,
 	}
@@ -1031,7 +930,7 @@ func (g *OpGenerator) nextUserData() [slotcache.UserDataSize]byte {
 	var data [slotcache.UserDataSize]byte
 
 	for i := range data {
-		data[i] = g.decoder.NextByte()
+		data[i] = g.stream.NextByte()
 	}
 
 	return data

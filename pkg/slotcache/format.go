@@ -10,22 +10,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// =============================================================================
-// Platform detection
-// =============================================================================
-
-// isLittleEndian is true if the CPU uses little-endian byte order.
-// Computed once at package init time.
-var isLittleEndian = func() bool {
-	var x uint32 = 0x04030201
-
-	return *(*byte)(unsafe.Pointer(&x)) == 0x01
-}()
-
-// is64Bit is true if the architecture has 64-bit pointers.
-// Required for atomic 64-bit operations across processes.
-var is64Bit = unsafe.Sizeof(uintptr(0)) >= 8
-
 // pageSize is the system page size, used for aligning msync ranges.
 // macOS requires page-aligned ranges for msync.
 var pageSize = unix.Getpagesize()

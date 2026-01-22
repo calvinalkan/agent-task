@@ -514,7 +514,7 @@ func (writer *WriterModel) Commit() error {
 
 	finalOps := writer.finalOps()
 	if writer.wouldExceedCapacity() {
-		writer.closeByCommit()
+		writer.closeLocked()
 
 		return slotcache.ErrFull
 	}
@@ -522,13 +522,13 @@ func (writer *WriterModel) Commit() error {
 	if writer.Cache.File.OrderedKeys {
 		err := writer.applyOrdered(finalOps)
 		if err != nil {
-			writer.closeByCommit()
+			writer.closeLocked()
 
 			return err
 		}
 
 		writer.publishUserHeader()
-		writer.closeByCommit()
+		writer.closeLocked()
 
 		return nil
 	}
@@ -538,7 +538,7 @@ func (writer *WriterModel) Commit() error {
 	}
 
 	writer.publishUserHeader()
-	writer.closeByCommit()
+	writer.closeLocked()
 
 	return nil
 }
@@ -555,7 +555,7 @@ func (writer *WriterModel) publishUserHeader() {
 	}
 }
 
-func (writer *WriterModel) closeByCommit() {
+func (writer *WriterModel) closeLocked() {
 	writer.IsClosed = true
 	writer.ClosedByCommit = true
 	writer.BufferedOps = nil

@@ -64,7 +64,7 @@ Because `flock()` is per-process, it does **not** prevent multiple writers insid
 Decision:
 
 - Enforce “at most one active Writer per file per process” using a package-global registry keyed by `(device, inode)`.
-- `BeginWrite()` must consult this registry so concurrent goroutines / multiple Cache instances cannot acquire more than one writer for the same file.
+- `Writer()` must consult this registry so concurrent goroutines / multiple Cache instances cannot acquire more than one writer for the same file.
 
 ---
 
@@ -79,7 +79,7 @@ Decision:
 
 ## 6) Writer thread-safety
 
-- `BeginWrite()` is safe to call concurrently.
+- `Writer()` is safe to call concurrently.
 - Once acquired, a `Writer` is **not** goroutine-safe; callers must synchronize access.
 
 (Aligned with `pkg/slotcache/specs/003-semantics.md`.)
