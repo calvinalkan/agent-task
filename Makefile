@@ -13,6 +13,7 @@ GO := go
 build:
 	$(GO) build -o $(BINARY) ./cmd/tk
 	@[ -e ~/.local/bin/$(BINARY) ] || ln -sf $(CURDIR)/$(BINARY) ~/.local/bin/$(BINARY)
+	$(GO) build -o sloty ./cmd/sloty
 
 bench: build
 	$(GO) build -o tk-bench ./cmd/tk-bench
