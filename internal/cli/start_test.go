@@ -168,32 +168,31 @@ func TestStartWithInProgressParentSucceeds(t *testing.T) {
 	cli.AssertContains(t, content, "status: in_progress")
 }
 
-func TestStartWithClosedParentSucceeds(t *testing.T) {
+func Test_Start_Returns_Error_When_Blocker_Is_Open(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
-	parentID := c.MustRun("create", "Parent ticket")
+	blockerID := c.MustRun("create", "Blocker")
+	blockedID := c.MustRun("create", "Blocked")
+	c.MustRun("block", blockedID, blockerID)
 
-	// Start and close parent
-	c.MustRun("start", parentID)
-	c.MustRun("close", parentID)
+	stderr := c.MustFail("start", blockedID)
+	cli.AssertContains(t, stderr, "blocker")
+}
 
-	// Create child (with closed parent - this should fail at create)
-	// Actually, we need to create child before closing parent
-	// Let's test a different scenario: parent closed, child already exists
+func Test_Start_Succeeds_When_Blocker_Is_Closed(t *testing.T) {
+	t.Parallel()
 
-	// Create parent and child while parent is open
-	parentID2 := c.MustRun("create", "Parent ticket 2")
-	childID := c.MustRun("create", "Child ticket", "--parent", parentID2)
+	c := cli.NewCLI(t)
+	blockerID := c.MustRun("create", "Blocker")
+	blockedID := c.MustRun("create", "Blocked")
+	c.MustRun("block", blockedID, blockerID)
+	c.MustRun("start", blockerID)
+	c.MustRun("close", blockerID)
 
-	// Start parent
-	c.MustRun("start", parentID2)
+	c.MustRun("start", blockedID)
 
-	// Now start child (parent is in_progress)
-	c.MustRun("start", childID)
-
-	// Verify child is started
-	content := c.ReadTicket(childID)
+	content := c.ReadTicket(blockedID)
 	cli.AssertContains(t, content, "status: in_progress")
 }
 

@@ -26,7 +26,7 @@ func TestBlockCommand(t *testing.T) {
 			name:       "missing blocker ID returns error",
 			args:       []string{"block", "someid"},
 			wantExit:   1,
-			wantStderr: "blocker ID is required",
+			wantStderr: "ticket not found",
 		},
 		{
 			name:       "nonexistent ticket returns error",
@@ -62,6 +62,16 @@ func TestBlockNonexistentBlocker(t *testing.T) {
 
 	stderr := c.MustFail("block", ticketID, "nonexistent")
 	cli.AssertContains(t, stderr, "ticket not found")
+}
+
+func Test_Block_Returns_Error_When_Blocker_ID_Missing_For_Existing_Ticket(t *testing.T) {
+	t.Parallel()
+
+	c := cli.NewCLI(t)
+	ticketID := c.MustRun("create", "Test ticket")
+
+	stderr := c.MustFail("block", ticketID)
+	cli.AssertContains(t, stderr, "blocker ID is required")
 }
 
 func TestBlockSelf(t *testing.T) {

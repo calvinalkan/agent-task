@@ -74,17 +74,6 @@ func execCreate(io *IO, cfg *ticket.Config, fs *flag.FlagSet, args []string) err
 		return errInvalidPriority
 	}
 
-	blockedBy, _ := fs.GetStringArray("blocked-by")
-	for _, blocker := range blockedBy {
-		if blocker == "" {
-			return fmt.Errorf("%w: --blocked-by", errEmptyValue)
-		}
-
-		if !ticket.Exists(cfg.TicketDirAbs, blocker) {
-			return fmt.Errorf("%w: %s", errInvalidBlocker, blocker)
-		}
-	}
-
 	parent, _ := fs.GetString("parent")
 	if parent != "" {
 		if !ticket.Exists(cfg.TicketDirAbs, parent) {
@@ -102,6 +91,25 @@ func execCreate(io *IO, cfg *ticket.Config, fs *flag.FlagSet, args []string) err
 		if parentStatus == ticket.StatusClosed {
 			return fmt.Errorf("%w: %s", errParentClosed, parent)
 		}
+	}
+
+	blockedBy, _ := fs.GetStringArray("blocked-by")
+	seenBlockers := make(map[string]bool)
+
+	for _, blocker := range blockedBy {
+		if blocker == "" {
+			return fmt.Errorf("%w: --blocked-by", errEmptyValue)
+		}
+
+		if !ticket.Exists(cfg.TicketDirAbs, blocker) {
+			return fmt.Errorf("%w: %s", errInvalidBlocker, blocker)
+		}
+
+		if seenBlockers[blocker] {
+			return fmt.Errorf("duplicate blocker: %s", blocker)
+		}
+
+		seenBlockers[blocker] = true
 	}
 
 	description, _ := fs.GetString("description")

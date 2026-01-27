@@ -383,17 +383,14 @@ func TestReadyBlockedByNonExistent(t *testing.T) {
 
 	stdout, stderr, exitCode := c.Run("ready")
 
-	// External frontmatter edits do not invalidate the cache; ready trusts cache.
-	if got, want := exitCode, 0; got != want {
+	// External frontmatter edits should surface warnings and exit 1.
+	if got, want := exitCode, 1; got != want {
 		t.Errorf("exitCode=%d, want=%d", got, want)
 	}
 
-	// Ticket should still be ready
-	cli.AssertContains(t, stdout, ticketID)
-
-	if got, want := stderr, ""; got != want {
-		t.Errorf("stderr=%q, want=%q", got, want)
-	}
+	// Ticket should not be ready.
+	cli.AssertNotContains(t, stdout, ticketID)
+	cli.AssertContains(t, stderr, "blocked by non-existent ticket")
 }
 
 func TestReadySortByPriority(t *testing.T) {
@@ -679,8 +676,8 @@ func TestReadyParentCheckAfterCacheRegen(t *testing.T) {
 	cachePath := filepath.Join(c.TicketDir(), ".cache")
 	_ = os.Remove(cachePath)
 
-	// Child should now be ready
+	// Parent is in_progress; child should now be ready.
 	stdout := c.MustRun("ready")
-	cli.AssertTicketListed(t, stdout, childID)
 	cli.AssertTicketNotListed(t, stdout, parentID) // in_progress
+	cli.AssertTicketListed(t, stdout, childID)
 }

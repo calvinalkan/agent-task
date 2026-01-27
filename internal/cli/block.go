@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/calvinalkan/agent-task/internal/ticket"
 
@@ -29,15 +30,31 @@ func execBlock(io *IO, cfg *ticket.Config, args []string) error {
 		return ticket.ErrIDRequired
 	}
 
+	ticketID := args[0]
+
+	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
+		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
+	}
+
+	path := ticket.Path(cfg.TicketDirAbs, ticketID)
+
+	status, statusErr := ticket.ReadTicketStatus(path)
+	if statusErr != nil {
+		return fmt.Errorf("reading status: %w", statusErr)
+	}
+
+	if status == ticket.StatusClosed {
+		return ticket.ErrTicketAlreadyClosed
+	}
+
 	if len(args) < 2 {
 		return ticket.ErrBlockerIDRequired
 	}
 
-	ticketID := args[0]
 	blockerID := args[1]
 
-	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
-		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
+	if blockerID == "" {
+		return ticket.ErrBlockerIDRequired
 	}
 
 	if !ticket.Exists(cfg.TicketDirAbs, blockerID) {
@@ -48,7 +65,15 @@ func execBlock(io *IO, cfg *ticket.Config, args []string) error {
 		return ticket.ErrCannotBlockSelf
 	}
 
-	path := ticket.Path(cfg.TicketDirAbs, ticketID)
+	cycle, cycleErr := blockerCyclePath(cfg.TicketDirAbs, ticketID, blockerID)
+	if cycleErr != nil {
+		return fmt.Errorf("check blocker cycle: %w", cycleErr)
+	}
+
+	if cycle != nil {
+		// Keep the error message aligned with the spec model for behavior tests.
+		return fmt.Errorf("blocker cycle detected: %s", formatCyclePath(cycle))
+	}
 
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		blockedBy, readErr := ticket.GetBlockedByFromContent(content)
@@ -81,4 +106,55 @@ func execBlock(io *IO, cfg *ticket.Config, args []string) error {
 	io.Println("Blocked", ticketID, "by", blockerID)
 
 	return nil
+}
+
+// blockerCyclePath returns the cycle path if adding "ticketID blocked by blockerID"
+// would create a cycle. This mirrors the spec model so behavior tests stay aligned.
+func blockerCyclePath(ticketDir, ticketID, blockerID string) ([]string, error) {
+	visited := make(map[string]bool)
+
+	path, err := findBlockerPath(ticketDir, blockerID, ticketID, visited)
+	if err != nil {
+		return nil, err
+	}
+
+	if path == nil {
+		return nil, nil
+	}
+
+	return append([]string{ticketID}, path...), nil
+}
+
+func findBlockerPath(ticketDir, from, target string, visited map[string]bool) ([]string, error) {
+	if visited[from] {
+		return nil, nil
+	}
+
+	visited[from] = true
+
+	if from == target {
+		return []string{target}, nil
+	}
+
+	blockedBy, err := ticket.ReadTicketBlockedBy(ticket.Path(ticketDir, from))
+	if err != nil {
+		return nil, fmt.Errorf("reading blocked-by for %s: %w", from, err)
+	}
+
+	for _, blockerID := range blockedBy {
+		path, pathErr := findBlockerPath(ticketDir, blockerID, target, visited)
+		if pathErr != nil {
+			return nil, pathErr
+		}
+
+		if path != nil {
+			return append([]string{from}, path...), nil
+		}
+	}
+
+	return nil, nil
+}
+
+func formatCyclePath(path []string) string {
+	return strings.Join(path, " -> ")
 }

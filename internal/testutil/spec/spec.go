@@ -891,7 +891,7 @@ func (m *Model) findPathTo(from, target string, visited map[string]bool) []strin
 //   - ticket is not Open
 //   - ticket has open blockers
 //   - parent is Open (must start parent first)
-//   - any ancestor has open blockers
+//   - any ancestor has open blockers (ancestor status doesn't matter once parent is started)
 func (m *Model) canStart(tk *Ticket) *Error {
 	if tk.Status != StatusOpen {
 		return newErr(ErrCantStartNotOpen, kv("id", tk.ID), kv("status", string(tk.Status)))
@@ -914,14 +914,34 @@ func (m *Model) canStart(tk *Ticket) *Error {
 		return newErr(ErrParentNotStarted, kv("id", tk.ID), kv("parent_id", tk.ParentID))
 	}
 
-	// Recursively check parent can start (which checks parent's blockers and ancestors)
-	err := m.canStart(parent)
-	if err != nil {
-		// Wrap with context that it's an ancestor issue
-		return newErr(ErrAncestorNotReady, kv("id", tk.ID), kv("ancestor_id", parent.ID))
+	// Once parent is started or closed, ensure ancestors are unblocked.
+	if ancestor := m.findAncestorWithOpenBlocker(parent, make(map[string]bool)); ancestor != nil {
+		return newErr(ErrAncestorNotReady, kv("id", tk.ID), kv("ancestor_id", ancestor.ID))
 	}
 
 	return nil
+}
+
+// findAncestorWithOpenBlocker returns the first ancestor (including start node)
+// that has an open blocker. Status is ignored here; only blockers matter.
+func (m *Model) findAncestorWithOpenBlocker(tk *Ticket, visited map[string]bool) *Ticket {
+	if visited[tk.ID] {
+		return tk
+	}
+
+	visited[tk.ID] = true
+
+	if blocker := m.findOpenBlocker(tk); blocker != "" {
+		return tk
+	}
+
+	if tk.ParentID == "" {
+		return nil
+	}
+
+	parent := m.tickets[tk.ParentID]
+
+	return m.findAncestorWithOpenBlocker(parent, visited)
 }
 
 // findOpenBlocker returns the ID of the first blocker that is not closed.

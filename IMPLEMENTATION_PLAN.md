@@ -626,6 +626,7 @@ Get(id)
 - `Query()` reads SQLite and may be stale if files are edited outside tk.
 - SQLite stores `mtime_ns` for each ticket to help detect staleness.
 - The primary remediation is an explicit `tk rebuild` (full reindex).
+- Treat externally edited frontmatter that introduces invalid references (e.g., missing blockers/parents) as errors (warn + non-ready).
 - Optional future: file watcher to trigger rebuild/refresh.
 - Optional future: per-result mtime verification for queries.
 

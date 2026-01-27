@@ -15,7 +15,15 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
-const fieldPriority = "priority"
+const (
+	fieldID       = "id"
+	fieldPriority = "priority"
+	fieldStatus   = "status"
+	fieldType     = "type"
+	fieldTitle    = "title"
+	fieldParent   = "parent"
+	fieldCreated  = "created"
+)
 
 // ReadyCmd returns the ready command.
 func ReadyCmd(cfg *ticket.Config) *Command {
@@ -117,7 +125,7 @@ func execReady(io *IO, cfg *ticket.Config, jsonOutput bool, limit int, field str
 
 func isValidReadyField(field string) bool {
 	switch field {
-	case "id", fieldPriority, "status", "type", "title", "parent", "created":
+	case fieldID, fieldPriority, fieldStatus, fieldType, fieldTitle, fieldParent, fieldCreated:
 		return true
 	default:
 		return false
@@ -126,19 +134,19 @@ func isValidReadyField(field string) bool {
 
 func getFieldValue(summary *ticket.Summary, field string) string {
 	switch field {
-	case "id":
+	case fieldID:
 		return summary.ID
 	case fieldPriority:
 		return strconv.Itoa(summary.Priority)
-	case "status":
+	case fieldStatus:
 		return summary.Status
-	case "type":
+	case fieldType:
 		return summary.Type
-	case "title":
+	case fieldTitle:
 		return summary.Title
-	case "parent":
+	case fieldParent:
 		return summary.Parent
-	case "created":
+	case fieldCreated:
 		return summary.Created
 	default:
 		return ""
@@ -225,11 +233,12 @@ type readyCheckResult struct {
 
 // filterReadyTickets builds status map and returns ready tickets.
 func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarning) {
-	statusMap := make(map[string]string)
+	summaryMap := make(map[string]*ticket.Summary)
 
-	var candidates []*ticket.Summary
-
-	var allWarnings []readyWarning
+	var (
+		candidates  []*ticket.Summary
+		allWarnings []readyWarning
+	)
 
 	for _, result := range results {
 		if result.Err != nil {
@@ -241,10 +250,21 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 			continue
 		}
 
-		statusMap[result.Summary.ID] = result.Summary.Status
+		summary, parseErr := ticket.ParseTicketFrontmatter(result.Path)
+		if parseErr != nil {
+			allWarnings = append(allWarnings, readyWarning{
+				issue:  fmt.Sprintf("%s: %v", result.Path, parseErr),
+				action: "fix the ticket file or delete it if invalid",
+			})
 
-		if result.Summary.Status == ticket.StatusOpen {
-			candidates = append(candidates, result.Summary)
+			continue
+		}
+
+		s := summary
+		summaryMap[s.ID] = &s
+
+		if s.Status == ticket.StatusOpen {
+			candidates = append(candidates, &s)
 		}
 	}
 
@@ -262,7 +282,7 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 		go func(resultIdx int, s *ticket.Summary) {
 			defer waitGroup.Done()
 
-			isReady, warnings := checkTicketReady(s, statusMap)
+			isReady, warnings := checkTicketReady(s, summaryMap)
 			checkResults[resultIdx] = readyCheckResult{
 				summary:  s,
 				isReady:  isReady,
@@ -286,47 +306,112 @@ func filterReadyTickets(results []ticket.Result) ([]*ticket.Summary, []readyWarn
 	return ready, allWarnings
 }
 
-// checkTicketReady checks if a ticket can be started (blockers resolved, parent started).
-func checkTicketReady(summary *ticket.Summary, statusMap map[string]string) (bool, []readyWarning) {
+// checkTicketReady checks if a ticket can be started (blockers resolved, ancestors startable).
+func checkTicketReady(summary *ticket.Summary, summaryMap map[string]*ticket.Summary) (bool, []readyWarning) {
+	visited := make(map[string]bool)
+
+	return canStartFromSummary(summary, summaryMap, visited)
+}
+
+func canStartFromSummary(summary *ticket.Summary, summaryMap map[string]*ticket.Summary, visited map[string]bool) (bool, []readyWarning) {
+	if visited[summary.ID] {
+		return false, []readyWarning{{
+			issue:  "ancestor cycle detected at " + summary.ID,
+			action: "remove the parent reference creating the cycle",
+		}}
+	}
+
+	visited[summary.ID] = true
+
+	if summary.Status != ticket.StatusOpen {
+		return false, nil
+	}
+
 	var warnings []readyWarning
 
-	// Check blockers are all closed
 	for _, blockerID := range summary.BlockedBy {
-		status, exists := statusMap[blockerID]
-
+		blocker, exists := summaryMap[blockerID]
 		if !exists {
 			warnings = append(warnings, readyWarning{
-				issue: fmt.Sprintf("%s blocked by non-existent ticket %s (treating as resolved)",
-					summary.ID, blockerID),
+				issue:  fmt.Sprintf("%s blocked by non-existent ticket %s", summary.ID, blockerID),
 				action: "remove the blocker reference or create the missing ticket",
 			})
 
-			continue
+			return false, warnings
 		}
 
-		if status != ticket.StatusClosed {
+		if blocker.Status != ticket.StatusClosed {
 			return false, warnings
 		}
 	}
 
-	// Check parent is started (not open)
-	if summary.Parent != "" {
-		parentStatus, exists := statusMap[summary.Parent]
+	if summary.Parent == "" {
+		return true, warnings
+	}
 
+	parent, exists := summaryMap[summary.Parent]
+	if !exists {
+		warnings = append(warnings, readyWarning{
+			issue:  fmt.Sprintf("%s has non-existent parent %s", summary.ID, summary.Parent),
+			action: "remove the parent reference or create the missing ticket",
+		})
+
+		return false, warnings
+	}
+
+	if parent.Status == ticket.StatusOpen {
+		return false, warnings
+	}
+
+	ancestorReady, parentWarnings := ancestorUnblocked(parent, summaryMap, make(map[string]bool))
+	warnings = append(warnings, parentWarnings...)
+
+	return ancestorReady, warnings
+}
+
+func ancestorUnblocked(summary *ticket.Summary, summaryMap map[string]*ticket.Summary, visited map[string]bool) (bool, []readyWarning) {
+	if visited[summary.ID] {
+		return false, []readyWarning{{
+			issue:  "ancestor cycle detected at " + summary.ID,
+			action: "remove the parent reference creating the cycle",
+		}}
+	}
+
+	visited[summary.ID] = true
+
+	var warnings []readyWarning
+
+	for _, blockerID := range summary.BlockedBy {
+		blocker, exists := summaryMap[blockerID]
 		if !exists {
 			warnings = append(warnings, readyWarning{
-				issue: fmt.Sprintf("%s has non-existent parent %s (treating as no parent)",
-					summary.ID, summary.Parent),
-				action: "remove the parent reference or create the missing ticket",
+				issue:  fmt.Sprintf("%s blocked by non-existent ticket %s", summary.ID, blockerID),
+				action: "remove the blocker reference or create the missing ticket",
 			})
-		} else if parentStatus != ticket.StatusInProgress {
-			// Parent must be in_progress for child to be startable
-			// (Parent can't be closed while child is open - we enforce this)
+
+			return false, warnings
+		}
+
+		if blocker.Status != ticket.StatusClosed {
 			return false, warnings
 		}
 	}
 
-	return true, warnings
+	if summary.Parent == "" {
+		return true, warnings
+	}
+
+	parent, exists := summaryMap[summary.Parent]
+	if !exists {
+		warnings = append(warnings, readyWarning{
+			issue:  fmt.Sprintf("%s has non-existent parent %s", summary.ID, summary.Parent),
+			action: "remove the parent reference or create the missing ticket",
+		})
+
+		return false, warnings
+	}
+
+	return ancestorUnblocked(parent, summaryMap, visited)
 }
 
 func formatReadyLine(summary *ticket.Summary) string {

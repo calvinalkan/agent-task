@@ -28,18 +28,28 @@ func execUnblock(io *IO, cfg *ticket.Config, args []string) error {
 		return ticket.ErrIDRequired
 	}
 
-	if len(args) < 2 {
-		return ticket.ErrBlockerIDRequired
-	}
-
 	ticketID := args[0]
-	blockerID := args[1]
 
 	if !ticket.Exists(cfg.TicketDirAbs, ticketID) {
 		return fmt.Errorf("%w: %s", ticket.ErrTicketNotFound, ticketID)
 	}
 
 	path := ticket.Path(cfg.TicketDirAbs, ticketID)
+
+	status, statusErr := ticket.ReadTicketStatus(path)
+	if statusErr != nil {
+		return fmt.Errorf("reading status: %w", statusErr)
+	}
+
+	if status == ticket.StatusClosed {
+		return ticket.ErrTicketAlreadyClosed
+	}
+
+	if len(args) < 2 {
+		return ticket.ErrBlockerIDRequired
+	}
+
+	blockerID := args[1]
 
 	err := ticket.WithTicketLock(path, func(content []byte) ([]byte, error) {
 		blockedBy, readErr := ticket.GetBlockedByFromContent(content)

@@ -85,6 +85,14 @@ const maxSuffixLength = 4
 func GenerateUniqueID(ticketDir string) (string, error) {
 	base := GenerateID()
 
+	return generateUniqueIDFromBase(ticketDir, base)
+}
+
+func generateUniqueIDFromBase(ticketDir, base string) (string, error) {
+	if base == "" {
+		return "", ErrIDGenerationFailed
+	}
+
 	// Try base ID first
 	if !Exists(ticketDir, base) {
 		return base, nil
@@ -270,9 +278,9 @@ func WriteTicketAtomic(ticketDir string, ticket *Ticket) (string, string, error)
 		// Inside lock: find unique ID (base or with suffix)
 		var genErr error
 
-		ticketID, genErr = GenerateUniqueID(ticketDir)
+		ticketID, genErr = generateUniqueIDFromBase(ticketDir, baseID)
 		if genErr != nil {
-			return fmt.Errorf("generting unique id: %w", genErr)
+			return fmt.Errorf("generating unique id: %w", genErr)
 		}
 
 		ticket.ID = ticketID
