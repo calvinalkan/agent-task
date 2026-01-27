@@ -13,6 +13,9 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
+const statusOpen = "open"
+const statusClosed = "closed"
+
 func TestLsCommand(t *testing.T) {
 	t.Parallel()
 
@@ -38,7 +41,7 @@ func TestLsCommand(t *testing.T) {
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
 				createTestTicket(t, ticketDir, "test-001", statusOpen, "First ticket", nil)
-				createTestTicket(t, ticketDir, "test-002", "closed", "Second ticket", nil)
+				createTestTicket(t, ticketDir, "test-002", statusClosed, "Second ticket", nil)
 			},
 			args:       []string{"ls"},
 			wantExit:   0,
@@ -49,7 +52,7 @@ func TestLsCommand(t *testing.T) {
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
 				createTestTicket(t, ticketDir, "test-001", statusOpen, "Open ticket", nil)
-				createTestTicket(t, ticketDir, "test-002", "closed", "Closed ticket", nil)
+				createTestTicket(t, ticketDir, "test-002", statusClosed, "Closed ticket", nil)
 			},
 			args:       []string{"ls", "--status=open"},
 			wantExit:   0,
@@ -61,7 +64,7 @@ func TestLsCommand(t *testing.T) {
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
 				createTestTicket(t, ticketDir, "test-001", statusOpen, "Open ticket", nil)
-				createTestTicket(t, ticketDir, "test-002", "closed", "Closed ticket", nil)
+				createTestTicket(t, ticketDir, "test-002", statusClosed, "Closed ticket", nil)
 			},
 			args:       []string{"ls", "--status=closed"},
 			wantExit:   0,
@@ -124,7 +127,7 @@ func TestLsCommand(t *testing.T) {
 				t.Helper()
 				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "bug", 1, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-002", statusOpen, "No Match", "bug", 2, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-003", "closed", "No Match", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-003", statusClosed, "No Match", "bug", 1, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-004", statusOpen, "No Match", "feature", 1, nil)
 			},
 			args:       []string{"ls", "--status=open", "--priority=1", "--type=bug"},
@@ -137,7 +140,7 @@ func TestLsCommand(t *testing.T) {
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
 				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "task", 1, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-002", "closed", "Wrong Status", "task", 1, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-002", statusClosed, "Wrong Status", "task", 1, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-003", statusOpen, "Wrong Priority", "task", 2, nil)
 			},
 			args:       []string{"ls", "--status=open", "--priority=1"},
@@ -150,7 +153,7 @@ func TestLsCommand(t *testing.T) {
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
 				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "bug", 2, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-002", "closed", "Wrong Status", "bug", 2, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-002", statusClosed, "Wrong Status", "bug", 2, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-003", statusOpen, "Wrong Type", "feature", 2, nil)
 			},
 			args:       []string{"ls", "--status=open", "--type=bug"},
@@ -175,8 +178,8 @@ func TestLsCommand(t *testing.T) {
 			name: "filter no matches",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "a-001", "closed", "Closed", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "b-002", statusOpen, "Open", "feature", 2, nil)
+				createTestTicketFull(t, ticketDir, "a-001", statusClosed, statusClosed, "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "b-002", statusOpen, statusOpen, "feature", 2, nil)
 			},
 			args:       []string{"ls", "--status=open", "--priority=1", "--type=bug"},
 			wantExit:   0,
@@ -200,7 +203,7 @@ func TestLsCommand(t *testing.T) {
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
 				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "The One", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "a-002", "closed", "Nope", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "a-002", statusClosed, "Nope", "bug", 1, nil)
 				createTestTicketFull(t, ticketDir, "b-003", statusOpen, "Nope", "feature", 1, nil)
 				createTestTicketFull(t, ticketDir, "c-004", statusOpen, "Nope", "bug", 2, nil)
 			},
@@ -213,7 +216,7 @@ func TestLsCommand(t *testing.T) {
 			name: "filter single ticket no match",
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
-				createTestTicketFull(t, ticketDir, "a-001", "closed", "Closed", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "a-001", statusClosed, statusClosed, "bug", 1, nil)
 			},
 			args:       []string{"ls", "--status=open"},
 			wantExit:   0,
@@ -640,7 +643,7 @@ func TestLsIgnoresSubdirectories(t *testing.T) {
 	createTestTicket(t, c.TicketDir(), "test-001", statusOpen, "Valid ticket", nil)
 
 	// Create a ticket in subdirectory (should be ignored)
-	createTestTicket(t, subDir, "archived-001", "closed", "Archived ticket", nil)
+	createTestTicket(t, subDir, "archived-001", statusClosed, "Archived ticket", nil)
 
 	stdout := c.MustRun("ls")
 
@@ -836,7 +839,7 @@ func TestLsLimitWithStatusFilter(t *testing.T) {
 
 	// Create mixed status tickets
 	createTestTicket(t, c.TicketDir(), "a-001", statusOpen, "Open 1", nil)
-	createTestTicket(t, c.TicketDir(), "b-002", "closed", "Closed 1", nil)
+	createTestTicket(t, c.TicketDir(), "b-002", statusClosed, "Closed 1", nil)
 	createTestTicket(t, c.TicketDir(), "c-003", statusOpen, "Open 2", nil)
 	createTestTicket(t, c.TicketDir(), "d-004", statusOpen, "Open 3", nil)
 
@@ -1003,7 +1006,7 @@ func TestLsCacheWithStatusFilter(t *testing.T) {
 
 	// Create mixed status tickets
 	createTestTicket(t, c.TicketDir(), "a-001", statusOpen, "Open 1", nil)
-	createTestTicket(t, c.TicketDir(), "b-002", "closed", "Closed 1", nil)
+	createTestTicket(t, c.TicketDir(), "b-002", statusClosed, "Closed 1", nil)
 	createTestTicket(t, c.TicketDir(), "c-003", statusOpen, "Open 2", nil)
 
 	// Run with status filter
@@ -1033,7 +1036,7 @@ func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
 			setup: func(t *testing.T, ticketDir string) {
 				t.Helper()
 				createTestTicketFull(t, ticketDir, "a-001", statusOpen, "Open 1", "bug", 1, nil)
-				createTestTicketFull(t, ticketDir, "b-002", "closed", "Closed 1", "task", 2, nil)
+				createTestTicketFull(t, ticketDir, "b-002", statusClosed, "Closed 1", "task", 2, nil)
 				createTestTicketFull(t, ticketDir, "c-003", statusOpen, "Open 2", "feature", 3, nil)
 			},
 		},
@@ -1044,7 +1047,7 @@ func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
 				t.Helper()
 				createTestTicketFull(t, ticketDir, "a-001", statusOpen, "P1", "bug", 1, nil)
 				createTestTicketFull(t, ticketDir, "b-002", statusOpen, "P2", "task", 2, nil)
-				createTestTicketFull(t, ticketDir, "c-003", "closed", "P1", "feature", 1, nil)
+				createTestTicketFull(t, ticketDir, "c-003", statusClosed, "P1", "feature", 1, nil)
 			},
 		},
 		{
@@ -1064,7 +1067,7 @@ func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
 				t.Helper()
 				createTestTicketFull(t, ticketDir, "match-001", statusOpen, "Match", "bug", 1, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-002", statusOpen, "Wrong Priority", "bug", 2, nil)
-				createTestTicketFull(t, ticketDir, "nomatch-003", "closed", "Wrong Status", "bug", 1, nil)
+				createTestTicketFull(t, ticketDir, "nomatch-003", statusClosed, "Wrong Status", "bug", 1, nil)
 				createTestTicketFull(t, ticketDir, "nomatch-004", statusOpen, "Wrong Type", "feature", 1, nil)
 				createTestTicketFull(t, ticketDir, "match-005", statusOpen, "Match 2", "bug", 1, nil)
 			},
@@ -1107,7 +1110,7 @@ func TestLsBitmapStaleCacheHandling(t *testing.T) {
 	c.MustRun("ls", "--status=open")
 
 	// Modify first ticket to closed (dir mtime unchanged, cache not invalidated)
-	createTestTicketFull(t, c.TicketDir(), "a-001", "closed", "Closed Bug", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusClosed, "Closed Bug", "bug", 1, nil)
 
 	// Second run - should still show cached entry (dir mtime unchanged)
 	stdout := c.MustRun("ls", "--status=open")
@@ -1165,7 +1168,7 @@ func TestLsBitmapBoundary64Tickets(t *testing.T) {
 
 		status := statusOpen
 		if i >= 32 {
-			status = "closed"
+			status = statusClosed
 		}
 
 		createTestTicketFull(t, c.TicketDir(), id, status, "Title", "task", 2, nil)
@@ -1200,7 +1203,7 @@ func TestLsBitmapBoundary65Tickets(t *testing.T) {
 
 		status := statusOpen
 		if i%2 == 0 {
-			status = "closed"
+			status = statusClosed
 		}
 
 		createTestTicketFull(t, th.TicketDir(), id, status, "Title", "task", 2, nil)
@@ -1293,13 +1296,13 @@ func TestLsBitmapPaginationColdVsHot(t *testing.T) {
 	// Create 10 open tickets
 	for i := range 10 {
 		id := fmt.Sprintf("t-%03d", i)
-		createTestTicketFull(t, c.TicketDir(), id, statusOpen, "Open", "bug", 1, nil)
+		createTestTicketFull(t, c.TicketDir(), id, statusOpen, statusOpen, "bug", 1, nil)
 	}
 
 	// Create 5 closed tickets
 	for i := 10; i < 15; i++ {
 		id := fmt.Sprintf("t-%03d", i)
-		createTestTicketFull(t, c.TicketDir(), id, "closed", "Closed", "bug", 1, nil)
+		createTestTicketFull(t, c.TicketDir(), id, statusClosed, statusClosed, "bug", 1, nil)
 	}
 
 	for _, tt := range []struct {
@@ -1334,14 +1337,14 @@ func TestLsBitmapStaleStatusChangedNowMatches(t *testing.T) {
 
 	c := cli.NewCLI(t)
 
-	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, "Open", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "a-001", statusOpen, statusOpen, "bug", 1, nil)
 	createTestTicketFull(t, c.TicketDir(), "b-002", statusOpen, "Will Close", "bug", 1, nil)
 
 	// Build cache with open filter
 	c.MustRun("ls", "--status=open")
 
 	// Modify b-002 to closed (dir mtime unchanged, cache not invalidated)
-	createTestTicketFull(t, c.TicketDir(), "b-002", "closed", "Now Closed", "bug", 1, nil)
+	createTestTicketFull(t, c.TicketDir(), "b-002", statusClosed, "Now Closed", "bug", 1, nil)
 
 	// Query for closed - cache should NOT include b-002 (external status change not detected)
 	stdout := c.MustRun("ls", "--status=closed")
@@ -1446,7 +1449,7 @@ func TestLsRootsWithStatusFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, childID)
 
 	// Filter by roots and closed status
-	stdout = c.MustRun("ls", "--roots", "--status", "closed")
+	stdout = c.MustRun("ls", "--roots", "--status", statusClosed)
 	cli.AssertTicketListed(t, stdout, closedRootID)
 	cli.AssertTicketNotListed(t, stdout, openRootID)
 }
@@ -1560,7 +1563,7 @@ func TestLsParentWithStatusFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, closedChildID)
 
 	// Filter by parent AND status=closed
-	stdout = c.MustRun("ls", "--parent", parentID, "--status", "closed")
+	stdout = c.MustRun("ls", "--parent", parentID, "--status", statusClosed)
 	cli.AssertTicketListed(t, stdout, closedChildID)
 	cli.AssertTicketNotListed(t, stdout, openChildID)
 }

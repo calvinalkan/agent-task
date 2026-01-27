@@ -277,6 +277,8 @@ func (g *OpGenerator) genTitle() string {
 		"Fix typo",
 		"Add logging",
 		"Improve perf",
+		"A",
+		"Refactor the code base",
 	}
 
 	return titles[g.stream.NextInt(len(titles))]

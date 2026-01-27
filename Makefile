@@ -5,7 +5,7 @@ MAKEFLAGS += --warn-undefined-variables --no-builtin-rules -j
 .DELETE_ON_ERROR:
 .DEFAULT_GOAL := build
 
-.PHONY: build test lint clean install vet install-tools check modernize bench fmt fuzz fuzz-slotcache fuzz-cli fuzz-fs
+.PHONY: build test lint clean install vet install-tools check modernize bench fmt fuzz fuzz-cli fuzz-fs
 
 BINARY := tk
 GO := go
@@ -13,7 +13,6 @@ GO := go
 build:
 	$(GO) build -o $(BINARY) ./cmd/tk
 	@[ -e ~/.local/bin/$(BINARY) ] || ln -sf $(CURDIR)/$(BINARY) ~/.local/bin/$(BINARY)
-	$(GO) build -o sloty ./cmd/sloty
 
 bench: build
 	$(GO) build -o tk-bench ./cmd/tk-bench
@@ -55,7 +54,6 @@ check: vet lint test
 # Fuzz testing - Go can only run one fuzz test at a time
 # Usage:
 #   make fuzz                    # run all fuzz tests (10s each)
-#   make fuzz-slotcache          # run slotcache fuzz tests only
 #   make fuzz-cli                # run cli fuzz tests only
 #   make fuzz-fs                 # run fs fuzz tests only
 #   make fuzz FUZZ_TIME=30s      # run all fuzz tests (30s each)
@@ -76,13 +74,10 @@ define run_fuzz_tests
 	fi
 endef
 
-fuzz-slotcache:
-	$(call run_fuzz_tests,./pkg/slotcache,./pkg/slotcache/*_test.go)
-
 fuzz-cli:
 	$(call run_fuzz_tests,./internal/cli,./internal/cli/*_test.go)
 
 fuzz-fs:
 	$(call run_fuzz_tests,./pkg/fs,./pkg/fs/*_test.go)
 
-fuzz: fuzz-slotcache fuzz-cli fuzz-fs
+fuzz: fuzz-cli fuzz-fs

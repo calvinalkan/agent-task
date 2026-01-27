@@ -16,6 +16,8 @@ Key outcomes:
 - CLI commands become thin wrappers around a single store API.
 - External edits are handled via `rebuild` (optional watcher later).
 
+Importat: We do **not** support windows. We assume a POSIX-like filesystem and linux/unix. Dont add conditionals for windows in tests nor in the codebase.
+
 ---
 
 ## 1. Decisions (Locked In)
@@ -23,7 +25,7 @@ Key outcomes:
 - **Markdown is authoritative**. SQLite is derived only.
 - **Writes never consult SQLite** (filesystem is the source of truth).
 - **SQLite driver**: `github.com/mattn/go-sqlite3` (CGO).
-- **IDs are UUIDv7** (internal generator; no new dependency).
+- **IDs are UUIDv7** (`github.com/google/uuid` v1.6+).
 - **short_id**: base32 (Crockford) derived from UUIDv7 random bits; length **12**.
 - **Canonical path**: `.tickets/YYYY/MM-DD/<short_id>.md`.
 - **Frontmatter**:
@@ -95,7 +97,7 @@ Writers take **exclusive** lock on `.tickets/.tk/wal`.
 
 ### 4.1 IDs and short_id
 - Generate **UUIDv7** for `id`.
-- Derive **short_id** (base32 Crockford, 12 chars) from UUIDv7 random bits.
+- Derive **short_id** (base32 Crockford, first 12 chars) from UUIDv7 random bits.
 - If path collision occurs (for creating tickets), regenerate new UUIDv7.
 
 ### 4.2 Path Derivation
@@ -151,8 +153,8 @@ Ordering:
 ### 4.5 Document Validity + ID Rules
 
 - File MUST start with a line exactly `---` and contain a closing `---` fence.
-- Implementations SHOULD enforce a maximum frontmatter scan length (e.g., 100 lines).
-- Frontmatter MUST parse to a mapping within the YAML subset.
+- Implementations SHOULD enforce a maximum frontmatter scan length (e.g., 100 lines) before treating as invalid.
+- Frontmatter MUST parse to a mapping within the YAML subset (custom simple parser, no yaml package)
 - `id` and `schema_version` are required.
 - `created`/`closed` timestamps MUST be RFC3339 UTC; writers normalize to UTC on write.
 - `id` in frontmatter MUST match the canonical path-derived identity.
@@ -170,7 +172,7 @@ Ordering:
 - Writers MUST use temp-file + rename for atomic writes.
 - Writers MUST use `pkg/fs.AtomicWriter` (with `fs.Real`) for atomic writes (temp file + fsync + dir sync).
 - Writers MUST fsync temp files before rename.
-- Writers MUST fsync parent directories after rename/delete to persist metadata.
+- Writers MUST fsync parent directories after rename/delete to persist metadata (deduplicate them based on file layout to avoid unnecessary fsyncs).
 - Temp files MUST NOT end with `.md` (to avoid accidental indexing).
 - Writers MUST NOT write inside `.tickets/.tk/`.
 
@@ -181,7 +183,6 @@ Ordering:
 - Rebuild uses `github.com/calvinalkan/fileproc` (recursive `ProcessStat` with `Suffix: ".md"`) as the file walker; the callback skips any path under `.tk/`.
 - `fileproc` callback paths are borrowed and callbacks may run concurrently; rebuild must copy paths it retains and avoid unsynchronized shared state.
 - Only regular `.md` files are considered candidates.
-- Duplicate `id`s are **fatal** (rebuild fails).
 - Orphans (file path does not match canonical path for its `id`) are reported and skipped.
 - Symlinked directories are not followed.
 - Rebuild executes in a **single SQLite transaction** (DROP/CREATE/INSERT), and sets `PRAGMA user_version` last; no `VACUUM` or `PRAGMA journal_mode` inside the txn.
@@ -247,6 +248,7 @@ db.Exec(`
     PRAGMA synchronous = FULL;        -- durable writes before WAL removal
     PRAGMA mmap_size = 268435456;     -- 256MB mmap
     PRAGMA cache_size = -20000;       -- 20MB page cache
+    PRAGMA temp_store = MEMORY;       -- faster temp files
 `)
 ```
 
@@ -260,7 +262,6 @@ CREATE TABLE tickets (
   short_id TEXT NOT NULL,
   path TEXT NOT NULL,
   mtime_ns INTEGER NOT NULL,
-
   status TEXT NOT NULL,
   type TEXT NOT NULL,
   priority INTEGER NOT NULL,
@@ -424,28 +425,28 @@ func (tx *Tx) Commit() error {
 ```go
 func (s *Store) Query(opts QueryOpts) ([]Summary, error) {
     walPath := s.dir + "/.tk/wal"
-    lock, err := s.locker.RLock(walPath)
+    readLock, err := s.locker.RLock(walPath)
     if err != nil {
         return nil, err
     }
     defer lock.Close()
 
     if walHasData(s.wal) {
-        _ = lock.Close()
-        lock, err = s.locker.Lock(walPath)
+        _ = readLock.Close()
+        writeLock, err = s.locker.Lock(walPath)
         if err != nil {
             return nil, err
         }
         if err := recoverWal(s); err != nil {
             return nil, err
         }
-        _ = lock.Close()
+        _ = writeLock.Close()
 
-        lock, err = s.locker.RLock(walPath)
+        readLock, err = s.locker.RLock(walPath)
         if err != nil {
             return nil, err
         }
-        defer lock.Close()
+        defer readLock.Close()
     }
 
     return querySQLite(s.sql, opts)
@@ -453,7 +454,7 @@ func (s *Store) Query(opts QueryOpts) ([]Summary, error) {
 
 func (s *Store) Get(id string) (*Ticket, error) {
     walPath := s.dir + "/.tk/wal"
-    lock, err := s.locker.RLock(walPath)
+    readLock, err := s.locker.RLock(walPath)
     if err != nil {
         return nil, err
     }
@@ -461,7 +462,7 @@ func (s *Store) Get(id string) (*Ticket, error) {
 
     if walHasData(s.wal) {
         _ = lock.Close()
-        lock, err = s.locker.Lock(walPath)
+        readLock, err = s.locker.Lock(walPath)
         if err != nil {
             return nil, err
         }
@@ -470,7 +471,7 @@ func (s *Store) Get(id string) (*Ticket, error) {
         }
         _ = lock.Close()
 
-        lock, err = s.locker.RLock(walPath)
+        readLock, err = s.locker.RLock(walPath)
         if err != nil {
             return nil, err
         }
@@ -706,3 +707,4 @@ Get(id)
 - [ ] Rebuild works on corrupted/missing SQLite
 - [ ] No direct cache code remains
 - [ ] E2E tests pass (`make check`)
+- [ ] Update AGENTS.md to reflect the new architecture layout

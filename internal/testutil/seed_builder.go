@@ -306,6 +306,8 @@ var seedTitles = []string{
 	"Fix typo",
 	"Add logging",
 	"Improve perf",
+	"A",
+	"Refactor the code base",
 }
 
 var seedTypes = []string{"bug", "feature", "task", "epic", "chore"}

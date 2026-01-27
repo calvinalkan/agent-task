@@ -263,8 +263,6 @@ linters:
         - pattern: '^os\.ExpandEnv$'
           msg: "os.ExpandEnv bypasses env abstraction - use the env map passed to Run() instead."
   exclusions:
-    paths:
-      - cmd/sloty/main.go
     rules:
       - path: _test\.go
         linters:
@@ -275,11 +273,6 @@ linters:
           - gosec # G104 duplicates errcheck
       # Allow time.Sleep in tests
       - path: _test\.go
-        text: "time\\.Sleep"
-        linters:
-          - forbidigo
-      # Allow time.Sleep in readBackoff (hot path optimization - avoids timer allocation)
-      - path: pkg/slotcache/cache\.go
         text: "time\\.Sleep"
         linters:
           - forbidigo
@@ -304,12 +297,6 @@ linters:
         text: "G204:"
         linters:
           - gosec
-      # Atomic operations on mmap'd memory require unsafe - this is intentional
-      # and necessary for cross-process seqlock correctness per spec.
-      - path: pkg/slotcache/format\.go
-        text: "G103:"
-        linters:
-          - gosec
       - path: sandbox\.go
         text: "G204:" # sandbox executes bwrap by design
         linters:
@@ -331,10 +318,6 @@ linters:
       - path: pkg/fs/fs\.go
         linters:
           - interfacebloat
-      # Cache API surface is intentionally rich (read ops + metadata + lifecycle)
-      - path: pkg/slotcache/api\.go
-        linters:
-          - interfacebloat
       - path: pkg/fs/lock_test\.go
         linters:
           - testpackage
@@ -346,26 +329,10 @@ linters:
       - path: pkg/fs/
         linters:
           - ireturn
-      # Test harness returns polymorphic Operation/OperationResult types
-      - path: pkg/slotcache/internal/testutil/
-        linters:
-          - ireturn
       # Test utilities return interfaces
       - path: internal/testutil/
         linters:
           - ireturn
-      # Cache API returns interfaces by design (Cache, Writer)
-      - path: pkg/slotcache/slotcache\.go
-        linters:
-          - ireturn
-          # Harness compares model vs real errors directly; wrapping would obscure mismatches
-          - wrapcheck
-          # Model methods match real interface signatures but some never fail
-          - unparam
-      # White-box test for internal format functions
-      - path: pkg/slotcache/format_test\.go
-        linters:
-          - testpackage
       # Allow math/rand/v2 for deterministic seeded testing
       - path: _test\.go
         text: "math/rand"

@@ -1,91 +1,41 @@
 package cli_test
 
 import (
-	"fmt"
-	"math"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"slices"
-	"sort"
 	"strings"
 	"testing"
 
 	"github.com/calvinalkan/agent-task/internal/cli"
-	"github.com/calvinalkan/agent-task/internal/ticket"
+	"github.com/calvinalkan/agent-task/internal/testutil"
 )
 
-// FuzzStateMachine tests that the CLI behaves like the model.
-// It generates random sequences of operations and verifies both
-// the model and real CLI produce the same results.
-func FuzzStateMachine(f *testing.F) {
-	// Boundary values for RNG seeding
-	f.Add(int64(0))             // Zero - deterministic baseline
-	f.Add(int64(1))             // Minimal positive
-	f.Add(int64(-1))            // Negative seed
-	f.Add(int64(math.MaxInt64)) // Maximum int64
-	f.Add(int64(math.MinInt64)) // Minimum int64
+// FuzzCLI_Matches_Model_When_Random_Ops_Applied tests that the CLI behaves like the model.
+// It derives operations from fuzz bytes and compares model vs real behavior.
+func FuzzCLI_Matches_Model_When_Random_Ops_Applied(f *testing.F) {
+	for _, seed := range testutil.CuratedSeeds() {
+		f.Add(seed.Data)
+	}
 
-	// Powers of 2 (often expose off-by-one errors in bit operations)
-	f.Add(int64(1 << 16)) // 65536
-	f.Add(int64(1 << 32)) // 4294967296 - 32-bit boundary
-	f.Add(int64(1 << 62)) // Large power of 2 (within int64 range)
+	f.Add([]byte{0x00, 0x01, 0x02})
+	f.Add([]byte("tk-ops"))
 
-	// Arbitrary values for diversity
-	f.Add(int64(12345))
-	f.Add(int64(42))
+	f.Fuzz(func(t *testing.T, fuzzBytes []byte) {
+		cfg := testutil.DefaultRunConfig()
+		cfg.MaxOps = 150
 
-	f.Fuzz(func(t *testing.T, seed int64) {
-		rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed)))
-		c := cli.NewCLI(t)
-		model := NewModel()
-
-		// Track ticket IDs for use in subsequent operations
-		var realIDs []string
-
-		// Run 5-34 random operations per fuzz iteration.
-		// At ~800 iterations/sec for 30s, this executes ~500k operations total.
-		numOps := rng.IntN(30) + 5
-
-		ops := make([]string, 0, numOps)
-		for range numOps {
-			op := genOp(rng, model, realIDs)
-			ops = append(ops, op.String())
-
-			// Run CLI first - for CreateOp, this stores the new ID in the op struct
-			createdID, realErr := op.Run(c)
-
-			// Apply to model - for CreateOp, this uses the ID that Run() stored
-			modelErr := op.Apply(model)
-
-			// Both should succeed or both should fail
-			modelOK := modelErr == nil
-			realOK := realErr == nil
-
-			if modelOK != realOK {
-				t.Fatalf("error mismatch: model_err=%v real_err=%v\n%s",
-					modelErr, realErr, formatOps(ops))
-			}
-
-			// Track created ticket IDs
-			if createdID != "" && realOK {
-				realIDs = append(realIDs, createdID)
-			}
-
-			// Verify state after each operation to catch divergence immediately
-			err := verifyStateMatches(t, model, c.TicketDir(), ops)
-			if err != nil {
-				t.Fatal(err)
-			}
+		cfg.CompareStateEveryN = 10
+		if testing.Short() {
+			cfg.MaxOps = 50
+			cfg.CompareStateEveryN = 5
 		}
 
-		// Check invariants
-		checkInvariants(t, c.TicketDir())
+		testutil.RunBehaviorWithSeed(t, fuzzBytes, cfg)
 	})
 }
 
-// FuzzCLI tests that the CLI never panics on arbitrary input.
-func FuzzCLI(f *testing.F) {
+// FuzzCLI_DoesNotPanic_When_Invoked_With_Arbitrary_Input tests that the CLI never panics on arbitrary input.
+func FuzzCLI_DoesNotCrash_Or_Leave_Invalid_State_When_Invoked_With_Arbitrary_Input(f *testing.F) {
 	// === Empty/whitespace/help ===
 	f.Add("")
 	f.Add(" ")
@@ -174,133 +124,6 @@ func FuzzCLI(f *testing.F) {
 		// Check invariants even after garbage input
 		checkInvariants(t, c.TicketDir())
 	})
-}
-
-// verifyStateMatches compares model state against filesystem state.
-// This is the core property check: model and reality must agree.
-// Returns an error on first mismatch, nil if all matches.
-func verifyStateMatches(t *testing.T, model *Model, ticketDir string, ops []string) error {
-	t.Helper()
-
-	// Get all ticket files from filesystem (lexicographically sorted)
-	files, err := filepath.Glob(filepath.Join(ticketDir, "*.md"))
-	if err != nil {
-		return fmt.Errorf("failed to glob tickets: %w", err)
-	}
-
-	sort.Strings(files)
-
-	// Extract IDs from filenames
-	var realIDs []string
-
-	for _, f := range files {
-		id := strings.TrimSuffix(filepath.Base(f), ".md")
-		realIDs = append(realIDs, id)
-	}
-
-	// Get model IDs (sorted lexicographically for comparison)
-	modelIDs := model.List()
-	sort.Strings(modelIDs)
-
-	// Check count matches
-	if len(realIDs) != len(modelIDs) {
-		return fmt.Errorf("ticket count mismatch: model=%d real=%d\nmodel=%v\nreal=%v\n%s",
-			len(modelIDs), len(realIDs), modelIDs, realIDs, formatOps(ops))
-	}
-
-	// Check IDs match (lexicographic order)
-	if !slices.Equal(realIDs, modelIDs) {
-		return fmt.Errorf("ticket IDs mismatch:\nmodel=%v\nreal=%v\n%s",
-			modelIDs, realIDs, formatOps(ops))
-	}
-
-	// Check each ticket's fields match
-	for _, id := range modelIDs {
-		modelTk, _ := model.Get(id)
-		path := filepath.Join(ticketDir, id+".md")
-
-		realTk, err := ticket.ParseTicketFrontmatter(path)
-		if err != nil {
-			return fmt.Errorf("failed to parse ticket %s: %w\n%s", id, err, formatOps(ops))
-		}
-
-		// Status
-		if modelTk.Status != realTk.Status {
-			return fmt.Errorf("status mismatch: want=%q got=%q\n%s",
-				modelTk.Status, realTk.Status, formatOps(ops))
-		}
-
-		// Priority
-		if modelTk.Priority != realTk.Priority {
-			return fmt.Errorf("priority mismatch: want=%d got=%d\n%s",
-				modelTk.Priority, realTk.Priority, formatOps(ops))
-		}
-
-		// Type
-		if modelTk.Type != realTk.Type {
-			return fmt.Errorf("type mismatch: want=%q got=%q\n%s",
-				modelTk.Type, realTk.Type, formatOps(ops))
-		}
-
-		// BlockedBy (sort both for comparison)
-		realBlocked := slices.Clone(realTk.BlockedBy)
-		modelBlocked := slices.Clone(modelTk.BlockedBy)
-
-		sort.Strings(realBlocked)
-		sort.Strings(modelBlocked)
-
-		if !slices.Equal(modelBlocked, realBlocked) {
-			return fmt.Errorf("blocked-by mismatch: want=%v got=%v\n%s",
-				modelTk.BlockedBy, realTk.BlockedBy, formatOps(ops))
-		}
-
-		// Closed timestamp presence
-		hasClosed := realTk.Closed != ""
-		if modelTk.HasClosed != hasClosed {
-			return fmt.Errorf("closed timestamp mismatch: want=%v got=%v\n%s",
-				modelTk.HasClosed, hasClosed, formatOps(ops))
-		}
-
-		// Title
-		if modelTk.Title != realTk.Title {
-			return fmt.Errorf("title mismatch: want=%q got=%q\n%s",
-				modelTk.Title, realTk.Title, formatOps(ops))
-		}
-
-		// Assignee
-		if modelTk.Assignee != realTk.Assignee {
-			return fmt.Errorf("assignee mismatch: want=%q got=%q\n%s",
-				modelTk.Assignee, realTk.Assignee, formatOps(ops))
-		}
-	}
-
-	return nil
-}
-
-// formatOps formats the operation list for readability.
-// The last operation is marked as causing the divergence.
-func formatOps(ops []string) string {
-	if len(ops) == 0 {
-		return "Operations: (none)"
-	}
-
-	var b strings.Builder
-	b.WriteString("Operations:")
-
-	for i, op := range ops {
-		b.WriteString("\n")
-
-		if i == len(ops)-1 {
-			b.WriteString("→ ")
-			b.WriteString(op)
-			b.WriteString("  ← divergence\n")
-		} else {
-			b.WriteString("  ")
-			b.WriteString(op)
-		}
-	}
-
-	return b.String()
 }
 
 // checkInvariants verifies that the ticket directory is in a valid state.

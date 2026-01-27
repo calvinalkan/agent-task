@@ -4,15 +4,16 @@
 
 ## Architecture
 
-- `main.go` - Thin wrapper that passes OS abstractions (stdin, stdout, stderr, args, env) to `Run()`
-- `run.go` - Main dispatcher that parses global flags, loads config, and routes to command handlers
-- `<command>.go` - Each command (create, ls, ready, etc.) is self-contained with its own flag parsing, help text, and implementation
-- `ticket.go` - Core ticket parsing, serialization, and file operations
-- `config.go` - Hierarchical config loading (global → project → CLI)
-- `cache_*.go` - Mtime-based binary cache for fast listing
-- `lock.go` - File locking for concurrent access
+- `cmd/tk/main.go` - CLI entrypoint; wires stdin/stdout/stderr, args, env, and signals into `internal/cli.Run`.
+- `internal/cli/run.go` - Global flag parsing, config load, and command dispatch.
+- `internal/cli/<command>.go` - Each command (create, ls, ready, etc.) is self-contained with its own flag parsing, help text, and implementation.
+- `internal/ticket/ticket.go` - Core ticket parsing, serialization, and file operations.
+- `internal/ticket/config.go` - Hierarchical config loading (global → project → CLI).
+- `internal/ticket/cache_*.go` - Mtime-based binary cache for fast listing.
+- `internal/ticket/lock.go` - File locking for concurrent access.
+- `internal/testutil/*` - Shared helpers for CLI and ticket tests.
 
-Tests run against `Run()` for integration tests or directly against `cmd*()` functions for command-specific tests.
+Tests run against `cli.Run()` for integration tests or directly against `internal/cli` command constructors and `internal/ticket` helpers for targeted unit tests.
 
 ## Commands
 

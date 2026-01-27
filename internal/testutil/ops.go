@@ -215,7 +215,7 @@ func (o OpStart) ApplyReal(h *Harness) Result {
 func (o OpStart) ApplyModel(h *Harness) Result {
 	user := spec.UserStartInput{
 		ID:        o.ID,
-		ClaimedBy: "test-user",
+		ClaimedBy: claimedByForStart(o.ID),
 	}
 
 	fuzz := spec.FuzzStartInput{
@@ -229,6 +229,17 @@ func (o OpStart) ApplyModel(h *Harness) Result {
 
 func (o OpStart) String() string {
 	return fmt.Sprintf("Start(%s)", o.ID)
+}
+
+func claimedByForStart(id string) string {
+	names := []string{"Alice", "Bob", "Charlie", "Diana"}
+
+	sum := 0
+	for i := range len(id) {
+		sum += int(id[i])
+	}
+
+	return names[sum%len(names)]
 }
 
 // OpClose closes a ticket.
