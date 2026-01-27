@@ -636,7 +636,7 @@ Get(id)
 
 ### Phase 1 — Core primitives
 - [ ] Create `internal/store/` package skeleton
-- [ ] Implement UUIDv7 generator (internal; no new dependency)
+- [x] Implement UUIDv7 generator (with google uuid package)
 - [ ] Implement short_id derivation (base32, length 12)
 - [ ] Implement path derivation (`YYYY/MM-DD/<short_id>.md`)
 - [ ] Implement YAML subset parsing (frontmatter only)
