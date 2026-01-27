@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +24,7 @@ func LsCmd(cfg *ticket.Config) *Command {
 	fs.Int("offset", 0, "Skip first N tickets")
 	fs.String("parent", "", "Filter by parent ticket ID")
 	fs.Bool("roots", false, "Show only tickets without a parent")
+	fs.Bool("json", false, "Output as JSON array")
 
 	return &Command{
 		Flags: fs,
@@ -30,14 +32,16 @@ func LsCmd(cfg *ticket.Config) *Command {
 		Short: "List tickets",
 		Long:  "List all tickets. Output sorted by ID (oldest first).",
 		Exec: func(_ context.Context, io *IO, _ []string) error {
-			return execLs(io, cfg, fs)
+			jsonOutput, _ := fs.GetBool("json")
+
+			return execLs(io, cfg, fs, jsonOutput)
 		},
 	}
 }
 
 var errConflictingFlags = errors.New("--parent and --roots cannot be used together")
 
-func execLs(io *IO, cfg *ticket.Config, fs *flag.FlagSet) error {
+func execLs(io *IO, cfg *ticket.Config, fs *flag.FlagSet, jsonOutput bool) error {
 	status, _ := fs.GetString("status")
 	if fs.Changed("status") {
 		err := validateStatusFlag(status)
@@ -107,9 +111,58 @@ func execLs(io *IO, cfg *ticket.Config, fs *flag.FlagSet) error {
 		valid = append(valid, result.Summary)
 	}
 
+	if jsonOutput {
+		return outputLsJSON(io, valid)
+	}
+
 	for _, summary := range valid {
 		io.Println(formatTicketLine(summary))
 	}
+
+	return nil
+}
+
+// lsTicketJSON is the JSON representation of a ticket in ls output.
+type lsTicketJSON struct {
+	ID        string   `json:"id"`
+	Status    string   `json:"status"`
+	Priority  int      `json:"priority"`
+	Type      string   `json:"type"`
+	Title     string   `json:"title"`
+	Parent    string   `json:"parent,omitempty"`
+	BlockedBy []string `json:"blocked_by"`
+	Created   string   `json:"created"`
+	Closed    string   `json:"closed,omitempty"`
+}
+
+func outputLsJSON(io *IO, summaries []*ticket.Summary) error {
+	tickets := make([]lsTicketJSON, 0, len(summaries))
+
+	for _, summary := range summaries {
+		blockedBy := summary.BlockedBy
+		if blockedBy == nil {
+			blockedBy = []string{}
+		}
+
+		tickets = append(tickets, lsTicketJSON{
+			ID:        summary.ID,
+			Status:    summary.Status,
+			Priority:  summary.Priority,
+			Type:      summary.Type,
+			Title:     summary.Title,
+			Parent:    summary.Parent,
+			BlockedBy: blockedBy,
+			Created:   summary.Created,
+			Closed:    summary.Closed,
+		})
+	}
+
+	data, err := json.Marshal(tickets)
+	if err != nil {
+		return fmt.Errorf("marshal json: %w", err)
+	}
+
+	io.Println(string(data))
 
 	return nil
 }

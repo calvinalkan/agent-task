@@ -350,6 +350,10 @@ linters:
       - path: pkg/slotcache/internal/testutil/
         linters:
           - ireturn
+      # Test utilities return interfaces
+      - path: internal/testutil/
+        linters:
+          - ireturn
       # Cache API returns interfaces by design (Cache, Writer)
       - path: pkg/slotcache/slotcache\.go
         linters:

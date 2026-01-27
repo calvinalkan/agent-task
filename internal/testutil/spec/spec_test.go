@@ -6,10 +6,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/calvinalkan/agent-task/internal/spec"
+	"github.com/calvinalkan/agent-task/internal/testutil/spec"
 )
 
-func TestBlockerCycleDetection(t *testing.T) {
+func Test_Block_Returns_Cycle_Error_When_Adding_Blocker_Creates_Cycle(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
