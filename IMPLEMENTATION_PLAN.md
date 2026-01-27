@@ -639,7 +639,7 @@ Get(id)
 - [ ] Implement short_id derivation (base32, length 12)
 - [ ] Implement path derivation (`YYYY/MM-DD/<short_id>.md`)
 - [ ] Implement YAML subset parsing (frontmatter only)
-- [ ] Implement deterministic frontmatter serialization
+- [x] Implement deterministic frontmatter serialization
 
 ### Phase 2 — SQLite index
 - [ ] Define schema + version (`PRAGMA user_version`)

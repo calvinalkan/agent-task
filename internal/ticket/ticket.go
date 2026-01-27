@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -148,25 +149,38 @@ func FormatTicket(ticket *Ticket) string {
 
 	// YAML frontmatter
 	builder.WriteString("---\n")
-	builder.WriteString(fmt.Sprintf("schema_version: %d\n", ticket.SchemaVersion))
+	// Keep a stable, deterministic order for frontmatter to make diffs predictable
+	// and align with the storage migration plan requirements.
 	builder.WriteString("id: " + ticket.ID + "\n")
-	builder.WriteString("status: " + ticket.Status + "\n")
-	builder.WriteString("blocked-by: " + formatBlockedBy(ticket.BlockedBy) + "\n")
+	builder.WriteString(fmt.Sprintf("schema_version: %d\n", ticket.SchemaVersion))
 
-	if ticket.Parent != "" {
-		builder.WriteString("parent: " + ticket.Parent + "\n")
+	type field struct {
+		key       string
+		value     string
+		omitEmpty bool
 	}
 
-	builder.WriteString("created: " + ticket.Created.UTC().Format(time.RFC3339) + "\n")
-	builder.WriteString("type: " + ticket.Type + "\n")
-	builder.WriteString(fmt.Sprintf("priority: %d\n", ticket.Priority))
-
-	if ticket.Assignee != "" {
-		builder.WriteString("assignee: " + ticket.Assignee + "\n")
+	fields := []field{
+		{key: "assignee", value: ticket.Assignee, omitEmpty: true},
+		{key: "blocked-by", value: formatBlockedBy(ticket.BlockedBy)},
+		{key: "created", value: ticket.Created.UTC().Format(time.RFC3339)},
+		{key: "external-ref", value: ticket.ExternalRef, omitEmpty: true},
+		{key: "parent", value: ticket.Parent, omitEmpty: true},
+		{key: "priority", value: strconv.Itoa(ticket.Priority)},
+		{key: "status", value: ticket.Status},
+		{key: "type", value: ticket.Type},
 	}
 
-	if ticket.ExternalRef != "" {
-		builder.WriteString("external-ref: " + ticket.ExternalRef + "\n")
+	slices.SortFunc(fields, func(a, b field) int {
+		return strings.Compare(a.key, b.key)
+	})
+
+	for _, field := range fields {
+		if field.omitEmpty && field.value == "" {
+			continue
+		}
+
+		builder.WriteString(field.key + ": " + field.value + "\n")
 	}
 
 	builder.WriteString("---\n")

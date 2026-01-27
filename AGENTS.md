@@ -35,16 +35,3 @@ GOFLAGS="-run=TestPattern.*" make test
 
 If you encounter errors like `read-only file system` or `permission denied` for commands,
 you are running in a sandbox and will need to ask the user for to perform the action for you.
-
-## Workflow
-
-Use `tk` to manage development of `tk` itself:
-
-1. `tk ready` - See actionable tickets (open, unblocked)
-2. `tk start <id>` - Mark ticket as in progress, outputs full ticket spec
-3. Implement the feature/fix
-5. `make check` - Ensure all tests pass
-6. `tk close <id>` - Mark ticket as done
-7. Commit with conventional message referencing the ticket, include only files related to the ticket plus the ticket file itself
-
-When in doubt, run `tk --help` to see all commands and their flags.

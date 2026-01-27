@@ -34,6 +34,25 @@ func TestCreateCommand(t *testing.T) {
 			},
 		},
 		{
+			name:     "writes deterministic frontmatter order",
+			args:     []string{"create", "Order matters"},
+			wantExit: 0,
+			checkFile: func(t *testing.T, c *cli.CLI, id string) {
+				t.Helper()
+				content := c.ReadTicket(id)
+				// Deterministic ordering keeps diffs stable and matches the migration plan.
+				assertFrontmatterOrder(t, content, []string{
+					"id",
+					"schema_version",
+					"blocked-by",
+					"created",
+					"priority",
+					"status",
+					"type",
+				})
+			},
+		},
+		{
 			name:     "creates ticket with description",
 			args:     []string{"create", "Test", "-d", "Description text"},
 			wantExit: 0,
@@ -498,6 +517,35 @@ func TestCreateWithClosedParent(t *testing.T) {
 
 	stderr := c.MustFail("create", "Child ticket", "--parent", parentID)
 	cli.AssertContains(t, stderr, "parent ticket is closed")
+}
+
+func assertFrontmatterOrder(t *testing.T, content string, wantKeys []string) {
+	t.Helper()
+
+	lines := strings.Split(content, "\n")
+	if len(lines) < 3 || lines[0] != "---" {
+		t.Fatal("expected frontmatter to start with ---")
+	}
+
+	var gotKeys []string
+
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		if line == "---" {
+			break
+		}
+
+		key, _, ok := strings.Cut(line, ": ")
+		if !ok {
+			continue
+		}
+
+		gotKeys = append(gotKeys, key)
+	}
+
+	if strings.Join(gotKeys, ",") != strings.Join(wantKeys, ",") {
+		t.Fatalf("frontmatter key order mismatch\n got: %v\nwant: %v", gotKeys, wantKeys)
+	}
 }
 
 func TestCreateWithEmptyParent(t *testing.T) {
