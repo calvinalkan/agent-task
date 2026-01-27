@@ -10,7 +10,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestEditLaunchCommand(t *testing.T) {
+func Test_Edit_Launch_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	t.Run("missing ID returns error", func(t *testing.T) {
@@ -151,7 +151,7 @@ func TestEditLaunchCommand(t *testing.T) {
 	})
 }
 
-func TestEditStartCommand(t *testing.T) {
+func Test_Edit_Start_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	t.Run("missing ID returns error", func(t *testing.T) {
@@ -237,7 +237,7 @@ func TestEditStartCommand(t *testing.T) {
 	})
 }
 
-func TestEditApplyCommand(t *testing.T) {
+func Test_Edit_Apply_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	t.Run("missing ID returns error", func(t *testing.T) {
@@ -363,7 +363,7 @@ func TestEditApplyCommand(t *testing.T) {
 	})
 }
 
-func TestEditModeFlags(t *testing.T) {
+func Test_Edit_Mode_Flags_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	t.Run("no mode flag returns error", func(t *testing.T) {
@@ -387,7 +387,7 @@ func TestEditModeFlags(t *testing.T) {
 	})
 }
 
-func TestEditHelp(t *testing.T) {
+func Test_Edit_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -419,7 +419,7 @@ func TestEditHelp(t *testing.T) {
 	}
 }
 
-func TestEditInMainHelp(t *testing.T) {
+func Test_Edit_In_Main_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

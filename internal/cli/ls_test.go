@@ -16,7 +16,7 @@ import (
 const statusOpen = "open"
 const statusClosed = "closed"
 
-func TestLsCommand(t *testing.T) {
+func Test_Ls_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -310,7 +310,7 @@ func TestLsCommand(t *testing.T) {
 	}
 }
 
-func TestLsOutputOrder(t *testing.T) {
+func Test_Ls_Output_Order_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -340,7 +340,7 @@ func TestLsOutputOrder(t *testing.T) {
 	}
 }
 
-func TestLsInvalidTicketFile(t *testing.T) {
+func Test_Ls_Invalid_Ticket_File_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -524,7 +524,7 @@ func TestLsInvalidTicketFile(t *testing.T) {
 	}
 }
 
-func TestLsMixedValidInvalid(t *testing.T) {
+func Test_Ls_Mixed_Valid_Invalid_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -554,7 +554,7 @@ func TestLsMixedValidInvalid(t *testing.T) {
 	cli.AssertContains(t, stderr, "invalid-002")
 }
 
-func TestLsTicketDirNotExist(t *testing.T) {
+func Test_Ls_Ticket_Dir_Not_Exist_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -572,7 +572,7 @@ func TestLsTicketDirNotExist(t *testing.T) {
 	}
 }
 
-func TestLsHelp(t *testing.T) {
+func Test_Ls_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -602,7 +602,7 @@ func TestLsHelp(t *testing.T) {
 	}
 }
 
-func TestLsIgnoresNonMdFiles(t *testing.T) {
+func Test_Ls_Ignores_Non_Md_Files_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -628,7 +628,7 @@ func TestLsIgnoresNonMdFiles(t *testing.T) {
 	cli.AssertNotContains(t, stdout, "notes")
 }
 
-func TestLsIgnoresSubdirectories(t *testing.T) {
+func Test_Ls_Ignores_Subdirectories_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -651,7 +651,7 @@ func TestLsIgnoresSubdirectories(t *testing.T) {
 	cli.AssertNotContains(t, stdout, "archived-001")
 }
 
-func TestLsValidBlockedByFormat(t *testing.T) {
+func Test_Ls_Valid_Blocked_By_Format_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -699,7 +699,7 @@ func TestLsValidBlockedByFormat(t *testing.T) {
 	}
 }
 
-func TestLsLimitOffset(t *testing.T) {
+func Test_Ls_Limit_Offset_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -832,7 +832,7 @@ func TestLsLimitOffset(t *testing.T) {
 	}
 }
 
-func TestLsLimitWithStatusFilter(t *testing.T) {
+func Test_Ls_Limit_With_Status_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -854,7 +854,7 @@ func TestLsLimitWithStatusFilter(t *testing.T) {
 	cli.AssertNotContains(t, stdout, "d-004")
 }
 
-func TestLsStatusFilterOffsetOutOfBounds(t *testing.T) {
+func Test_Ls_Status_Filter_Offset_Out_Of_Bounds_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -869,7 +869,7 @@ func TestLsStatusFilterOffsetOutOfBounds(t *testing.T) {
 	cli.AssertContains(t, stderr, "offset out of bounds")
 }
 
-func TestLsHelpShowsLimitOffset(t *testing.T) {
+func Test_Ls_Help_Shows_Limit_Offset_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -880,7 +880,7 @@ func TestLsHelpShowsLimitOffset(t *testing.T) {
 	cli.AssertContains(t, stdout, "100")
 }
 
-func TestLsColdCacheBuildsFullCache(t *testing.T) {
+func Test_Ls_Cold_Cache_Builds_Full_Cache_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -911,7 +911,7 @@ func TestLsColdCacheBuildsFullCache(t *testing.T) {
 	}
 }
 
-func TestLsWarmCacheWithLimit(t *testing.T) {
+func Test_Ls_Warm_Cache_With_Limit_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -938,7 +938,7 @@ func TestLsWarmCacheWithLimit(t *testing.T) {
 	cli.AssertNotContains(t, stdout2, "c-003")
 }
 
-func TestLsWarmCacheWithOffset(t *testing.T) {
+func Test_Ls_Warm_Cache_With_Offset_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -962,7 +962,7 @@ func TestLsWarmCacheWithOffset(t *testing.T) {
 	cli.AssertNotContains(t, stdout, "e-005")
 }
 
-func TestLsCacheInvalidatedOnFileChange(t *testing.T) {
+func Test_Ls_Cache_Invalidated_On_File_Change_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -999,7 +999,7 @@ priority: 2
 	cli.AssertNotContains(t, stdout2, "Modified Title")
 }
 
-func TestLsCacheWithStatusFilter(t *testing.T) {
+func Test_Ls_Cache_With_Status_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1022,7 +1022,7 @@ func TestLsCacheWithStatusFilter(t *testing.T) {
 	cli.AssertContains(t, stdout2, "b-002")
 }
 
-func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
+func Test_Ls_Bitmap_Cold_Vs_Hot_Equivalence_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -1097,7 +1097,7 @@ func TestLsBitmapColdVsHotEquivalence(t *testing.T) {
 	}
 }
 
-func TestLsBitmapStaleCacheHandling(t *testing.T) {
+func Test_Ls_Bitmap_Stale_Cache_Handling_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1121,7 +1121,7 @@ func TestLsBitmapStaleCacheHandling(t *testing.T) {
 	cli.AssertContains(t, stdout, "b-002")
 }
 
-func TestLsBitmapNewFileHandling(t *testing.T) {
+func Test_Ls_Bitmap_New_File_Handling_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1145,7 +1145,7 @@ func TestLsBitmapNewFileHandling(t *testing.T) {
 	cli.AssertContains(t, stdout, "b-002")
 }
 
-func TestLsHelpShowsPriorityAndType(t *testing.T) {
+func Test_Ls_Help_Shows_Priority_And_Type_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1157,7 +1157,7 @@ func TestLsHelpShowsPriorityAndType(t *testing.T) {
 	cli.AssertContains(t, stdout, "bug")
 }
 
-func TestLsBitmapBoundary64Tickets(t *testing.T) {
+func Test_Ls_Bitmap_Boundary64_Tickets_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1192,7 +1192,7 @@ func TestLsBitmapBoundary64Tickets(t *testing.T) {
 	}
 }
 
-func TestLsBitmapBoundary65Tickets(t *testing.T) {
+func Test_Ls_Bitmap_Boundary65_Tickets_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	th := cli.NewCLI(t)
@@ -1227,7 +1227,7 @@ func TestLsBitmapBoundary65Tickets(t *testing.T) {
 	}
 }
 
-func TestLsBitmapStalePriorityChange(t *testing.T) {
+func Test_Ls_Bitmap_Stale_Priority_Change_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1246,7 +1246,7 @@ func TestLsBitmapStalePriorityChange(t *testing.T) {
 	cli.AssertContains(t, stdout, "a-001")
 }
 
-func TestLsBitmapStaleTypeChange(t *testing.T) {
+func Test_Ls_Bitmap_Stale_Type_Change_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1265,7 +1265,7 @@ func TestLsBitmapStaleTypeChange(t *testing.T) {
 	cli.AssertContains(t, stdout, "a-001")
 }
 
-func TestLsBitmapFileDeleted(t *testing.T) {
+func Test_Ls_Bitmap_File_Deleted_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1288,7 +1288,7 @@ func TestLsBitmapFileDeleted(t *testing.T) {
 	cli.AssertContains(t, stdout, "b-002")
 }
 
-func TestLsBitmapPaginationColdVsHot(t *testing.T) {
+func Test_Ls_Bitmap_Pagination_Cold_Vs_Hot_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1332,7 +1332,7 @@ func TestLsBitmapPaginationColdVsHot(t *testing.T) {
 	}
 }
 
-func TestLsBitmapStaleStatusChangedNowMatches(t *testing.T) {
+func Test_Ls_Bitmap_Stale_Status_Changed_Now_Matches_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1352,7 +1352,7 @@ func TestLsBitmapStaleStatusChangedNowMatches(t *testing.T) {
 	cli.AssertNotContains(t, stdout, "a-001")
 }
 
-func TestLsParentFilter(t *testing.T) {
+func Test_Ls_Parent_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1369,7 +1369,7 @@ func TestLsParentFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, standaloneID)
 }
 
-func TestLsRootsFilter(t *testing.T) {
+func Test_Ls_Roots_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1384,7 +1384,7 @@ func TestLsRootsFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, childID)
 }
 
-func TestLsParentAndRootsConflict(t *testing.T) {
+func Test_Ls_Parent_And_Roots_Conflict_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1394,7 +1394,7 @@ func TestLsParentAndRootsConflict(t *testing.T) {
 	cli.AssertContains(t, stderr, "--parent and --roots cannot be used together")
 }
 
-func TestLsShowsParentInOutput(t *testing.T) {
+func Test_Ls_Shows_Parent_In_Output_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1416,7 +1416,7 @@ func TestLsShowsParentInOutput(t *testing.T) {
 	}
 }
 
-func TestLsParentFilterWithOtherFilters(t *testing.T) {
+func Test_Ls_Parent_Filter_With_Other_Filters_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1432,7 +1432,7 @@ func TestLsParentFilterWithOtherFilters(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, parentID)
 }
 
-func TestLsRootsWithStatusFilter(t *testing.T) {
+func Test_Ls_Roots_With_Status_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1454,7 +1454,7 @@ func TestLsRootsWithStatusFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, openRootID)
 }
 
-func TestLsHelpShowsParentAndRootsFlags(t *testing.T) {
+func Test_Ls_Help_Shows_Parent_And_Roots_Flags_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1464,7 +1464,7 @@ func TestLsHelpShowsParentAndRootsFlags(t *testing.T) {
 	cli.AssertContains(t, stdout, "--roots")
 }
 
-func TestLsCacheRegenAfterVersionChange(t *testing.T) {
+func Test_Ls_Cache_Regen_After_Version_Change_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1501,7 +1501,7 @@ func TestLsCacheRegenAfterVersionChange(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, child2ID)
 }
 
-func TestLsParentFilterUsesIndex(t *testing.T) {
+func Test_Ls_Parent_Filter_Uses_Index_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1523,7 +1523,7 @@ func TestLsParentFilterUsesIndex(t *testing.T) {
 	}
 }
 
-func TestLsRootsFilterUsesIndex(t *testing.T) {
+func Test_Ls_Roots_Filter_Uses_Index_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1543,7 +1543,7 @@ func TestLsRootsFilterUsesIndex(t *testing.T) {
 	}
 }
 
-func TestLsParentWithStatusFilter(t *testing.T) {
+func Test_Ls_Parent_With_Status_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1568,7 +1568,7 @@ func TestLsParentWithStatusFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, openChildID)
 }
 
-func TestLsParentWithPriorityFilter(t *testing.T) {
+func Test_Ls_Parent_With_Priority_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1583,7 +1583,7 @@ func TestLsParentWithPriorityFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, p3ChildID)
 }
 
-func TestLsParentWithTypeFilter(t *testing.T) {
+func Test_Ls_Parent_With_Type_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1598,7 +1598,7 @@ func TestLsParentWithTypeFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, featureChildID)
 }
 
-func TestLsRootsWithPriorityFilter(t *testing.T) {
+func Test_Ls_Roots_With_Priority_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1614,7 +1614,7 @@ func TestLsRootsWithPriorityFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, childID)
 }
 
-func TestLsRootsWithTypeFilter(t *testing.T) {
+func Test_Ls_Roots_With_Type_Filter_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1630,7 +1630,7 @@ func TestLsRootsWithTypeFilter(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, childID)
 }
 
-func TestLsParentWithMultipleFilters(t *testing.T) {
+func Test_Ls_Parent_With_Multiple_Filters_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1647,7 +1647,7 @@ func TestLsParentWithMultipleFilters(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, wrongPrioID)
 }
 
-func TestLsRootsWithMultipleFilters(t *testing.T) {
+func Test_Ls_Roots_With_Multiple_Filters_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -1665,7 +1665,7 @@ func TestLsRootsWithMultipleFilters(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, childID)
 }
 
-func TestLsParentWithLimitOffset(t *testing.T) {
+func Test_Ls_Parent_With_Limit_Offset_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

@@ -9,7 +9,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestShowCommand(t *testing.T) {
+func Test_Show_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -50,7 +50,7 @@ func TestShowCommand(t *testing.T) {
 	}
 }
 
-func TestShowCreatedTicket(t *testing.T) {
+func Test_Show_Created_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -80,7 +80,7 @@ func TestShowCreatedTicket(t *testing.T) {
 	cli.AssertContains(t, stdout, "AC here")
 }
 
-func TestShowOnlyReadsFromTicketDir(t *testing.T) {
+func Test_Show_Only_Reads_From_Ticket_Dir_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -96,14 +96,14 @@ func TestShowOnlyReadsFromTicketDir(t *testing.T) {
 	cli.AssertContains(t, stderr, "ticket not found")
 }
 
-func TestShowStdoutEmptyOnError(t *testing.T) {
+func Test_Show_Stdout_Empty_On_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
 	c.MustFail("show", "nonexistent")
 }
 
-func TestShowHelp(t *testing.T) {
+func Test_Show_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {

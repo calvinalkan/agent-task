@@ -9,7 +9,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-func TestGenerateUniqueIDNoCollision(t *testing.T) {
+func Test_Generate_Unique_ID_No_Collision_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -31,7 +31,7 @@ func TestGenerateUniqueIDNoCollision(t *testing.T) {
 	}
 }
 
-func TestGenerateUniqueIDWithCollisions(t *testing.T) {
+func Test_Generate_Unique_ID_With_Collisions_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -69,7 +69,7 @@ func TestGenerateUniqueIDWithCollisions(t *testing.T) {
 	}
 }
 
-func TestIDsSortLexicographically(t *testing.T) {
+func Test_I_Ds_Sort_Lexicographically_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	// Test that suffixed IDs sort correctly

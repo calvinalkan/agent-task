@@ -15,7 +15,7 @@ import (
 // errTestCallback is used for testing error handling in callbacks.
 var errTestCallback = errors.New("test callback error")
 
-func TestWithTicketLock_BasicOperation(t *testing.T) {
+func Test_With_Ticket_Lock_Basic_Operation_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -52,7 +52,7 @@ func TestWithTicketLock_BasicOperation(t *testing.T) {
 	}
 }
 
-func TestWithTicketLock_ReadOnlyOperation(t *testing.T) {
+func Test_With_Ticket_Lock_Read_Only_Operation_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -93,7 +93,7 @@ func TestWithTicketLock_ReadOnlyOperation(t *testing.T) {
 	}
 }
 
-func TestWithTicketLock_ErrorInCallback(t *testing.T) {
+func Test_With_Ticket_Lock_Error_In_Callback_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -127,7 +127,7 @@ func TestWithTicketLock_ErrorInCallback(t *testing.T) {
 	}
 }
 
-func TestWithTicketLock_ConcurrentAccess(t *testing.T) {
+func Test_With_Ticket_Lock_Concurrent_Access_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -182,7 +182,7 @@ func TestWithTicketLock_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestWithTicketLock_LockReleasedAfterError(t *testing.T) {
+func Test_With_Ticket_Lock_Lock_Released_After_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -208,7 +208,7 @@ func TestWithTicketLock_LockReleasedAfterError(t *testing.T) {
 	}
 }
 
-func TestWithTicketLock_FileNotExists(t *testing.T) {
+func Test_With_Ticket_Lock_File_Not_Exists_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()

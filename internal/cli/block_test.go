@@ -7,7 +7,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestBlockCommand(t *testing.T) {
+func Test_Block_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -54,7 +54,7 @@ func TestBlockCommand(t *testing.T) {
 	}
 }
 
-func TestBlockNonexistentBlocker(t *testing.T) {
+func Test_Block_Nonexistent_Blocker_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -74,7 +74,7 @@ func Test_Block_Returns_Error_When_Blocker_ID_Missing_For_Existing_Ticket(t *tes
 	cli.AssertContains(t, stderr, "blocker ID is required")
 }
 
-func TestBlockSelf(t *testing.T) {
+func Test_Block_Self_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -84,7 +84,7 @@ func TestBlockSelf(t *testing.T) {
 	cli.AssertContains(t, stderr, "cannot block itself")
 }
 
-func TestBlockTicket(t *testing.T) {
+func Test_Block_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -105,7 +105,7 @@ func TestBlockTicket(t *testing.T) {
 	cli.AssertContains(t, content, "blocked-by: ["+ticketID2+"]")
 }
 
-func TestBlockAlreadyBlocked(t *testing.T) {
+func Test_Block_Already_Blocked_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -118,7 +118,7 @@ func TestBlockAlreadyBlocked(t *testing.T) {
 	cli.AssertContains(t, stderr, "already blocked by")
 }
 
-func TestBlockMultipleBlockers(t *testing.T) {
+func Test_Block_Multiple_Blockers_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -133,7 +133,7 @@ func TestBlockMultipleBlockers(t *testing.T) {
 	cli.AssertContains(t, content, "blocked-by: ["+ticketID2+", "+ticketID3+"]")
 }
 
-func TestBlockHelp(t *testing.T) {
+func Test_Block_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {

@@ -12,7 +12,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-func TestListTicketsEmptyDirCreatesCache(t *testing.T) {
+func Test_List_Tickets_Empty_Dir_Creates_Cache_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -49,7 +49,7 @@ func TestListTicketsEmptyDirCreatesCache(t *testing.T) {
 	}
 }
 
-func TestListTicketsDirMtimeAdditionTriggersReconcile(t *testing.T) {
+func Test_List_Tickets_Dir_Mtime_Addition_Triggers_Reconcile_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -94,7 +94,7 @@ func TestListTicketsDirMtimeAdditionTriggersReconcile(t *testing.T) {
 	}
 }
 
-func TestListTicketsDirMtimeDeletionTriggersReconcile(t *testing.T) {
+func Test_List_Tickets_Dir_Mtime_Deletion_Triggers_Reconcile_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -139,7 +139,7 @@ func TestListTicketsDirMtimeDeletionTriggersReconcile(t *testing.T) {
 	}
 }
 
-func TestListTicketsDoesNotReparseWhenDirUnchanged(t *testing.T) {
+func Test_List_Tickets_Does_Not_Reparse_When_Dir_Unchanged_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -181,7 +181,7 @@ func TestListTicketsDoesNotReparseWhenDirUnchanged(t *testing.T) {
 	}
 }
 
-func TestListTicketsReconcileDoesNotReparseExisting(t *testing.T) {
+func Test_List_Tickets_Reconcile_Does_Not_Reparse_Existing_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -227,7 +227,7 @@ func TestListTicketsReconcileDoesNotReparseExisting(t *testing.T) {
 	}
 }
 
-func TestListTicketsCorruptCacheRebuildsAndWarns(t *testing.T) {
+func Test_List_Tickets_Corrupt_Cache_Rebuilds_And_Warns_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -275,7 +275,7 @@ func TestListTicketsCorruptCacheRebuildsAndWarns(t *testing.T) {
 	_ = cache.Close()
 }
 
-func TestCacheMtimeIsNotOlderThanDirMtimeAfterWrite(t *testing.T) {
+func Test_Cache_Mtime_Is_Not_Older_Than_Dir_Mtime_After_Write_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -331,7 +331,7 @@ func TestCacheMtimeIsNotOlderThanDirMtimeAfterWrite(t *testing.T) {
 	}
 }
 
-func TestCreateTestTicketFullMtimeWithClosedStatus(t *testing.T) {
+func Test_Create_Test_Ticket_Full_Mtime_With_Closed_Status_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -348,7 +348,7 @@ func TestCreateTestTicketFullMtimeWithClosedStatus(t *testing.T) {
 	}
 }
 
-func TestCreateTestTicketFullMtimeWithBlockers(t *testing.T) {
+func Test_Create_Test_Ticket_Full_Mtime_With_Blockers_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()

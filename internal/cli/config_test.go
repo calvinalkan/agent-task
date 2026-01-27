@@ -10,7 +10,7 @@ import (
 
 // Tests for print-config command.
 
-func TestPrintConfig_Defaults(t *testing.T) {
+func Test_Print_Config_Defaults_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -18,7 +18,7 @@ func TestPrintConfig_Defaults(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
-func TestPrintConfig_FromConfigFile(t *testing.T) {
+func Test_Print_Config_From_Config_File_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -28,7 +28,7 @@ func TestPrintConfig_FromConfigFile(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "my-tickets"))
 }
 
-func TestPrintConfig_FromConfigFileWithComments(t *testing.T) {
+func Test_Print_Config_From_Config_File_With_Comments_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -41,7 +41,7 @@ func TestPrintConfig_FromConfigFileWithComments(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "commented-tickets"))
 }
 
-func TestPrintConfig_ExplicitConfigFlag(t *testing.T) {
+func Test_Print_Config_Explicit_Config_Flag_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -51,7 +51,7 @@ func TestPrintConfig_ExplicitConfigFlag(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "custom-dir"))
 }
 
-func TestPrintConfig_ExplicitConfigFlagLong(t *testing.T) {
+func Test_Print_Config_Explicit_Config_Flag_Long_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -61,7 +61,7 @@ func TestPrintConfig_ExplicitConfigFlagLong(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "custom-dir"))
 }
 
-func TestPrintConfig_TicketDirOverride(t *testing.T) {
+func Test_Print_Config_Ticket_Dir_Override_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -71,7 +71,7 @@ func TestPrintConfig_TicketDirOverride(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "from-cli"))
 }
 
-func TestPrintConfig_TicketDirOverrideWithEquals(t *testing.T) {
+func Test_Print_Config_Ticket_Dir_Override_With_Equals_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -81,7 +81,7 @@ func TestPrintConfig_TicketDirOverrideWithEquals(t *testing.T) {
 
 // Tests for config errors.
 
-func TestConfig_ExplicitConfigNotFound(t *testing.T) {
+func Test_Config_Explicit_Config_Not_Found_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -89,7 +89,7 @@ func TestConfig_ExplicitConfigNotFound(t *testing.T) {
 	cli.AssertContains(t, stderr, "config file not found")
 }
 
-func TestConfig_InvalidJSON(t *testing.T) {
+func Test_Config_Invalid_JSON_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -99,7 +99,7 @@ func TestConfig_InvalidJSON(t *testing.T) {
 	cli.AssertContains(t, stderr, "invalid")
 }
 
-func TestConfig_EmptyTicketDir(t *testing.T) {
+func Test_Config_Empty_Ticket_Dir_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	// Empty string in config file is treated as "not set" and uses default
@@ -110,7 +110,7 @@ func TestConfig_EmptyTicketDir(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
-func TestConfig_EmptyTicketDirViaCLI(t *testing.T) {
+func Test_Config_Empty_Ticket_Dir_Via_CLI_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -120,7 +120,7 @@ func TestConfig_EmptyTicketDirViaCLI(t *testing.T) {
 
 // Tests for flag parsing errors.
 
-func TestFlags_ConfigRequiresArgument(t *testing.T) {
+func Test_Flags_Config_Requires_Argument_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -128,7 +128,7 @@ func TestFlags_ConfigRequiresArgument(t *testing.T) {
 	cli.AssertContains(t, stderr, "flag needs an argument")
 }
 
-func TestFlags_TicketDirRequiresArgument(t *testing.T) {
+func Test_Flags_Ticket_Dir_Requires_Argument_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -136,7 +136,7 @@ func TestFlags_TicketDirRequiresArgument(t *testing.T) {
 	cli.AssertContains(t, stderr, "flag needs an argument")
 }
 
-func TestFlags_UnknownFlag(t *testing.T) {
+func Test_Flags_Unknown_Flag_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -146,7 +146,7 @@ func TestFlags_UnknownFlag(t *testing.T) {
 
 // Tests for unknown command.
 
-func TestUnknownCommand(t *testing.T) {
+func Test_Unknown_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -155,7 +155,7 @@ func TestUnknownCommand(t *testing.T) {
 	cli.AssertContains(t, stderr, "not-a-command")
 }
 
-func TestUnknownCommand_PrintsUsage(t *testing.T) {
+func Test_Unknown_Command_Prints_Usage_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -166,7 +166,7 @@ func TestUnknownCommand_PrintsUsage(t *testing.T) {
 
 // Tests for help.
 
-func TestHelp_CommandIsUnknown(t *testing.T) {
+func Test_Help_Command_Is_Unknown_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -174,7 +174,7 @@ func TestHelp_CommandIsUnknown(t *testing.T) {
 	cli.AssertContains(t, stderr, "unknown command")
 }
 
-func TestHelp_DashH(t *testing.T) {
+func Test_Help_Dash_H_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -182,7 +182,7 @@ func TestHelp_DashH(t *testing.T) {
 	cli.AssertContains(t, stdout, "tk - minimal ticket system")
 }
 
-func TestHelp_DashDashHelp(t *testing.T) {
+func Test_Help_Dash_Dash_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -192,7 +192,7 @@ func TestHelp_DashDashHelp(t *testing.T) {
 
 // Tests for -C flag.
 
-func TestCFlag_ChangesWorkDir(t *testing.T) {
+func Test_C_Flag_Changes_Work_Dir_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -215,7 +215,7 @@ func TestCFlag_ChangesWorkDir(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(subdir, "subdir-tickets"))
 }
 
-func TestCFlag_CombinedForm(t *testing.T) {
+func Test_C_Flag_Combined_Form_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -228,7 +228,7 @@ func TestCFlag_CombinedForm(t *testing.T) {
 	_ = stdout
 }
 
-func TestCwdFlag_Long(t *testing.T) {
+func Test_Cwd_Flag_Long_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -238,7 +238,7 @@ func TestCwdFlag_Long(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "cwd-test"))
 }
 
-func TestCwdFlag_LongWithEquals(t *testing.T) {
+func Test_Cwd_Flag_Long_With_Equals_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -250,7 +250,7 @@ func TestCwdFlag_LongWithEquals(t *testing.T) {
 
 // Test precedence.
 
-func TestConfig_Precedence_CLIOverridesFile(t *testing.T) {
+func Test_Config_Precedence_CLI_Overrides_File_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -260,7 +260,7 @@ func TestConfig_Precedence_CLIOverridesFile(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "from-cli"))
 }
 
-func TestConfig_Precedence_ExplicitConfigOverridesDefault(t *testing.T) {
+func Test_Config_Precedence_Explicit_Config_Overrides_Default_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -271,7 +271,7 @@ func TestConfig_Precedence_ExplicitConfigOverridesDefault(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "from-explicit"))
 }
 
-func TestConfig_Precedence_CLIOverridesExplicitConfig(t *testing.T) {
+func Test_Config_Precedence_CLI_Overrides_Explicit_Config_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -283,7 +283,7 @@ func TestConfig_Precedence_CLIOverridesExplicitConfig(t *testing.T) {
 
 // Tests for global config.
 
-func TestConfig_GlobalConfig_Loaded(t *testing.T) {
+func Test_Config_Global_Config_Loaded_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -299,7 +299,7 @@ func TestConfig_GlobalConfig_Loaded(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
-func TestConfig_GlobalConfig_MissingIsNotError(t *testing.T) {
+func Test_Config_Global_Config_Missing_Is_Not_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -311,7 +311,7 @@ func TestConfig_GlobalConfig_MissingIsNotError(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
-func TestConfig_GlobalConfig_InvalidJSON(t *testing.T) {
+func Test_Config_Global_Config_Invalid_JSON_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -324,7 +324,7 @@ func TestConfig_GlobalConfig_InvalidJSON(t *testing.T) {
 	cli.AssertContains(t, stderr, "invalid")
 }
 
-func TestConfig_GlobalConfig_EmptyTicketDir(t *testing.T) {
+func Test_Config_Global_Config_Empty_Ticket_Dir_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	// Empty string in global config file is treated as "not set" and uses default
@@ -338,7 +338,7 @@ func TestConfig_GlobalConfig_EmptyTicketDir(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, ".tickets"))
 }
 
-func TestConfig_Precedence_ProjectOverridesGlobal(t *testing.T) {
+func Test_Config_Precedence_Project_Overrides_Global_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -359,7 +359,7 @@ func TestConfig_Precedence_ProjectOverridesGlobal(t *testing.T) {
 	cli.AssertContains(t, stdout, "editor=nvim")
 }
 
-func TestConfig_Precedence_ExplicitOverridesGlobal(t *testing.T) {
+func Test_Config_Precedence_Explicit_Overrides_Global_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -377,7 +377,7 @@ func TestConfig_Precedence_ExplicitOverridesGlobal(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "explicit-tickets"))
 }
 
-func TestConfig_Precedence_CLIOverridesGlobal(t *testing.T) {
+func Test_Config_Precedence_CLI_Overrides_Global_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -392,7 +392,7 @@ func TestConfig_Precedence_CLIOverridesGlobal(t *testing.T) {
 	cli.AssertContains(t, stdout, "ticket_dir="+filepath.Join(c.Dir, "cli-tickets"))
 }
 
-func TestConfig_Precedence_FullChain(t *testing.T) {
+func Test_Config_Precedence_Full_Chain_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -414,7 +414,7 @@ func TestConfig_Precedence_FullChain(t *testing.T) {
 	cli.AssertContains(t, stdout, "editor=nvim")
 }
 
-func TestConfig_GlobalConfig_PartialMerge(t *testing.T) {
+func Test_Config_Global_Config_Partial_Merge_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	th := cli.NewCLI(t)
@@ -436,7 +436,7 @@ func TestConfig_GlobalConfig_PartialMerge(t *testing.T) {
 
 // Tests for print-config sources output.
 
-func TestPrintConfig_ShowsDefaultsOnly(t *testing.T) {
+func Test_Print_Config_Shows_Defaults_Only_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -449,7 +449,7 @@ func TestPrintConfig_ShowsDefaultsOnly(t *testing.T) {
 	cli.AssertContains(t, stdout, "(defaults only)")
 }
 
-func TestPrintConfig_ShowsGlobalSource(t *testing.T) {
+func Test_Print_Config_Shows_Global_Source_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -465,7 +465,7 @@ func TestPrintConfig_ShowsGlobalSource(t *testing.T) {
 	cli.AssertContains(t, stdout, "global_config="+globalPath)
 }
 
-func TestPrintConfig_ShowsProjectSource(t *testing.T) {
+func Test_Print_Config_Shows_Project_Source_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -481,7 +481,7 @@ func TestPrintConfig_ShowsProjectSource(t *testing.T) {
 	cli.AssertContains(t, stdout, "project_config="+projectPath)
 }
 
-func TestPrintConfig_ShowsBothSources(t *testing.T) {
+func Test_Print_Config_Shows_Both_Sources_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

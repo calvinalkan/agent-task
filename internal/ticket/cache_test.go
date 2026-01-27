@@ -12,7 +12,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-func TestCacheVersion4HeaderAndEntrySize(t *testing.T) {
+func Test_Cache_Version4_Header_And_Entry_Size_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -61,7 +61,7 @@ func TestCacheVersion4HeaderAndEntrySize(t *testing.T) {
 	}
 }
 
-func TestPriorityAndTypeBytesEncoding(t *testing.T) {
+func Test_Priority_And_Type_Bytes_Encoding_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -104,7 +104,7 @@ func TestPriorityAndTypeBytesEncoding(t *testing.T) {
 	}
 }
 
-func TestBinarySearchWith56ByteEntries(t *testing.T) {
+func Test_Binary_Search_With56_Byte_Entries_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -153,7 +153,7 @@ func TestBinarySearchWith56ByteEntries(t *testing.T) {
 	}
 }
 
-func TestFilterEntries(t *testing.T) {
+func Test_Filter_Entries_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -216,7 +216,7 @@ func TestFilterEntries(t *testing.T) {
 	}
 }
 
-func TestCacheLoadErrors(t *testing.T) {
+func Test_Cache_Load_Errors_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -279,7 +279,7 @@ func TestCacheLoadErrors(t *testing.T) {
 	}
 }
 
-func TestUpdateAndDeleteCacheEntry(t *testing.T) {
+func Test_Update_And_Delete_Cache_Entry_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -372,7 +372,7 @@ func TestUpdateAndDeleteCacheEntry(t *testing.T) {
 	_ = cache.Close()
 }
 
-func TestCacheSizeLimitValidation(t *testing.T) {
+func Test_Cache_Size_Limit_Validation_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	setup := func(t *testing.T) (string, ticket.Summary) {

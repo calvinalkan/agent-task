@@ -7,7 +7,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestReopenCommand(t *testing.T) {
+func Test_Reopen_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -48,7 +48,7 @@ func TestReopenCommand(t *testing.T) {
 	}
 }
 
-func TestReopenClosedTicket(t *testing.T) {
+func Test_Reopen_Closed_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -68,7 +68,7 @@ func TestReopenClosedTicket(t *testing.T) {
 	cli.AssertContains(t, content, "status: open")
 }
 
-func TestReopenRemovesClosedTimestamp(t *testing.T) {
+func Test_Reopen_Removes_Closed_Timestamp_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -87,7 +87,7 @@ func TestReopenRemovesClosedTimestamp(t *testing.T) {
 	cli.AssertNotContains(t, content, "closed: ")
 }
 
-func TestReopenOpenTicketError(t *testing.T) {
+func Test_Reopen_Open_Ticket_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -97,7 +97,7 @@ func TestReopenOpenTicketError(t *testing.T) {
 	cli.AssertContains(t, stderr, "already open")
 }
 
-func TestReopenInProgressTicketError(t *testing.T) {
+func Test_Reopen_In_Progress_Ticket_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -108,14 +108,14 @@ func TestReopenInProgressTicketError(t *testing.T) {
 	cli.AssertContains(t, stderr, "not closed")
 }
 
-func TestReopenStdoutEmptyOnError(t *testing.T) {
+func Test_Reopen_Stdout_Empty_On_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
 	c.MustFail("reopen", "nonexistent")
 }
 
-func TestReopenFullCycleShowContent(t *testing.T) {
+func Test_Reopen_Full_Cycle_Show_Content_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -131,7 +131,7 @@ func TestReopenFullCycleShowContent(t *testing.T) {
 	cli.AssertNotContains(t, content, "closed: ")
 }
 
-func TestReopenHelp(t *testing.T) {
+func Test_Reopen_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -161,7 +161,7 @@ func TestReopenHelp(t *testing.T) {
 	}
 }
 
-func TestReopenWithClosedParentFails(t *testing.T) {
+func Test_Reopen_With_Closed_Parent_Fails_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -180,7 +180,7 @@ func TestReopenWithClosedParentFails(t *testing.T) {
 	cli.AssertContains(t, stderr, parentID)
 }
 
-func TestReopenWithOpenParentSucceeds(t *testing.T) {
+func Test_Reopen_With_Open_Parent_Succeeds_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -201,7 +201,7 @@ func TestReopenWithOpenParentSucceeds(t *testing.T) {
 	cli.AssertContains(t, content, "status: open")
 }
 
-func TestReopenWithInProgressParentSucceeds(t *testing.T) {
+func Test_Reopen_With_In_Progress_Parent_Succeeds_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -220,7 +220,7 @@ func TestReopenWithInProgressParentSucceeds(t *testing.T) {
 	cli.AssertContains(t, content, "status: open")
 }
 
-func TestReopenWithNoParentSucceeds(t *testing.T) {
+func Test_Reopen_With_No_Parent_Succeeds_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -234,7 +234,7 @@ func TestReopenWithNoParentSucceeds(t *testing.T) {
 	cli.AssertContains(t, content, "status: open")
 }
 
-func TestReopenParentThenChild(t *testing.T) {
+func Test_Reopen_Parent_Then_Child_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

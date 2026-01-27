@@ -7,7 +7,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestStartCommand(t *testing.T) {
+func Test_Start_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -48,7 +48,7 @@ func TestStartCommand(t *testing.T) {
 	}
 }
 
-func TestStartOpenTicket(t *testing.T) {
+func Test_Start_Open_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -68,7 +68,7 @@ func TestStartOpenTicket(t *testing.T) {
 	cli.AssertContains(t, content, "status: in_progress")
 }
 
-func TestStartAlreadyInProgressTicket(t *testing.T) {
+func Test_Start_Already_In_Progress_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -80,7 +80,7 @@ func TestStartAlreadyInProgressTicket(t *testing.T) {
 	cli.AssertContains(t, stderr, "in_progress")
 }
 
-func TestStartClosedTicket(t *testing.T) {
+func Test_Start_Closed_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -95,14 +95,14 @@ func TestStartClosedTicket(t *testing.T) {
 	cli.AssertContains(t, stderr, "closed")
 }
 
-func TestStartStdoutEmptyOnError(t *testing.T) {
+func Test_Start_Stdout_Empty_On_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
 	c.MustFail("start", "nonexistent")
 }
 
-func TestStartHelp(t *testing.T) {
+func Test_Start_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -132,7 +132,7 @@ func TestStartHelp(t *testing.T) {
 	}
 }
 
-func TestStartWithOpenParentFails(t *testing.T) {
+func Test_Start_With_Open_Parent_Fails_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -145,7 +145,7 @@ func TestStartWithOpenParentFails(t *testing.T) {
 	cli.AssertContains(t, stderr, parentID)
 }
 
-func TestStartWithInProgressParentSucceeds(t *testing.T) {
+func Test_Start_With_In_Progress_Parent_Succeeds_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -196,7 +196,7 @@ func Test_Start_Succeeds_When_Blocker_Is_Closed(t *testing.T) {
 	cli.AssertContains(t, content, "status: in_progress")
 }
 
-func TestStartWithNoParentSucceeds(t *testing.T) {
+func Test_Start_With_No_Parent_Succeeds_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

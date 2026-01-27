@@ -12,7 +12,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-func TestWriteThroughCacheCreateStartCloseReopen(t *testing.T) {
+func Test_Write_Through_Cache_Create_Start_Close_Reopen_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -57,7 +57,7 @@ func TestWriteThroughCacheCreateStartCloseReopen(t *testing.T) {
 	}
 }
 
-func TestWriteThroughCacheBlockUnblock(t *testing.T) {
+func Test_Write_Through_Cache_Block_Unblock_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -79,7 +79,7 @@ func TestWriteThroughCacheBlockUnblock(t *testing.T) {
 	}
 }
 
-func TestWriteThroughCacheRepairUpdatesEntry(t *testing.T) {
+func Test_Write_Through_Cache_Repair_Updates_Entry_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -106,7 +106,7 @@ func TestWriteThroughCacheRepairUpdatesEntry(t *testing.T) {
 	}
 }
 
-func TestConcurrentWritesDoNotCorruptCache(t *testing.T) {
+func Test_Concurrent_Writes_Do_Not_Corrupt_Cache_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	th := cli.NewCLI(t)

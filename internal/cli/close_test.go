@@ -7,7 +7,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestCloseCommand(t *testing.T) {
+func Test_Close_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -48,7 +48,7 @@ func TestCloseCommand(t *testing.T) {
 	}
 }
 
-func TestCloseInProgressTicket(t *testing.T) {
+func Test_Close_In_Progress_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -67,7 +67,7 @@ func TestCloseInProgressTicket(t *testing.T) {
 	cli.AssertContains(t, content, "status: closed")
 }
 
-func TestCloseAddsTimestamp(t *testing.T) {
+func Test_Close_Adds_Timestamp_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -84,7 +84,7 @@ func TestCloseAddsTimestamp(t *testing.T) {
 	}
 }
 
-func TestCloseOpenTicketError(t *testing.T) {
+func Test_Close_Open_Ticket_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -94,7 +94,7 @@ func TestCloseOpenTicketError(t *testing.T) {
 	cli.AssertContains(t, stderr, "must be started first")
 }
 
-func TestCloseAlreadyClosedTicketError(t *testing.T) {
+func Test_Close_Already_Closed_Ticket_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -108,14 +108,14 @@ func TestCloseAlreadyClosedTicketError(t *testing.T) {
 	cli.AssertContains(t, stderr, "already closed")
 }
 
-func TestCloseStdoutEmptyOnError(t *testing.T) {
+func Test_Close_Stdout_Empty_On_Error_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
 	c.MustFail("close", "nonexistent")
 }
 
-func TestCloseHelp(t *testing.T) {
+func Test_Close_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -145,7 +145,7 @@ func TestCloseHelp(t *testing.T) {
 	}
 }
 
-func TestCloseWithOpenChildFails(t *testing.T) {
+func Test_Close_With_Open_Child_Fails_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -161,7 +161,7 @@ func TestCloseWithOpenChildFails(t *testing.T) {
 	cli.AssertContains(t, stderr, childID)
 }
 
-func TestCloseWithInProgressChildFails(t *testing.T) {
+func Test_Close_With_In_Progress_Child_Fails_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -178,7 +178,7 @@ func TestCloseWithInProgressChildFails(t *testing.T) {
 	cli.AssertContains(t, stderr, childID)
 }
 
-func TestCloseWithClosedChildSucceeds(t *testing.T) {
+func Test_Close_With_Closed_Child_Succeeds_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -196,7 +196,7 @@ func TestCloseWithClosedChildSucceeds(t *testing.T) {
 	cli.AssertContains(t, content, "status: closed")
 }
 
-func TestCloseWithMultipleChildrenOneOpen(t *testing.T) {
+func Test_Close_With_Multiple_Children_One_Open_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -218,7 +218,7 @@ func TestCloseWithMultipleChildrenOneOpen(t *testing.T) {
 	cli.AssertContains(t, stderr, child2ID)
 }
 
-func TestCloseWithNoChildrenSucceeds(t *testing.T) {
+func Test_Close_With_No_Children_Succeeds_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

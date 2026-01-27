@@ -12,7 +12,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/ticket"
 )
 
-func TestRepairCommand(t *testing.T) {
+func Test_Repair_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -53,7 +53,7 @@ func TestRepairCommand(t *testing.T) {
 	}
 }
 
-func TestRepairStaleBlocker(t *testing.T) {
+func Test_Repair_Stale_Blocker_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -77,7 +77,7 @@ func TestRepairStaleBlocker(t *testing.T) {
 	cli.AssertContains(t, content, "blocked-by: []")
 }
 
-func TestRepairDryRun(t *testing.T) {
+func Test_Repair_Dry_Run_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -100,7 +100,7 @@ func TestRepairDryRun(t *testing.T) {
 	cli.AssertContains(t, content, "blocked-by: [stale123]")
 }
 
-func TestRepairAll(t *testing.T) {
+func Test_Repair_All_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -131,7 +131,7 @@ func TestRepairAll(t *testing.T) {
 	cli.AssertContains(t, stdout, "Repaired "+ticketID2)
 }
 
-func TestRepairNothingToRepair(t *testing.T) {
+func Test_Repair_Nothing_To_Repair_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -146,7 +146,7 @@ func TestRepairNothingToRepair(t *testing.T) {
 	cli.AssertContains(t, stdout, "Nothing to repair")
 }
 
-func TestRepairAllNothingToRepair(t *testing.T) {
+func Test_Repair_All_Nothing_To_Repair_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -161,7 +161,7 @@ func TestRepairAllNothingToRepair(t *testing.T) {
 	cli.AssertContains(t, stdout, "Nothing to repair")
 }
 
-func TestRepairHelp(t *testing.T) {
+func Test_Repair_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -180,7 +180,7 @@ func TestRepairHelp(t *testing.T) {
 	cli.AssertContains(t, stdout, "--all")
 }
 
-func TestRepairIdempotent(t *testing.T) {
+func Test_Repair_Idempotent_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -207,7 +207,7 @@ func TestRepairIdempotent(t *testing.T) {
 	cli.AssertContains(t, stdout2, "Nothing to repair")
 }
 
-func TestRepairWithValidBlocker(t *testing.T) {
+func Test_Repair_With_Valid_Blocker_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -228,7 +228,7 @@ func TestRepairWithValidBlocker(t *testing.T) {
 	cli.AssertContains(t, content, "blocked-by: ["+blockerID+"]")
 }
 
-func TestRepairMainHelpShowsRepair(t *testing.T) {
+func Test_Repair_Main_Help_Shows_Repair_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

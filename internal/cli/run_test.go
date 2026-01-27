@@ -7,7 +7,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestInvalidGlobalFlag(t *testing.T) {
+func Test_Invalid_Global_Flag_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -33,7 +33,7 @@ func TestInvalidGlobalFlag(t *testing.T) {
 	cli.AssertContains(t, stderr, "--ticket-dir")
 }
 
-func TestEmptyTicketDirFlag(t *testing.T) {
+func Test_Empty_Ticket_Dir_Flag_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -58,7 +58,7 @@ func TestEmptyTicketDirFlag(t *testing.T) {
 	cli.AssertContains(t, stderr, "--ticket-dir")
 }
 
-func TestBareCommand(t *testing.T) {
+func Test_Bare_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	// Call Run directly without test helper (which adds --cwd)
@@ -79,7 +79,7 @@ func TestBareCommand(t *testing.T) {
 	cli.AssertContains(t, stdout.String(), "create <title>")
 }
 
-func TestMainHelp(t *testing.T) {
+func Test_Main_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -111,7 +111,7 @@ func TestMainHelp(t *testing.T) {
 	}
 }
 
-func TestNoCommandWithFlags(t *testing.T) {
+func Test_No_Command_With_Flags_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -134,7 +134,7 @@ func TestNoCommandWithFlags(t *testing.T) {
 	cli.AssertContains(t, stderr, "create <title>")
 }
 
-func TestInvalidCommandFlag(t *testing.T) {
+func Test_Invalid_Command_Flag_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

@@ -10,7 +10,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestReadyEmptyDir(t *testing.T) {
+func Test_Ready_Empty_Dir_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -27,7 +27,7 @@ func TestReadyEmptyDir(t *testing.T) {
 	cli.AssertContains(t, stderr, "no tickets ready for pickup")
 }
 
-func TestReadyJSONEmpty(t *testing.T) {
+func Test_Ready_JSON_Empty_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -47,7 +47,7 @@ func TestReadyJSONEmpty(t *testing.T) {
 	}
 }
 
-func TestReadyJSONWithTickets(t *testing.T) {
+func Test_Ready_JSON_With_Tickets_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -103,7 +103,7 @@ func TestReadyJSONWithTickets(t *testing.T) {
 	}
 }
 
-func TestReadyLimit(t *testing.T) {
+func Test_Ready_Limit_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -138,7 +138,7 @@ func TestReadyLimit(t *testing.T) {
 	}
 }
 
-func TestReadyLimitJSON(t *testing.T) {
+func Test_Ready_Limit_JSON_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -165,7 +165,7 @@ func TestReadyLimitJSON(t *testing.T) {
 	}
 }
 
-func TestReadyFieldID(t *testing.T) {
+func Test_Ready_Field_ID_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -189,7 +189,7 @@ func TestReadyFieldID(t *testing.T) {
 	}
 }
 
-func TestReadyFieldWithLimit(t *testing.T) {
+func Test_Ready_Field_With_Limit_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -203,7 +203,7 @@ func TestReadyFieldWithLimit(t *testing.T) {
 	}
 }
 
-func TestReadyFieldJSON(t *testing.T) {
+func Test_Ready_Field_JSON_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -232,7 +232,7 @@ func TestReadyFieldJSON(t *testing.T) {
 	}
 }
 
-func TestReadyFieldPriorityJSON(t *testing.T) {
+func Test_Ready_Field_Priority_JSON_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -257,7 +257,7 @@ func TestReadyFieldPriorityJSON(t *testing.T) {
 	}
 }
 
-func TestReadyFieldInvalid(t *testing.T) {
+func Test_Ready_Field_Invalid_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -272,7 +272,7 @@ func TestReadyFieldInvalid(t *testing.T) {
 	cli.AssertContains(t, stderr, "invalid field")
 }
 
-func TestReadyOpenTicket(t *testing.T) {
+func Test_Ready_Open_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -284,7 +284,7 @@ func TestReadyOpenTicket(t *testing.T) {
 	cli.AssertContains(t, stdout, "[open]")
 }
 
-func TestReadyInProgressExcluded(t *testing.T) {
+func Test_Ready_In_Progress_Excluded_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -297,7 +297,7 @@ func TestReadyInProgressExcluded(t *testing.T) {
 	cli.AssertNotContains(t, stdout, ticketID)
 }
 
-func TestReadyClosedExcluded(t *testing.T) {
+func Test_Ready_Closed_Excluded_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -310,7 +310,7 @@ func TestReadyClosedExcluded(t *testing.T) {
 	cli.AssertNotContains(t, stdout, ticketID)
 }
 
-func TestReadyBlockedByOpen(t *testing.T) {
+func Test_Ready_Blocked_By_Open_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -326,7 +326,7 @@ func TestReadyBlockedByOpen(t *testing.T) {
 	cli.AssertNotContains(t, stdout, blockedID)
 }
 
-func TestReadyBlockedByInProgress(t *testing.T) {
+func Test_Ready_Blocked_By_In_Progress_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -341,7 +341,7 @@ func TestReadyBlockedByInProgress(t *testing.T) {
 	cli.AssertNotContains(t, stdout, blockedID)
 }
 
-func TestReadyBlockedByClosed(t *testing.T) {
+func Test_Ready_Blocked_By_Closed_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -359,7 +359,7 @@ func TestReadyBlockedByClosed(t *testing.T) {
 	cli.AssertNotContains(t, stdout, blockerID+" ")
 }
 
-func TestReadyBlockedByNonExistent(t *testing.T) {
+func Test_Ready_Blocked_By_Non_Existent_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -393,7 +393,7 @@ func TestReadyBlockedByNonExistent(t *testing.T) {
 	cli.AssertContains(t, stderr, "blocked by non-existent ticket")
 }
 
-func TestReadySortByPriority(t *testing.T) {
+func Test_Ready_Sort_By_Priority_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -421,7 +421,7 @@ func TestReadySortByPriority(t *testing.T) {
 	cli.AssertContains(t, lines[2], "[P3]")
 }
 
-func TestReadySamePrioritySortByID(t *testing.T) {
+func Test_Ready_Same_Priority_Sort_By_ID_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -440,7 +440,7 @@ func TestReadySamePrioritySortByID(t *testing.T) {
 	}
 }
 
-func TestReadyOutputFormat(t *testing.T) {
+func Test_Ready_Output_Format_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	t.Run("output shows priority and status and title", func(t *testing.T) {
@@ -458,7 +458,7 @@ func TestReadyOutputFormat(t *testing.T) {
 	})
 }
 
-func TestReadyHelp(t *testing.T) {
+func Test_Ready_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -487,7 +487,7 @@ func TestReadyHelp(t *testing.T) {
 	}
 }
 
-func TestReadyInMainHelp(t *testing.T) {
+func Test_Ready_In_Main_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -495,7 +495,7 @@ func TestReadyInMainHelp(t *testing.T) {
 	cli.AssertContains(t, stdout, "ready")
 }
 
-func TestReadyActiveTicketCoverage(t *testing.T) {
+func Test_Ready_Active_Ticket_Coverage_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -527,7 +527,7 @@ func TestReadyActiveTicketCoverage(t *testing.T) {
 	cli.AssertContains(t, lsOutput, blockedID)
 }
 
-func TestReadyIdempotent(t *testing.T) {
+func Test_Ready_Idempotent_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -543,7 +543,7 @@ func TestReadyIdempotent(t *testing.T) {
 	}
 }
 
-func TestReadyChildWithOpenParentExcluded(t *testing.T) {
+func Test_Ready_Child_With_Open_Parent_Excluded_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -558,7 +558,7 @@ func TestReadyChildWithOpenParentExcluded(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, childID)
 }
 
-func TestReadyChildWithInProgressParentIncluded(t *testing.T) {
+func Test_Ready_Child_With_In_Progress_Parent_Included_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -576,7 +576,7 @@ func TestReadyChildWithInProgressParentIncluded(t *testing.T) {
 	cli.AssertTicketListed(t, stdout, childID)
 }
 
-func TestReadyShowsParentInOutput(t *testing.T) {
+func Test_Ready_Shows_Parent_In_Output_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -592,7 +592,7 @@ func TestReadyShowsParentInOutput(t *testing.T) {
 	cli.AssertContains(t, stdout, "(parent: "+parentID+")")
 }
 
-func TestReadyMultipleLevelsOfParents(t *testing.T) {
+func Test_Ready_Multiple_Levels_Of_Parents_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -621,7 +621,7 @@ func TestReadyMultipleLevelsOfParents(t *testing.T) {
 	cli.AssertTicketListed(t, stdout, childID)
 }
 
-func TestReadyNoParentTicketIsReady(t *testing.T) {
+func Test_Ready_No_Parent_Ticket_Is_Ready_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -633,7 +633,7 @@ func TestReadyNoParentTicketIsReady(t *testing.T) {
 	cli.AssertNotContains(t, stdout, "(parent:")
 }
 
-func TestReadyCacheRegenAfterVersionChange(t *testing.T) {
+func Test_Ready_Cache_Regen_After_Version_Change_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -661,7 +661,7 @@ func TestReadyCacheRegenAfterVersionChange(t *testing.T) {
 	cli.AssertTicketNotListed(t, stdout, childID)
 }
 
-func TestReadyParentCheckAfterCacheRegen(t *testing.T) {
+func Test_Ready_Parent_Check_After_Cache_Regen_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

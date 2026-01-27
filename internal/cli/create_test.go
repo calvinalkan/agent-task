@@ -10,7 +10,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestCreateCommand(t *testing.T) {
+func Test_Create_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -216,7 +216,7 @@ func TestCreateCommand(t *testing.T) {
 	}
 }
 
-func TestCreateWithBlocker(t *testing.T) {
+func Test_Create_With_Blocker_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -227,7 +227,7 @@ func TestCreateWithBlocker(t *testing.T) {
 	cli.AssertContains(t, content, "blocked-by: ["+blockerID+"]")
 }
 
-func TestCreateMultipleBlockers(t *testing.T) {
+func Test_Create_Multiple_Blockers_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -240,7 +240,7 @@ func TestCreateMultipleBlockers(t *testing.T) {
 	cli.AssertContains(t, content, blocker2)
 }
 
-func TestCreateIDsUniqueUnderConcurrency(t *testing.T) {
+func Test_Create_I_Ds_Unique_Under_Concurrency_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -271,7 +271,7 @@ func TestCreateIDsUniqueUnderConcurrency(t *testing.T) {
 	}
 }
 
-func TestCreateIDsSortLexicographically(t *testing.T) {
+func Test_Create_I_Ds_Sort_Lexicographically_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -288,7 +288,7 @@ func TestCreateIDsSortLexicographically(t *testing.T) {
 	}
 }
 
-func TestCreateHandlesSameSecondCollision(t *testing.T) {
+func Test_Create_Handles_Same_Second_Collision_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -309,7 +309,7 @@ func TestCreateHandlesSameSecondCollision(t *testing.T) {
 	}
 }
 
-func TestCreateDirCreatedIfMissing(t *testing.T) {
+func Test_Create_Dir_Created_If_Missing_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -328,7 +328,7 @@ func TestCreateDirCreatedIfMissing(t *testing.T) {
 	}
 }
 
-func TestCreateIDHasNoDash(t *testing.T) {
+func Test_Create_ID_Has_No_Dash_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -343,7 +343,7 @@ func TestCreateIDHasNoDash(t *testing.T) {
 	}
 }
 
-func TestCreateOmitsSectionsIfNotProvided(t *testing.T) {
+func Test_Create_Omits_Sections_If_Not_Provided_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -354,7 +354,7 @@ func TestCreateOmitsSectionsIfNotProvided(t *testing.T) {
 	cli.AssertNotContains(t, content, "## Acceptance Criteria")
 }
 
-func TestCreateOmitsAssigneeIfEmpty(t *testing.T) {
+func Test_Create_Omits_Assignee_If_Empty_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -364,7 +364,7 @@ func TestCreateOmitsAssigneeIfEmpty(t *testing.T) {
 	cli.AssertContains(t, content, "assignee: TestUser")
 }
 
-func TestCreateAllOptions(t *testing.T) {
+func Test_Create_All_Options_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -389,7 +389,7 @@ func TestCreateAllOptions(t *testing.T) {
 	cli.AssertContains(t, content, "assignee: Alice")
 }
 
-func TestCreateLongFlags(t *testing.T) {
+func Test_Create_Long_Flags_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -407,7 +407,7 @@ func TestCreateLongFlags(t *testing.T) {
 	cli.AssertContains(t, content, "assignee: Bob")
 }
 
-func TestCreateNoLockFilesLeftBehind(t *testing.T) {
+func Test_Create_No_Lock_Files_Left_Behind_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -451,7 +451,7 @@ func TestCreateNoLockFilesLeftBehind(t *testing.T) {
 	}
 }
 
-func TestCreateHelp(t *testing.T) {
+func Test_Create_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -488,7 +488,7 @@ func TestCreateHelp(t *testing.T) {
 	}
 }
 
-func TestCreateWithParent(t *testing.T) {
+func Test_Create_With_Parent_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -499,7 +499,7 @@ func TestCreateWithParent(t *testing.T) {
 	cli.AssertContains(t, content, "parent: "+parentID)
 }
 
-func TestCreateWithInvalidParent(t *testing.T) {
+func Test_Create_With_Invalid_Parent_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -507,7 +507,7 @@ func TestCreateWithInvalidParent(t *testing.T) {
 	cli.AssertContains(t, stderr, "parent not found")
 }
 
-func TestCreateWithClosedParent(t *testing.T) {
+func Test_Create_With_Closed_Parent_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -548,7 +548,7 @@ func assertFrontmatterOrder(t *testing.T, content string, wantKeys []string) {
 	}
 }
 
-func TestCreateWithEmptyParent(t *testing.T) {
+func Test_Create_With_Empty_Parent_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -556,7 +556,7 @@ func TestCreateWithEmptyParent(t *testing.T) {
 	cli.AssertContains(t, stderr, "empty value not allowed: --parent")
 }
 
-func TestCreateOmitsParentIfNotProvided(t *testing.T) {
+func Test_Create_Omits_Parent_If_Not_Provided_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)

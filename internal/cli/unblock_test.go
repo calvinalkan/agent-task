@@ -7,7 +7,7 @@ import (
 	"github.com/calvinalkan/agent-task/internal/cli"
 )
 
-func TestUnblockCommand(t *testing.T) {
+func Test_Unblock_Command_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -54,7 +54,7 @@ func TestUnblockCommand(t *testing.T) {
 	}
 }
 
-func TestUnblockNotBlocked(t *testing.T) {
+func Test_Unblock_Not_Blocked_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -75,7 +75,7 @@ func Test_Unblock_Returns_Error_When_Blocker_ID_Missing_For_Existing_Ticket(t *t
 	cli.AssertContains(t, stderr, "blocker ID is required")
 }
 
-func TestUnblockTicket(t *testing.T) {
+func Test_Unblock_Ticket_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -101,7 +101,7 @@ func TestUnblockTicket(t *testing.T) {
 	cli.AssertContains(t, content, "blocked-by: []")
 }
 
-func TestUnblockOnlyRemovesSpecificBlocker(t *testing.T) {
+func Test_Unblock_Only_Removes_Specific_Blocker_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -118,7 +118,7 @@ func TestUnblockOnlyRemovesSpecificBlocker(t *testing.T) {
 	cli.AssertContains(t, content, "blocked-by: ["+ticketID3+"]")
 }
 
-func TestBlockThenUnblockReturnsToOriginalState(t *testing.T) {
+func Test_Block_Then_Unblock_Returns_To_Original_State_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
@@ -135,7 +135,7 @@ func TestBlockThenUnblockReturnsToOriginalState(t *testing.T) {
 	cli.AssertContains(t, finalContent, "blocked-by: []")
 }
 
-func TestUnblockHelp(t *testing.T) {
+func Test_Unblock_Help_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -164,7 +164,7 @@ func TestUnblockHelp(t *testing.T) {
 	}
 }
 
-func TestCreateBlockUnblockWorkflow(t *testing.T) {
+func Test_Create_Block_Unblock_Workflow_When_Invoked(t *testing.T) {
 	t.Parallel()
 
 	c := cli.NewCLI(t)
