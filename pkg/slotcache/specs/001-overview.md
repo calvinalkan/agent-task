@@ -1,9 +1,9 @@
 # slotcache v1: mmap-friendly slot cache format ("SLC1")
 
-slotcache is a **throwaway, file-backed cache** optimized for:
+slotcache is a **throwaway, mnap-backed cache** optimized for:
 
-- **Fast reads** via `mmap` (Unix)
-- **Fast O(n) filtering** by scanning a dense slot array sequentially
+- **Fast reads** via `mmap` 
+- **Fast O(n) filtering** by scanning a dense slot array sequentially. Binary search is supported for O(log n) reads if keys are ordered.
 - **Fast point lookups and updates** via a persisted `key → slot_id` hash index
 - **Cheap invalidation/reset** (cache semantics; not a primary data store)
 
