@@ -3,6 +3,7 @@ package store
 
 import (
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +36,24 @@ func ShortIDFromUUID(id uuid.UUID) (string, error) {
 
 	return shortIDFromUUIDBits(id), nil
 }
+
+// PathFromID derives the canonical ticket location for a UUIDv7 relative to the ticket dir.
+// We key the directory by the embedded UTC timestamp to keep file layout stable.
+// It returns an error when the UUID is not a valid UUIDv7.
+func PathFromID(id uuid.UUID) (string, error) {
+	err := validateUUIDv7(id)
+	if err != nil {
+		return "", fmt.Errorf("derive path: %w", err)
+	}
+
+	shortID := shortIDFromUUIDBits(id)
+	createdAt := uuidV7Time(id)
+	relDir := createdAt.Format(pathDateLayout)
+
+	return filepath.Join(relDir, shortID+".md"), nil
+}
+
+const pathDateLayout = "2006/01-02" // YYYY/MM-DD (example: 2026/01-31)
 
 func encodeCrockfordBase32(value uint64) string {
 	var buf [shortIDLength]byte

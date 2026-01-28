@@ -481,7 +481,7 @@ Not yet implemented. Will:
 - [x] Add SQLite busy_timeout pragma (10s)
 
 ### Phase 4 — Store API
-- [ ] Implement `Get(id)` 
+- [x] Implement `Get(id)` 
 - [ ] Implement Tx buffer + `Put`/`Delete`
 - [ ] Implement `Commit()` sequence: WAL → files → SQLite → truncate WAL
 - [ ] Implement `Rollback()`

@@ -66,7 +66,7 @@ func Test_TicketPath_ReturnsCanonicalPath_When_UUIDv7Provided(t *testing.T) {
 		t.Fatalf("short id: %v", err)
 	}
 
-	got, err := store.TicketPath(id)
+	got, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -90,7 +90,7 @@ func Test_ShortID_ReturnsError_When_UUIDNotV7(t *testing.T) {
 		t.Fatal("expected error for non-v7 uuid")
 	}
 
-	_, err = store.TicketPath(id)
+	_, err = store.PathFromID(id)
 	if err == nil {
 		t.Fatal("expected error for non-v7 uuid")
 	}

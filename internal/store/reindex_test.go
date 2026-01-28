@@ -137,7 +137,7 @@ func Test_Rebuild_Builds_SQLite_Index_When_Tickets_Are_Valid(t *testing.T) {
 			t.Fatalf("short_id = %s, want %s", shortID, expectedShort)
 		}
 
-		expectedPath, pathErr := store.TicketPath(parsedID)
+		expectedPath, pathErr := store.PathFromID(parsedID)
 		if pathErr != nil {
 			t.Fatalf("ticket path: %v", pathErr)
 		}
@@ -242,7 +242,7 @@ func Test_Rebuild_Replays_WAL_When_Committed(t *testing.T) {
 	createdAt := time.Date(2026, 1, 27, 9, 30, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x2222222222222222)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -602,7 +602,7 @@ func assertIssuePaths(t *testing.T, scanErr *store.IndexScanError, paths []strin
 func writeRawTicket(t *testing.T, root string, id uuid.UUID, contents string) string {
 	t.Helper()
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}

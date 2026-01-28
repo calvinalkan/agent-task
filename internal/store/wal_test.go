@@ -119,7 +119,7 @@ func Test_Open_Replays_WAL_Put_And_Delete_When_Committed(t *testing.T) {
 	createdAt := time.Date(2026, 1, 23, 8, 0, 0, 0, time.UTC)
 	deleteID := makeUUIDv7(t, createdAt, 0xabc, 0x3333333333333333)
 
-	deletePath, err := store.TicketPath(deleteID)
+	deletePath, err := store.PathFromID(deleteID)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -143,7 +143,7 @@ func Test_Open_Replays_WAL_Put_And_Delete_When_Committed(t *testing.T) {
 	putCreatedAt := createdAt.Add(2 * time.Hour)
 	putID := makeUUIDv7(t, putCreatedAt, 0xabc, 0x4444444444444444)
 
-	putPath, err := store.TicketPath(putID)
+	putPath, err := store.PathFromID(putID)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -241,7 +241,7 @@ func Test_Open_Truncates_WAL_And_Rebuilds_When_Uncommitted(t *testing.T) {
 	createdAt := time.Date(2026, 1, 25, 7, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x5555555555555555)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -595,7 +595,7 @@ func Test_Open_Replays_WAL_And_Rebuilds_When_Schema_Mismatch(t *testing.T) {
 	createdAt := time.Date(2026, 1, 24, 12, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x8888888888888888)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -685,7 +685,7 @@ func Test_Open_Replays_WAL_Appends_Newline_When_Content_Lacks_Trailing(t *testin
 	createdAt := time.Date(2026, 1, 24, 13, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x9999999999999999)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -766,7 +766,7 @@ func Test_Open_Replays_WAL_Delete_When_File_Missing(t *testing.T) {
 	createdAt := time.Date(2026, 1, 24, 14, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0xaaaaaaaaaaaaaaaa)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -831,7 +831,7 @@ func Test_Open_Truncates_WAL_When_Footer_Invalid(t *testing.T) {
 	createdAt := time.Date(2026, 1, 25, 7, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x5555555555555555)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -990,7 +990,7 @@ func Test_Open_Returns_Error_When_WAL_Ops_Are_Invalid(t *testing.T) {
 	createdAt := time.Date(2026, 1, 26, 11, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0xbbbbbbbbbbbbbbbb)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -1211,7 +1211,7 @@ func Test_Open_Returns_Error_When_WAL_Index_Update_Fails(t *testing.T) {
 	createdAt := time.Date(2026, 1, 26, 12, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0xcccccccccccccccc)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}
@@ -1285,7 +1285,7 @@ func Test_Query_Replays_WAL_When_Committed(t *testing.T) {
 	createdAt := time.Date(2026, 1, 26, 13, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0xdddddddddddddddd)
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}

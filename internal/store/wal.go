@@ -311,7 +311,7 @@ func validateWalOp(op walOp) (walOp, error) {
 		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
 	}
 
-	expected, err := TicketPath(id)
+	expected, err := PathFromID(id)
 	if err != nil {
 		return walOp{}, fmt.Errorf("derive path for %q: %w: %w", op.ID, ErrWALReplay, err)
 	}

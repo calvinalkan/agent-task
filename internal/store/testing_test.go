@@ -127,7 +127,7 @@ func writeTicket(t *testing.T, root string, ticket *ticketFixture) string {
 		t.Fatalf("parse uuid: %v", err)
 	}
 
-	relPath, err := store.TicketPath(id)
+	relPath, err := store.PathFromID(id)
 	if err != nil {
 		t.Fatalf("ticket path: %v", err)
 	}

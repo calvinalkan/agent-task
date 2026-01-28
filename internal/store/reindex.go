@@ -276,7 +276,7 @@ func ticketFromFrontmatter(relPath, contextLabel, root string, st fileproc.Stat,
 		return Ticket{}, idRaw, fmt.Errorf("validate id at %s: %w", contextLabel, err)
 	}
 
-	expectedRel, err := TicketPath(id)
+	expectedRel, err := PathFromID(id)
 	if err != nil {
 		return Ticket{}, idRaw, fmt.Errorf("derive path for %s: %w", idRaw, err)
 	}
