@@ -643,13 +643,13 @@ Get(id)
 - [x] Implement deterministic frontmatter serialization
 
 ### Phase 2 — SQLite index
-- [ ] Define schema + version (`PRAGMA user_version`)
+- [x] Define schema + version (`PRAGMA user_version`)
 - [ ] Implement `Open()` SQLite initialization
-- [ ] Implement `Rebuild(dir)` using `fileproc.ProcessStat` (recursive, suffix `.md`)
-- [ ] Add `github.com/calvinalkan/fileproc` dependency (go.mod; go.work for local dev)
-- [ ] Add `github.com/mattn/go-sqlite3` dependency (CGO)
-- [ ] Rebuild runs in a single SQLite transaction (DROP/CREATE/INSERT, set `user_version` last)
-- [ ] Insert/update `ticket_blockers` table
+- [x] Implement `Rebuild(dir)` using `fileproc.ProcessStat` (recursive, suffix `.md`)
+- [x] Add `github.com/calvinalkan/fileproc` dependency (go.mod; go.work for local dev)
+- [x] Add `github.com/mattn/go-sqlite3` dependency (CGO)
+- [x] Rebuild runs in a single SQLite transaction (DROP/CREATE/INSERT, set `user_version` last)
+- [x] Insert/update `ticket_blockers` table
 - [ ] Implement `Query()` with filters + ordering by `id`
 
 ### Phase 3 — WAL + locking
@@ -660,12 +660,12 @@ Get(id)
 - [ ] Add atomic write helper using `pkg/fs.AtomicWriter` (temp + rename + fsync)
 
 ### Phase 4 — Store API
-- [ ] Implement `Get(id)` (strict)
+- [ ] Implement `Get(id)` 
 - [ ] Implement Tx buffer + `Put`/`Delete`
 - [ ] Implement `Commit()` sequence: WAL → files → SQLite → truncate WAL
 - [ ] Implement `Rollback()`
 - [ ] Add typed query options (status/type/priority/parent/short-id)
-- [ ] Expose `Rebuild(dir)` as a standalone entrypoint (no `Open()` required)
+- [x] Expose `Rebuild(dir)` as a standalone entrypoint (no `Open()` required)
 
 ### Phase 5 — CLI migration
 - [ ] Replace `internal/ticket.ListTickets` usage with store.Query
@@ -677,7 +677,7 @@ Get(id)
 
 ### Phase 6 — Tests
 - [ ] Keep CLI/e2e tests as the primary safety net
-- [ ] Update CLI tests for new IDs + paths
+- [ ] Update CLI tests for new IDs + paths, make spec tests in testutil use uuidv7
 - [ ] Remove old cache/lock tests under `internal/ticket`
 
 ### Phase 7 — Cleanup / docs
@@ -688,8 +688,7 @@ Get(id)
 - [ ] Remove per-ticket locking (`internal/ticket/lock.go`)
 - [ ] Remove `github.com/natefinch/atomic` dependency (use `pkg/fs`)
 - [ ] Remove `internal/ticket` tests (cache-specific, no longer relevant)
-- [ ] Update README + CLI docs to new layout
-- [ ] Add `tk rebuild` doc
+- [ ] All CLI commands use the correct architecture and reference the new APIs
 
 ---
 
