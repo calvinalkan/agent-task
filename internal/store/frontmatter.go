@@ -59,13 +59,6 @@ var (
 	falseBytes                = []byte("false")
 )
 
-var (
-	errMissingFrontmatter  = errors.New("frontmatter: missing opening delimiter")
-	errUnclosedFrontmatter = errors.New("frontmatter: missing closing delimiter")
-	errFrontmatterTooLong  = errors.New("frontmatter: exceeds maximum line limit")
-	errUnsupported         = errors.New("frontmatter: unsupported")
-)
-
 // ParseOptions configures frontmatter parsing behavior.
 type ParseOptions struct {
 	// LineLimit is the maximum number of frontmatter lines allowed. A value of 0
@@ -137,7 +130,7 @@ func ParseFrontmatter(src []byte, opts ...ParseOption) (Frontmatter, []byte, err
 		}
 
 		if !ok || !bytes.Equal(first.data, frontmatterDelimiterBytes) {
-			return nil, nil, errMissingFrontmatter
+			return nil, nil, errors.New("parse frontmatter: missing opening delimiter")
 		}
 	}
 
@@ -149,11 +142,11 @@ func ParseFrontmatter(src []byte, opts ...ParseOption) (Frontmatter, []byte, err
 	}
 
 	if options.RequireDelimiter && !sawDelimiter {
-		return nil, nil, errUnclosedFrontmatter
+		return nil, nil, errors.New("parse frontmatter: missing closing delimiter")
 	}
 
 	if source.pending != nil {
-		return nil, nil, errors.New("frontmatter: internal parse state")
+		return nil, nil, errors.New("parse frontmatter: internal parse state")
 	}
 
 	tail := source.remainder()
@@ -201,7 +194,7 @@ func ParseFrontmatterReader(r io.Reader, opts ...ParseOption) (Frontmatter, io.R
 		}
 
 		if !ok || !bytes.Equal(first.data, frontmatterDelimiterBytes) {
-			return nil, nil, errMissingFrontmatter
+			return nil, nil, errors.New("parse frontmatter: missing opening delimiter")
 		}
 	}
 
@@ -213,11 +206,11 @@ func ParseFrontmatterReader(r io.Reader, opts ...ParseOption) (Frontmatter, io.R
 	}
 
 	if options.RequireDelimiter && !sawDelimiter {
-		return nil, nil, errUnclosedFrontmatter
+		return nil, nil, errors.New("parse frontmatter: missing closing delimiter")
 	}
 
 	if source.pending != nil {
-		return nil, nil, errors.New("frontmatter: internal parse state")
+		return nil, nil, errors.New("parse frontmatter: internal parse state")
 	}
 
 	if options.RequireDelimiter && options.TrimLeadingBlankTail {
@@ -636,7 +629,7 @@ func parseScalar(value []byte) (Scalar, error) {
 	}
 
 	if valueHasUnsupportedPrefix(value) {
-		return Scalar{}, errUnsupported
+		return Scalar{}, errors.New("unsupported value")
 	}
 
 	if bytes.Equal(value, trueBytes) || bytes.Equal(value, falseBytes) {
@@ -740,7 +733,7 @@ func (p *frontmatterParser) bumpLineCount() error {
 	}
 
 	if p.linesSeen > p.lineLimit {
-		return errFrontmatterTooLong
+		return errors.New("parse frontmatter: exceeds maximum line limit")
 	}
 
 	return nil
@@ -856,7 +849,7 @@ type frontmatterError struct {
 }
 
 func (e *frontmatterError) Error() string {
-	return fmt.Sprintf("frontmatter line %d: %s", e.line, e.msg)
+	return fmt.Sprintf("parse frontmatter line %d: %s", e.line, e.msg)
 }
 
 func frontmatterErr(line int, msg string) error {

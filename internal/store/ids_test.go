@@ -73,7 +73,7 @@ func Test_TicketPath_ReturnsCanonicalPath_When_UUIDv7Provided(t *testing.T) {
 
 	expectedDir := ts.UTC().Format("2006/01-02")
 
-	want := filepath.Join(".tickets", expectedDir, shortID+".md")
+	want := filepath.Join(expectedDir, shortID+".md")
 	if got != want {
 		t.Fatalf("ticket path mismatch\n got: %q\nwant: %q", got, want)
 	}

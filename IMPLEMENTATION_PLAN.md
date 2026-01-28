@@ -27,14 +27,14 @@ Importat: We do **not** support windows. We assume a POSIX-like filesystem and l
 - **SQLite driver**: `github.com/mattn/go-sqlite3` (CGO).
 - **IDs are UUIDv7** (`github.com/google/uuid` v1.6+).
 - **short_id**: base32 (Crockford) derived from UUIDv7 random bits; length **12**.
-- **Canonical path**: `.tickets/YYYY/MM-DD/<short_id>.md`.
+- **Canonical path**: `ticketDir/YYYY/MM-DD/<short_id>.md` (relative path: `YYYY/MM-DD/<short_id>.md`).
 - **Frontmatter**:
   - YAML subset defined below (scalars + flat string lists + flat objects).
   - `id` first, `schema_version` second, remaining keys alphabetical.
   - Keep existing field names (`status`, `type`, `priority`, `blocked-by`, `parent`, etc.).
 - **WAL format**: JSONL body + fixed 32-byte footer with CRC (defined below).
 - **Filesystem IO**: use `pkg/fs` with `fs.Real` for atomic writes + locking (replaces `github.com/natefinch/atomic`).
-- **Locking**: `pkg/fs.Locker` (flock) on `.tickets/.tk/wal`:
+- **Locking**: `pkg/fs.Locker` (flock) on `ticketDir/.tk/wal`:
   - shared lock for reads
   - exclusive lock for writes and recovery
 - **Get(id)** is strict (no filesystem scan).
@@ -60,7 +60,7 @@ Importat: We do **not** support windows. We assume a POSIX-like filesystem and l
 
 ### 3.1 Directory Layout
 ```
-.tickets/
+ticketDir/
   YYYY/
     MM-DD/
       <short_id>.md
@@ -77,7 +77,7 @@ Importat: We do **not** support windows. We assume a POSIX-like filesystem and l
 Query(...)  -> SQLite (index only)
 Get(id)    -> read markdown file directly
 ```
-Readers take a **shared** lock on `.tickets/.tk/wal` to avoid mid-commit state.
+Readers take a **shared** lock on `ticketDir/.tk/wal` to avoid mid-commit state.
 
 **Writes**
 ```
@@ -89,7 +89,7 @@ Commit:
   4) update SQLite index in a single transaction (on failure keep WAL)
   5) truncate WAL
 ```
-Writers take **exclusive** lock on `.tickets/.tk/wal`.
+Writers take **exclusive** lock on `ticketDir/.tk/wal`.
 
 ---
 
@@ -102,7 +102,7 @@ Writers take **exclusive** lock on `.tickets/.tk/wal`.
 
 ### 4.2 Path Derivation
 ```
-Path(id) = .tickets/YYYY/MM-DD/<short_id>.md
+Path(id) = YYYY/MM-DD/<short_id>.md   // relative to ticketDir
 ```
 - `YYYY/MM-DD` derived from UUIDv7 timestamp **in UTC** (no local-time ambiguity).
 - `short_id` from UUIDv7 random bits.
@@ -174,17 +174,18 @@ Ordering:
 - Writers MUST fsync temp files before rename.
 - Writers MUST fsync parent directories after rename/delete to persist metadata (deduplicate them based on file layout to avoid unnecessary fsyncs).
 - Temp files MUST NOT end with `.md` (to avoid accidental indexing).
-- Writers MUST NOT write inside `.tickets/.tk/`.
+- Writers MUST NOT write inside `ticketDir/.tk/`.
 
 ### 4.7 Rebuild Rules
 
-- Rebuild acquires an **exclusive** lock on `.tickets/.tk/wal` for the full run.
-- Rebuild walks `.tickets/` recursively and ignores `.tickets/.tk/`.
+- Rebuild acquires an **exclusive** lock on `ticketDir/.tk/wal` for the full run.
+- Rebuild walks `ticketDir/` recursively and ignores `ticketDir/.tk/`.
 - Rebuild uses `github.com/calvinalkan/fileproc` (recursive `ProcessStat` with `Suffix: ".md"`) as the file walker; the callback skips any path under `.tk/`.
 - `fileproc` callback paths are borrowed and callbacks may run concurrently; rebuild must copy paths it retains and avoid unsynchronized shared state.
 - Only regular `.md` files are considered candidates.
-- Orphans (file path does not match canonical path for its `id`) are reported and skipped.
+- Orphans (file path does not match canonical path for its `id`) are reported as scan errors; rebuild does not update SQLite.
 - Symlinked directories are not followed.
+- Rebuild returns scan errors without updating SQLite (no partial index); fix files and rerun.
 - Rebuild executes in a **single SQLite transaction** (DROP/CREATE/INSERT), and sets `PRAGMA user_version` last; no `VACUUM` or `PRAGMA journal_mode` inside the txn.
 - Rebuild handles WAL state under the exclusive lock: committed WAL is replayed to files (idempotent) before rebuild; uncommitted WAL is truncated. WAL is truncated only after a successful rebuild.
 - WAL replay during rebuild uses the same atomic write/remove helpers as Commit (same fsync semantics).
@@ -192,7 +193,7 @@ Ordering:
 
 ### 4.8 WAL Format
 
-**File:** `.tickets/.tk/wal` (also the lock target). The file MUST be stable (no delete+replace); modify in place via `ftruncate` + writes.
+**File:** `ticketDir/.tk/wal` (also the lock target). The file MUST be stable (no delete+replace); modify in place via `ftruncate` + writes.
 
 **Body:** UTF-8 JSON Lines, one record per line. Records are the **net ops** for a commit.
 
@@ -237,7 +238,7 @@ struct WalFooterV1 {
 - If footer valid + CRC ok: replay WAL to files (idempotent), attempt to update SQLite; if that fails, return `ErrIndexUpdate` and leave WAL (operator should run `tk rebuild`).
 
 **Force recovery (optional):**
-- Operator may copy `.tickets/.tk/wal` for inspection, then `ftruncate` it to 0 and rebuild index.
+- Operator may copy `ticketDir/.tk/wal` for inspection, then `ftruncate` it to 0 and rebuild index.
 - Only allowed while holding the exclusive WAL lock.
 
 ### 4.9 SQLite Configuration (PRAGMAs)
@@ -543,7 +544,7 @@ func (tx *Tx) Delete(id string) error
 func (tx *Tx) Commit() error
 func (tx *Tx) Rollback() error
 
-func Rebuild(dir string) error
+func Rebuild(ctx context.Context, ticketDir string) (int, error)
 ```
 
 Rules ownership:
@@ -565,7 +566,7 @@ Rules ownership:
 | `start/close/reopen` | per-file lock + edit | store.Update via Tx |
 | `block/unblock` | per-file lock + edit | store.Update via Tx |
 | `edit --apply` | direct file write | store.Update via Tx |
-| `rebuild` (was `repair --rebuild-cache`) | rebuild binary cache | store.Rebuild(dir) |
+| `rebuild` (was `repair --rebuild-cache`) | rebuild binary cache | store.Rebuild(ctx, ticketDir) |
 
 ### 7.2 Dataflow Diagram
 
@@ -582,7 +583,7 @@ internal/store
     │
     ├─ Get(id)      → read file
     ├─ Query()      → SQLite only
-    └─ Rebuild(dir) → scan files → SQLite
+    └─ Rebuild(ctx, ticketDir) → scan files → SQLite (only if scan is clean)
 ```
 
 ---
@@ -592,7 +593,7 @@ internal/store
 ```
 Tx.Commit()
    │
-   ├─ LOCK_EX on .tickets/.tk/wal
+   ├─ LOCK_EX on ticketDir/.tk/wal
    ├─ recover WAL if needed
    ├─ write WAL body
    ├─ write WAL footer + fsync (commit point)
@@ -605,7 +606,7 @@ Tx.Commit()
 ```
 Query()
    │
-   ├─ LOCK_SH on .tickets/.tk/wal
+   ├─ LOCK_SH on ticketDir/.tk/wal
    ├─ recover WAL if needed
    └─ query SQLite
 ```
@@ -613,7 +614,7 @@ Query()
 ```
 Get(id)
    │
-   ├─ LOCK_SH on .tickets/.tk/wal
+   ├─ LOCK_SH on ticketDir/.tk/wal
    ├─ recover WAL if needed
    └─ read file directly
 ```
@@ -635,7 +636,7 @@ Get(id)
 ## 10. Migration Phases (Checkbox Plan)
 
 ### Phase 1 — Core primitives
-- [ ] Create `internal/store/` package skeleton
+- [x] Create `internal/store/` package skeleton
 - [x] Implement UUIDv7 generator (with google uuid package)
 - [x] Implement short_id derivation (base32, length 12)
 - [x] Implement path derivation (`YYYY/MM-DD/<short_id>.md`)
@@ -645,7 +646,7 @@ Get(id)
 ### Phase 2 — SQLite index
 - [x] Define schema + version (`PRAGMA user_version`)
 - [ ] Implement `Open()` SQLite initialization
-- [x] Implement `Rebuild(dir)` using `fileproc.ProcessStat` (recursive, suffix `.md`)
+- [x] Implement `Rebuild(ctx, ticketDir)` using `fileproc.ProcessStat` (recursive, suffix `.md`)
 - [x] Add `github.com/calvinalkan/fileproc` dependency (go.mod; go.work for local dev)
 - [x] Add `github.com/mattn/go-sqlite3` dependency (CGO)
 - [x] Rebuild runs in a single SQLite transaction (DROP/CREATE/INSERT, set `user_version` last)
@@ -665,7 +666,7 @@ Get(id)
 - [ ] Implement `Commit()` sequence: WAL → files → SQLite → truncate WAL
 - [ ] Implement `Rollback()`
 - [ ] Add typed query options (status/type/priority/parent/short-id)
-- [x] Expose `Rebuild(dir)` as a standalone entrypoint (no `Open()` required)
+- [x] Expose `Rebuild(ctx, ticketDir)` as a standalone entrypoint (no `Open()` required)
 
 ### Phase 5 — CLI migration
 - [ ] Replace `internal/ticket.ListTickets` usage with store.Query

@@ -13,7 +13,7 @@ import (
 func NewUUIDv7() (uuid.UUID, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
-		return uuid.UUID{}, fmt.Errorf("new uuidv7: %w", err)
+		return uuid.UUID{}, fmt.Errorf("generate uuidv7: %w", err)
 	}
 
 	return id, nil
@@ -29,24 +29,10 @@ const (
 func ShortIDFromUUID(id uuid.UUID) (string, error) {
 	err := validateUUIDv7(id)
 	if err != nil {
-		return "", fmt.Errorf("short id: %w", err)
+		return "", fmt.Errorf("derive short id: %w", err)
 	}
 
-	// UUIDv7 layout (RFC 9562): 48-bit time, 4-bit version, 12-bit rand_a,
-	// 2-bit variant, 62-bit rand_b. We use the high 60 random bits for short IDs.
-	randA := (uint16(id[6]&0x0f) << 8) | uint16(id[7])
-	randB := (uint64(id[8]&0x3f) << 56) |
-		(uint64(id[9]) << 48) |
-		(uint64(id[10]) << 40) |
-		(uint64(id[11]) << 32) |
-		(uint64(id[12]) << 24) |
-		(uint64(id[13]) << 16) |
-		(uint64(id[14]) << 8) |
-		uint64(id[15])
-
-	top60 := (uint64(randA) << 48) | (randB >> 14)
-
-	return encodeCrockfordBase32(top60), nil
+	return shortIDFromUUIDBits(id), nil
 }
 
 func encodeCrockfordBase32(value uint64) string {
@@ -65,13 +51,31 @@ func uuidV7Time(id uuid.UUID) time.Time {
 	return time.Unix(sec, nsec).UTC()
 }
 
+func shortIDFromUUIDBits(id uuid.UUID) string {
+	// UUIDv7 layout (RFC 9562): 48-bit time, 4-bit version, 12-bit rand_a,
+	// 2-bit variant, 62-bit rand_b. We use the high 60 random bits for short IDs.
+	randA := (uint16(id[6]&0x0f) << 8) | uint16(id[7])
+	randB := (uint64(id[8]&0x3f) << 56) |
+		(uint64(id[9]) << 48) |
+		(uint64(id[10]) << 40) |
+		(uint64(id[11]) << 32) |
+		(uint64(id[12]) << 24) |
+		(uint64(id[13]) << 16) |
+		(uint64(id[14]) << 8) |
+		uint64(id[15])
+
+	top60 := (uint64(randA) << 48) | (randB >> 14)
+
+	return encodeCrockfordBase32(top60)
+}
+
 func validateUUIDv7(id uuid.UUID) error {
 	if id.Version() != 7 {
-		return fmt.Errorf("invalid uuidv7: version %d", id.Version())
+		return fmt.Errorf("invalid UUID version %d (expected 7)", id.Version())
 	}
 
 	if id.Variant() != uuid.RFC4122 {
-		return fmt.Errorf("invalid uuidv7: variant %d", id.Variant())
+		return fmt.Errorf("invalid UUID variant %d (expected RFC4122)", id.Variant())
 	}
 
 	return nil
