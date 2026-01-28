@@ -85,7 +85,7 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Ticket, error)
 }
 
 // GetByPrefix resolves a short_id or UUID prefix to matching tickets via SQLite.
-// It returns all tickets whose short_id or full ID starts with the given prefix.
+// It returns up to 50 tickets whose short_id or full ID starts with the given prefix.
 //
 // The caller decides how to handle the result:
 //   - Empty slice: no matches found

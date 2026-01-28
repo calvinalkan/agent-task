@@ -366,21 +366,32 @@ func nullTimePtr(value sql.NullInt64) *time.Time {
 	return &parsed
 }
 
+// maxPrefixResults caps GetByPrefix results. If a prefix matches more than this,
+// it's too ambiguous to be useful.
+const maxPrefixResults = 50
+
 // queryByPrefix finds tickets where short_id or full ID starts with the given prefix.
-// Results are ordered by ID to ensure consistent ordering for disambiguation.
+// Results are ordered by ID and capped at maxPrefixResults.
 func queryByPrefix(ctx context.Context, db *sql.DB, prefix string) ([]Ticket, error) {
+	// Subquery to limit tickets before joining blockers (LIMIT applies to rows, not tickets).
 	query := `
 		SELECT t.id, t.short_id, t.path, t.mtime_ns, t.status, t.type, t.priority,
 			t.assignee, t.parent, t.created_at, t.closed_at, t.external_ref, t.title,
 			b.blocker_id
-		FROM tickets t
+		FROM (
+			SELECT id, short_id, path, mtime_ns, status, type, priority,
+				assignee, parent, created_at, closed_at, external_ref, title
+			FROM tickets
+			WHERE short_id LIKE ? OR id LIKE ?
+			ORDER BY id
+			LIMIT ?
+		) t
 		LEFT JOIN ticket_blockers b ON t.id = b.ticket_id
-		WHERE t.short_id LIKE ? OR t.id LIKE ?
 		ORDER BY t.id, b.blocker_id`
 
 	pattern := prefix + "%"
 
-	rows, err := db.QueryContext(ctx, query, pattern, pattern)
+	rows, err := db.QueryContext(ctx, query, pattern, pattern, maxPrefixResults)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}
