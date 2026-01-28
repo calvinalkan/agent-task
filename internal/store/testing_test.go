@@ -7,9 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -196,27 +197,109 @@ func renderTicket(ticket *ticketFixture) string {
 	return builder.String()
 }
 
-func readTicketFile(t *testing.T, path string) (store.Frontmatter, string) {
+func readFileString(t *testing.T, path string) string {
 	t.Helper()
 
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("open ticket: %v", err)
+		t.Fatalf("read file %s: %v", path, err)
 	}
 
-	t.Cleanup(func() { _ = file.Close() })
+	return string(data)
+}
 
-	fm, tail, err := store.ParseFrontmatterReader(file)
-	if err != nil {
-		t.Fatalf("parse frontmatter: %v", err)
+func renderTicketFromFrontmatter(t *testing.T, fm map[string]any, content string) string {
+	t.Helper()
+
+	keys := make([]string, 0, len(fm))
+	for key := range fm {
+		keys = append(keys, key)
 	}
 
-	body, err := io.ReadAll(tail)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
+	if _, ok := fm["id"]; !ok {
+		t.Fatal("frontmatter missing id")
 	}
 
-	return fm, string(body)
+	if _, ok := fm["schema_version"]; !ok {
+		t.Fatal("frontmatter missing schema_version")
+	}
+
+	slices.Sort(keys)
+
+	ordered := make([]string, 0, len(keys))
+	ordered = append(ordered, "id", "schema_version")
+
+	for _, key := range keys {
+		if key == "id" || key == "schema_version" {
+			continue
+		}
+
+		ordered = append(ordered, key)
+	}
+
+	var builder strings.Builder
+	builder.WriteString("---\n")
+
+	for _, key := range ordered {
+		value, ok := fm[key]
+		if !ok {
+			t.Fatalf("frontmatter missing key %s", key)
+		}
+
+		writeFrontmatterValue(t, &builder, key, value)
+	}
+
+	builder.WriteString("---\n\n")
+	builder.WriteString(content)
+
+	if !strings.HasSuffix(content, "\n") {
+		builder.WriteString("\n")
+	}
+
+	return builder.String()
+}
+
+func writeFrontmatterValue(t *testing.T, builder *strings.Builder, key string, value any) {
+	t.Helper()
+
+	builder.WriteString(key)
+	builder.WriteString(": ")
+
+	switch typed := value.(type) {
+	case string:
+		builder.WriteString(typed)
+		builder.WriteString("\n")
+	case bool:
+		if typed {
+			builder.WriteString("true")
+		} else {
+			builder.WriteString("false")
+		}
+
+		builder.WriteString("\n")
+	case int:
+		builder.WriteString(strconv.Itoa(typed))
+		builder.WriteString("\n")
+	case int64:
+		builder.WriteString(strconv.FormatInt(typed, 10))
+		builder.WriteString("\n")
+	case []string:
+		if len(typed) == 0 {
+			builder.WriteString("[]\n")
+
+			return
+		}
+
+		builder.WriteString("\n")
+
+		for _, item := range typed {
+			builder.WriteString("  - ")
+			builder.WriteString(item)
+			builder.WriteString("\n")
+		}
+	default:
+		t.Fatalf("unsupported frontmatter value for %s: %T", key, value)
+	}
 }
 
 type walRecord struct {

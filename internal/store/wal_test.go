@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +95,13 @@ func Test_Open_Replays_WAL_When_Committed(t *testing.T) {
 	_, err = os.Stat(absPath)
 	if err != nil {
 		t.Fatalf("ticket missing at %s: %v", absPath, err)
+	}
+
+	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# WAL Ticket\nBody\n")
+
+	actual := readFileString(t, absPath)
+	if actual != expected {
+		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
 	}
 }
 
@@ -197,15 +203,11 @@ func Test_Open_Replays_WAL_Put_And_Delete_When_Committed(t *testing.T) {
 	}
 
 	absPut := filepath.Join(ticketDir, putPath)
-	fm, body := readTicketFile(t, absPut)
+	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(putFixture), "# Inserted\nBody\n")
 
-	value, ok := fm["blocked-by"]
-	if !ok || value.Kind != store.ValueList || len(value.List) != 1 || value.List[0] != deleteID.String() {
-		t.Fatalf("blocked-by frontmatter = %+v, want %s", value, deleteID.String())
-	}
-
-	if !strings.Contains(body, "# Inserted") {
-		t.Fatalf("body missing title: %q", body)
+	actual := readFileString(t, absPut)
+	if actual != expected {
+		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
 	}
 }
 
@@ -270,9 +272,19 @@ func Test_Open_Truncates_WAL_And_Rebuilds_When_Uncommitted(t *testing.T) {
 		t.Fatalf("wal size = %d, want 0", info.Size())
 	}
 
-	_, body := readTicketFile(t, filepath.Join(ticketDir, relPath))
-	if !strings.Contains(body, "# Original") {
-		t.Fatalf("body changed: %q", body)
+	absPath := filepath.Join(ticketDir, relPath)
+	expected := renderTicket(&ticketFixture{
+		ID:        id.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  2,
+		CreatedAt: createdAt,
+		Title:     "Original",
+	})
+
+	actual := readFileString(t, absPath)
+	if actual != expected {
+		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
 	}
 
 	rows, err := storeHandle.Query(t.Context(), nil)

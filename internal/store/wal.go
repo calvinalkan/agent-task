@@ -18,9 +18,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/calvinalkan/agent-task/pkg/fs"
 	"github.com/calvinalkan/fileproc"
 	"github.com/google/uuid"
+
+	"github.com/calvinalkan/agent-task/pkg/fs"
 )
 
 const (
@@ -55,6 +56,73 @@ type walOp struct {
 	Path        string         `json:"path"`
 	Frontmatter map[string]any `json:"frontmatter,omitempty"`
 	Content     string         `json:"content,omitempty"`
+}
+
+func (s *Store) recoverWal(ctx context.Context, rebuildIndex bool) error {
+	// Recovery runs under the WAL lock so readers never observe mid-commit state.
+	state, body, err := readWalState(s.wal)
+	if err != nil {
+		return err
+	}
+
+	switch state {
+	case walEmpty:
+		if rebuildIndex {
+			err = s.rebuildIndex(ctx)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	case walUncommitted:
+		err = truncateWal(s.wal)
+		if err != nil {
+			return err
+		}
+
+		return s.rebuildIndex(ctx)
+	case walCorrupt:
+		return ErrWALCorrupt
+	case walCommitted:
+		ops, err := decodeWalOps(body)
+		if err != nil {
+			return err
+		}
+
+		err = s.replayWalOps(ctx, ops)
+		if err != nil {
+			return err
+		}
+
+		if rebuildIndex {
+			err = s.rebuildIndex(ctx)
+		} else {
+			err = s.updateIndexFromOps(ctx, ops)
+		}
+
+		if err != nil {
+			return err
+		}
+
+		return truncateWal(s.wal)
+	default:
+		return fmt.Errorf("wal: unknown state %d", state)
+	}
+}
+
+func (s *Store) rebuildIndex(ctx context.Context) error {
+	entries, scanErr := scanTicketFiles(ctx, s.dir)
+	if scanErr != nil {
+		return scanErr
+	}
+
+	_, err := rebuildIndexInTxn(ctx, s.sql, entries)
+	if err != nil {
+		return fmt.Errorf("rebuild index: %w", err)
+	}
+
+	return nil
 }
 
 func walHasData(file fs.File) (bool, error) {
@@ -290,73 +358,6 @@ func validateWalPath(path string) error {
 
 	if !strings.HasSuffix(path, ".md") {
 		return fmt.Errorf("%w: path must end with .md", ErrWALReplay)
-	}
-
-	return nil
-}
-
-func (s *Store) recoverWal(ctx context.Context, rebuildIndex bool) error {
-	// Recovery runs under the WAL lock so readers never observe mid-commit state.
-	state, body, err := readWalState(s.wal)
-	if err != nil {
-		return err
-	}
-
-	switch state {
-	case walEmpty:
-		if rebuildIndex {
-			err = s.rebuildIndex(ctx)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	case walUncommitted:
-		err = truncateWal(s.wal)
-		if err != nil {
-			return err
-		}
-
-		return s.rebuildIndex(ctx)
-	case walCorrupt:
-		return ErrWALCorrupt
-	case walCommitted:
-		ops, err := decodeWalOps(body)
-		if err != nil {
-			return err
-		}
-
-		err = s.replayWalOps(ctx, ops)
-		if err != nil {
-			return err
-		}
-
-		if rebuildIndex {
-			err = s.rebuildIndex(ctx)
-		} else {
-			err = s.updateIndexFromOps(ctx, ops)
-		}
-
-		if err != nil {
-			return err
-		}
-
-		return truncateWal(s.wal)
-	default:
-		return fmt.Errorf("wal: unknown state %d", state)
-	}
-}
-
-func (s *Store) rebuildIndex(ctx context.Context) error {
-	entries, scanErr := scanTicketFiles(ctx, s.dir)
-	if scanErr != nil {
-		return scanErr
-	}
-
-	_, err := rebuildIndexInTxn(ctx, s.sql, entries)
-	if err != nil {
-		return fmt.Errorf("rebuild index: %w", err)
 	}
 
 	return nil
