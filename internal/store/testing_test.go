@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,6 +196,29 @@ func renderTicket(ticket *ticketFixture) string {
 	return builder.String()
 }
 
+func readTicketFile(t *testing.T, path string) (store.Frontmatter, string) {
+	t.Helper()
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open ticket: %v", err)
+	}
+
+	t.Cleanup(func() { _ = file.Close() })
+
+	fm, tail, err := store.ParseFrontmatterReader(file)
+	if err != nil {
+		t.Fatalf("parse frontmatter: %v", err)
+	}
+
+	body, err := io.ReadAll(tail)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	return fm, string(body)
+}
+
 type walRecord struct {
 	Op          string         `json:"op"`
 	ID          string         `json:"id"`
@@ -240,6 +264,37 @@ func writeWalFile(t *testing.T, path string, ops []walRecord) {
 	_, err = file.Write(footer)
 	if err != nil {
 		t.Fatalf("write wal footer: %v", err)
+	}
+
+	err = file.Sync()
+	if err != nil {
+		t.Fatalf("sync wal: %v", err)
+	}
+}
+
+func writeWalBodyOnly(t *testing.T, path string, ops []walRecord) {
+	t.Helper()
+
+	body, err := encodeWalOps(ops)
+	if err != nil {
+		t.Fatalf("encode wal ops: %v", err)
+	}
+
+	err = os.MkdirAll(filepath.Dir(path), 0o750)
+	if err != nil {
+		t.Fatalf("mkdir wal dir: %v", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+
+	t.Cleanup(func() { _ = file.Close() })
+
+	_, err = file.Write(body)
+	if err != nil {
+		t.Fatalf("write wal body: %v", err)
 	}
 
 	err = file.Sync()
