@@ -29,6 +29,50 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Summary, error
 		return nil, errors.New("query: limit/offset must be non-negative")
 	}
 
+	readLock, err := s.locker.RLock(s.walPath)
+	if err != nil {
+		return nil, fmt.Errorf("query: lock wal: %w", err)
+	}
+
+	walHasEntries, err := walHasData(s.wal)
+	if err != nil {
+		_ = readLock.Close()
+
+		return nil, fmt.Errorf("query: %w", err)
+	}
+
+	if walHasEntries {
+		_ = readLock.Close()
+		readLock = nil
+
+		writeLock, lockErr := s.locker.Lock(s.walPath)
+		if lockErr != nil {
+			return nil, fmt.Errorf("query: lock wal: %w", lockErr)
+		}
+
+		recoverErr := s.recoverWal(ctx, false)
+
+		closeErr := writeLock.Close()
+		if closeErr != nil && recoverErr == nil {
+			recoverErr = fmt.Errorf("query: unlock wal: %w", closeErr)
+		}
+
+		if recoverErr != nil {
+			return nil, recoverErr
+		}
+
+		readLock, err = s.locker.RLock(s.walPath)
+		if err != nil {
+			return nil, fmt.Errorf("query: lock wal: %w", err)
+		}
+	}
+
+	defer func() {
+		if readLock != nil {
+			_ = readLock.Close()
+		}
+	}()
+
 	clauses := make([]string, 0, 5)
 	args := make([]any, 0, 7)
 

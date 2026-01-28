@@ -7,13 +7,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/calvinalkan/agent-task/pkg/fs"
 )
 
-// Store holds the derived SQLite index for query operations.
-// File and WAL access come later; for now we keep the index handle centralized.
+// Store wires the derived SQLite index together with WAL and lock coordination.
+// Keeping these handles centralized ensures recovery uses consistent fs primitives.
 type Store struct {
 	dir string
 	sql *sql.DB
+	fs  fs.FS
+
+	locker  *fs.Locker
+	atomic  *fs.AtomicWriter
+	wal     fs.File
+	walPath string
 }
 
 // Open initializes the SQLite index for a ticket directory.
@@ -30,40 +38,79 @@ func Open(ctx context.Context, dir string) (*Store, error) {
 	ticketDir := filepath.Clean(dir)
 	tkDir := filepath.Join(ticketDir, ".tk")
 
-	err := os.MkdirAll(tkDir, 0o750)
+	fsReal := fs.NewReal()
+	locker := fs.NewLocker(fsReal)
+	atomicWriter := fs.NewAtomicWriter(fsReal)
+
+	err := fsReal.MkdirAll(tkDir, 0o750)
 	if err != nil {
 		return nil, fmt.Errorf("open store: create .tk directory: %w", err)
 	}
 
+	walPath := filepath.Join(tkDir, "wal")
+
+	walFile, err := fsReal.OpenFile(walPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open store: open wal: %w", err)
+	}
+
 	db, err := openSQLite(ctx, filepath.Join(tkDir, "index.sqlite"))
 	if err != nil {
+		_ = walFile.Close()
+
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
 	version, err := userVersion(ctx, db)
 	if err != nil {
+		_ = walFile.Close()
 		_ = db.Close()
 
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
-	if version != schemaVersion {
-		entries, scanErr := scanTicketFiles(ctx, ticketDir)
-		if scanErr != nil {
-			_ = db.Close()
+	store := &Store{
+		dir:     ticketDir,
+		sql:     db,
+		fs:      fsReal,
+		locker:  locker,
+		atomic:  atomicWriter,
+		wal:     walFile,
+		walPath: walPath,
+	}
 
-			return nil, fmt.Errorf("open store: %w", scanErr)
+	rebuildIndex := version != schemaVersion
+
+	walHasEntries, err := walHasData(walFile)
+	if err != nil {
+		_ = store.Close()
+
+		return nil, fmt.Errorf("open store: %w", err)
+	}
+
+	if rebuildIndex || walHasEntries {
+		lock, err := locker.Lock(walPath)
+		if err != nil {
+			_ = store.Close()
+
+			return nil, fmt.Errorf("open store: lock wal: %w", err)
 		}
 
-		_, err = rebuildIndexInTxn(ctx, db, entries)
-		if err != nil {
-			_ = db.Close()
+		recoverErr := store.recoverWal(ctx, rebuildIndex)
 
-			return nil, fmt.Errorf("open store: %w", err)
+		closeErr := lock.Close()
+		if closeErr != nil && recoverErr == nil {
+			recoverErr = fmt.Errorf("open store: unlock wal: %w", closeErr)
+		}
+
+		if recoverErr != nil {
+			_ = store.Close()
+
+			return nil, recoverErr
 		}
 	}
 
-	return &Store{dir: ticketDir, sql: db}, nil
+	return store, nil
 }
 
 // Close releases the SQLite handle opened by Open.
@@ -72,10 +119,19 @@ func (s *Store) Close() error {
 		return nil
 	}
 
+	errs := []error{}
+
 	err := s.sql.Close()
 	if err != nil {
-		return fmt.Errorf("close sqlite: %w", err)
+		errs = append(errs, fmt.Errorf("close sqlite: %w", err))
 	}
 
-	return nil
+	if s.wal != nil {
+		err := s.wal.Close()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("close wal: %w", err))
+		}
+	}
+
+	return errors.Join(errs...)
 }

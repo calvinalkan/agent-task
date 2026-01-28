@@ -654,11 +654,11 @@ Get(id)
 - [x] Implement `Query()` with filters + ordering by `id`
 
 ### Phase 3 — WAL + locking
-- [ ] Implement WAL format (JSONL + footer/CRC)
-- [ ] Implement WAL recovery on Open
-- [ ] Implement lock file using `pkg/fs.Locker` on `.tk/wal`
-- [ ] Add shared lock for reads, exclusive for writes
-- [ ] Add atomic write helper using `pkg/fs.AtomicWriter` (temp + rename + fsync)
+- [x] Implement WAL format (JSONL + footer/CRC)
+- [x] Implement WAL recovery on Open
+- [x] Implement lock file using `pkg/fs.Locker` on `.tk/wal`
+- [x] Add shared lock for reads, exclusive for writes
+- [x] Add atomic write helper using `pkg/fs.AtomicWriter` (temp + rename + fsync)
 
 ### Phase 4 — Store API
 - [ ] Implement `Get(id)` 

@@ -3,7 +3,10 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,4 +193,119 @@ func renderTicket(ticket *ticketFixture) string {
 	fmt.Fprint(&builder, "Body\n")
 
 	return builder.String()
+}
+
+type walRecord struct {
+	Op          string         `json:"op"`
+	ID          string         `json:"id"`
+	Path        string         `json:"path"`
+	Frontmatter map[string]any `json:"frontmatter,omitempty"`
+	Content     string         `json:"content,omitempty"`
+}
+
+const (
+	testWalMagic      = "TKWAL001"
+	testWalFooterSize = 32
+)
+
+var testWalCRC32C = crc32.MakeTable(crc32.Castagnoli)
+
+func writeWalFile(t *testing.T, path string, ops []walRecord) {
+	t.Helper()
+
+	body, err := encodeWalOps(ops)
+	if err != nil {
+		t.Fatalf("encode wal ops: %v", err)
+	}
+
+	footer := encodeWalFooter(body)
+
+	err = os.MkdirAll(filepath.Dir(path), 0o750)
+	if err != nil {
+		t.Fatalf("mkdir wal dir: %v", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+
+	t.Cleanup(func() { _ = file.Close() })
+
+	_, err = file.Write(body)
+	if err != nil {
+		t.Fatalf("write wal body: %v", err)
+	}
+
+	_, err = file.Write(footer)
+	if err != nil {
+		t.Fatalf("write wal footer: %v", err)
+	}
+
+	err = file.Sync()
+	if err != nil {
+		t.Fatalf("sync wal: %v", err)
+	}
+}
+
+func encodeWalOps(ops []walRecord) ([]byte, error) {
+	var buf strings.Builder
+
+	enc := json.NewEncoder(&buf)
+	for _, op := range ops {
+		err := enc.Encode(op)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return []byte(buf.String()), nil
+}
+
+func encodeWalFooter(body []byte) []byte {
+	buf := make([]byte, testWalFooterSize)
+	copy(buf[:8], testWalMagic)
+
+	bodyLen := uint64(len(body))
+	binary.LittleEndian.PutUint64(buf[8:16], bodyLen)
+	binary.LittleEndian.PutUint64(buf[16:24], ^bodyLen)
+
+	crc := crc32.Checksum(body, testWalCRC32C)
+	binary.LittleEndian.PutUint32(buf[24:28], crc)
+	binary.LittleEndian.PutUint32(buf[28:32], ^crc)
+
+	return buf
+}
+
+func walFrontmatterFromTicket(ticket *ticketFixture) map[string]any {
+	fm := map[string]any{
+		"id":             ticket.ID,
+		"schema_version": 1,
+		"status":         ticket.Status,
+		"type":           ticket.Type,
+		"priority":       ticket.Priority,
+		"created":        ticket.CreatedAt.UTC().Format(time.RFC3339),
+	}
+
+	if ticket.ClosedAt != nil {
+		fm["closed"] = ticket.ClosedAt.UTC().Format(time.RFC3339)
+	}
+
+	if len(ticket.BlockedBy) > 0 {
+		fm["blocked-by"] = ticket.BlockedBy
+	}
+
+	if ticket.Assignee != "" {
+		fm["assignee"] = ticket.Assignee
+	}
+
+	if ticket.Parent != "" {
+		fm["parent"] = ticket.Parent
+	}
+
+	if ticket.ExternalRef != "" {
+		fm["external-ref"] = ticket.ExternalRef
+	}
+
+	return fm
 }
