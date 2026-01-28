@@ -193,59 +193,12 @@ func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
 	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 
-	// Acquire shared lock and recover WAL if needed (same pattern as Query).
-	readLock, err := s.locker.RLockWithTimeout(lockCtx, s.lockPath)
+	readLock, err := s.acquireReadLock(ctx, lockCtx)
 	if err != nil {
-		return nil, fmt.Errorf("get: lock wal: %w", err)
+		return nil, fmt.Errorf("get: %w", err)
 	}
 
-	for {
-		walSize, statErr := s.walSize()
-		if statErr != nil {
-			_ = readLock.Close()
-
-			return nil, fmt.Errorf("get: wal stat: %w", statErr)
-		}
-
-		if walSize == 0 {
-			break
-		}
-
-		closeErr := readLock.Close()
-		if closeErr != nil {
-			return nil, fmt.Errorf("get: unlock wal: %w", closeErr)
-		}
-
-		readLock = nil
-
-		writeLock, lockErr := s.locker.LockWithTimeout(lockCtx, s.lockPath)
-		if lockErr != nil {
-			return nil, fmt.Errorf("get: lock wal: %w", lockErr)
-		}
-
-		recoverErr := s.recoverWalLocked(ctx)
-		if recoverErr != nil {
-			_ = writeLock.Close()
-
-			return nil, recoverErr
-		}
-
-		closeErr = writeLock.Close()
-		if closeErr != nil {
-			return nil, fmt.Errorf("get: unlock wal: %w", closeErr)
-		}
-
-		readLock, err = s.locker.RLockWithTimeout(lockCtx, s.lockPath)
-		if err != nil {
-			return nil, fmt.Errorf("get: lock wal: %w", err)
-		}
-	}
-
-	defer func() {
-		if readLock != nil {
-			_ = readLock.Close()
-		}
-	}()
+	defer func() { _ = readLock.Close() }()
 
 	ticket, err := s.readTicketFile(id, relPath)
 	if err != nil {
@@ -264,6 +217,56 @@ func (s *Store) walSize() (int64, error) {
 	}
 
 	return info.Size(), nil
+}
+
+// acquireReadLock takes a shared lock and recovers any pending WAL before returning.
+// The caller must close the returned lock when done. If WAL recovery is needed,
+// this temporarily upgrades to an exclusive lock, recovers, then downgrades.
+func (s *Store) acquireReadLock(ctx, lockCtx context.Context) (*fs.Lock, error) {
+	readLock, err := s.locker.RLockWithTimeout(lockCtx, s.lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("lock wal: %w", err)
+	}
+
+	for {
+		walSize, statErr := s.walSize()
+		if statErr != nil {
+			_ = readLock.Close()
+
+			return nil, fmt.Errorf("wal stat: %w", statErr)
+		}
+
+		if walSize == 0 {
+			return readLock, nil
+		}
+
+		closeErr := readLock.Close()
+		if closeErr != nil {
+			return nil, fmt.Errorf("unlock wal: %w", closeErr)
+		}
+
+		writeLock, lockErr := s.locker.LockWithTimeout(lockCtx, s.lockPath)
+		if lockErr != nil {
+			return nil, fmt.Errorf("lock wal: %w", lockErr)
+		}
+
+		recoverErr := s.recoverWalLocked(ctx)
+		if recoverErr != nil {
+			_ = writeLock.Close()
+
+			return nil, recoverErr
+		}
+
+		closeErr = writeLock.Close()
+		if closeErr != nil {
+			return nil, fmt.Errorf("unlock wal: %w", closeErr)
+		}
+
+		readLock, err = s.locker.RLockWithTimeout(lockCtx, s.lockPath)
+		if err != nil {
+			return nil, fmt.Errorf("lock wal: %w", err)
+		}
+	}
 }
 
 // readTicketFile reads and parses a ticket from its canonical path.

@@ -66,72 +66,12 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Ticket, error)
 	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 
-	// Stage: take a shared lock so we never read SQLite while a commit is mid-flight.
-	readLock, err := s.locker.RLockWithTimeout(lockCtx, s.lockPath)
+	readLock, err := s.acquireReadLock(ctx, lockCtx)
 	if err != nil {
-		return nil, fmt.Errorf("query: lock wal: %w", err)
+		return nil, fmt.Errorf("query: %w", err)
 	}
 
-	var walSize int64
-
-	// If the WAL has data, we need to recover under an exclusive lock. This loop:
-	//  1) checks the WAL under a shared lock,
-	//  2) releases the shared lock so we can upgrade to exclusive,
-	//  3) re-checks after the upgrade to avoid duplicate recoveries, and
-	//  4) reacquires the shared lock before querying to avoid mid-commit reads.
-	// We loop to handle the tiny window where another writer/recovery happens
-	// between releasing the exclusive lock and reacquiring the shared one.
-	for {
-		var statErr error
-
-		walSize, statErr = s.walSize()
-		if statErr != nil {
-			_ = readLock.Close()
-
-			return nil, fmt.Errorf("query: wal stat: %w", statErr)
-		}
-
-		if walSize == 0 {
-			break
-		}
-
-		closeErr := readLock.Close()
-		if closeErr != nil {
-			return nil, fmt.Errorf("query: unlock wal: %w", closeErr)
-		}
-
-		readLock = nil
-
-		// Stage: upgrade to exclusive lock for recovery.
-		writeLock, lockErr := s.locker.LockWithTimeout(lockCtx, s.lockPath)
-		if lockErr != nil {
-			return nil, fmt.Errorf("query: lock wal: %w", lockErr)
-		}
-
-		recoverErr := s.recoverWalLocked(ctx)
-		if recoverErr != nil {
-			_ = writeLock.Close()
-
-			return nil, recoverErr
-		}
-
-		closeErr = writeLock.Close()
-		if closeErr != nil {
-			return nil, fmt.Errorf("query: unlock wal: %w", closeErr)
-		}
-
-		// Stage: reacquire shared lock to guard against concurrent commits while querying.
-		readLock, err = s.locker.RLockWithTimeout(lockCtx, s.lockPath)
-		if err != nil {
-			return nil, fmt.Errorf("query: lock wal: %w", err)
-		}
-	}
-
-	defer func() {
-		if readLock != nil {
-			_ = readLock.Close()
-		}
-	}()
+	defer func() { _ = readLock.Close() }()
 
 	tickets, err := queryTickets(ctx, s.sql, &options)
 	if err != nil {
