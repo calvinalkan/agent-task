@@ -208,6 +208,122 @@ func readFileString(t *testing.T, path string) string {
 	return string(data)
 }
 
+func listMarkdownFiles(t *testing.T, root string) []string {
+	t.Helper()
+
+	var files []string
+
+	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if entry.IsDir() {
+			if entry.Name() == ".tk" {
+				return filepath.SkipDir
+			}
+
+			return nil
+		}
+
+		if strings.HasSuffix(path, ".md") {
+			files = append(files, path)
+		}
+
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk %s: %v", root, walkErr)
+	}
+
+	return files
+}
+
+func assertSummaryMatchesFixture(t *testing.T, summary *store.Summary, fixture *ticketFixture, relPath string, mtimeNS int64) {
+	t.Helper()
+
+	if summary.ID != fixture.ID {
+		t.Fatalf("summary id = %s, want %s", summary.ID, fixture.ID)
+	}
+
+	parsedID, err := uuidFromString(fixture.ID)
+	if err != nil {
+		t.Fatalf("parse id: %v", err)
+	}
+
+	shortID, err := store.ShortIDFromUUID(parsedID)
+	if err != nil {
+		t.Fatalf("short id: %v", err)
+	}
+
+	if summary.ShortID != shortID {
+		t.Fatalf("short id = %s, want %s", summary.ShortID, shortID)
+	}
+
+	if summary.Path != relPath {
+		t.Fatalf("path = %s, want %s", summary.Path, relPath)
+	}
+
+	if summary.MtimeNS != mtimeNS {
+		t.Fatalf("mtime_ns = %d, want %d", summary.MtimeNS, mtimeNS)
+	}
+
+	if summary.Status != fixture.Status {
+		t.Fatalf("status = %s, want %s", summary.Status, fixture.Status)
+	}
+
+	if summary.Type != fixture.Type {
+		t.Fatalf("type = %s, want %s", summary.Type, fixture.Type)
+	}
+
+	if summary.Priority != int64(fixture.Priority) {
+		t.Fatalf("priority = %d, want %d", summary.Priority, fixture.Priority)
+	}
+
+	if summary.Assignee != fixture.Assignee {
+		t.Fatalf("assignee = %s, want %s", summary.Assignee, fixture.Assignee)
+	}
+
+	if summary.Parent != fixture.Parent {
+		t.Fatalf("parent = %s, want %s", summary.Parent, fixture.Parent)
+	}
+
+	if summary.ExternalRef != fixture.ExternalRef {
+		t.Fatalf("external_ref = %s, want %s", summary.ExternalRef, fixture.ExternalRef)
+	}
+
+	if !summary.CreatedAt.Equal(fixture.CreatedAt.UTC()) {
+		t.Fatalf("created_at = %v, want %v", summary.CreatedAt, fixture.CreatedAt.UTC())
+	}
+
+	if fixture.ClosedAt == nil {
+		if summary.ClosedAt != nil {
+			t.Fatalf("closed_at = %v, want nil", summary.ClosedAt)
+		}
+	} else {
+		if summary.ClosedAt == nil || !summary.ClosedAt.Equal(fixture.ClosedAt.UTC()) {
+			t.Fatalf("closed_at = %v, want %v", summary.ClosedAt, fixture.ClosedAt.UTC())
+		}
+	}
+
+	if summary.Title != fixture.Title {
+		t.Fatalf("title = %s, want %s", summary.Title, fixture.Title)
+	}
+
+	expectedBlocked := append([]string(nil), fixture.BlockedBy...)
+	slices.Sort(expectedBlocked)
+
+	if len(summary.BlockedBy) != len(expectedBlocked) {
+		t.Fatalf("blocked_by = %v, want %v", summary.BlockedBy, expectedBlocked)
+	}
+
+	for i, blocker := range expectedBlocked {
+		if summary.BlockedBy[i] != blocker {
+			t.Fatalf("blocked_by[%d] = %s, want %s", i, summary.BlockedBy[i], blocker)
+		}
+	}
+}
+
 func renderTicketFromFrontmatter(t *testing.T, fm map[string]any, content string) string {
 	t.Helper()
 
@@ -378,6 +494,39 @@ func writeWalBodyOnly(t *testing.T, path string, ops []walRecord) {
 	_, err = file.Write(body)
 	if err != nil {
 		t.Fatalf("write wal body: %v", err)
+	}
+
+	err = file.Sync()
+	if err != nil {
+		t.Fatalf("sync wal: %v", err)
+	}
+}
+
+func writeWalWithBody(t *testing.T, path string, body []byte) {
+	t.Helper()
+
+	footer := encodeWalFooter(body)
+
+	err := os.MkdirAll(filepath.Dir(path), 0o750)
+	if err != nil {
+		t.Fatalf("mkdir wal dir: %v", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+
+	t.Cleanup(func() { _ = file.Close() })
+
+	_, err = file.Write(body)
+	if err != nil {
+		t.Fatalf("write wal body: %v", err)
+	}
+
+	_, err = file.Write(footer)
+	if err != nil {
+		t.Fatalf("write wal footer: %v", err)
 	}
 
 	err = file.Sync()

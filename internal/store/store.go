@@ -14,10 +14,9 @@ import (
 // Store wires the derived SQLite index together with WAL and lock coordination.
 // Keeping these handles centralized ensures recovery uses consistent fs primitives.
 type Store struct {
-	dir string
-	sql *sql.DB
-	fs  fs.FS
-
+	dir     string
+	sql     *sql.DB
+	fs      fs.FS
 	locker  *fs.Locker
 	atomic  *fs.AtomicWriter
 	wal     fs.File
