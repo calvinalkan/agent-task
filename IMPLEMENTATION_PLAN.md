@@ -637,9 +637,9 @@ Get(id)
 ### Phase 1 — Core primitives
 - [ ] Create `internal/store/` package skeleton
 - [x] Implement UUIDv7 generator (with google uuid package)
-- [ ] Implement short_id derivation (base32, length 12)
-- [ ] Implement path derivation (`YYYY/MM-DD/<short_id>.md`)
-- [ ] Implement YAML subset parsing (frontmatter only)
+- [x] Implement short_id derivation (base32, length 12)
+- [x] Implement path derivation (`YYYY/MM-DD/<short_id>.md`)
+- [x] Implement YAML subset parsing (frontmatter only)
 - [x] Implement deterministic frontmatter serialization
 
 ### Phase 2 — SQLite index
