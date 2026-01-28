@@ -482,9 +482,9 @@ Not yet implemented. Will:
 
 ### Phase 4 — Store API
 - [x] Implement `Get(id)` 
-- [ ] Implement Tx buffer + `Put`/`Delete`
-- [ ] Implement `Commit()` sequence: WAL → files → SQLite → truncate WAL
-- [ ] Implement `Rollback()`
+- [x] Implement Tx buffer + `Put`/`Delete` (tx.go)
+- [x] Implement `Commit()` sequence: WAL → files → SQLite → truncate WAL (tx.go)
+- [x] Implement `Rollback()` (tx.go)
 - [x] Add typed query options (status/type/priority/parent/short-id)
 - [x] Expose `Rebuild(ctx, ticketDir)` as a standalone entrypoint (no `Open()` required)
 - [x] Query uses LEFT JOIN for tickets + blockers (single query)

@@ -361,10 +361,16 @@ func (s *Store) replayWalOpsToFS(ctx context.Context, ops []walOp) error {
 				return fmt.Errorf("delete %s: %w", absPath, err)
 			}
 
+			// Sync the parent directory to persist the delete.
+			// Skip if the directory doesn't exist (parent was already cleaned up).
 			dir := filepath.Dir(absPath)
 
 			fh, err := s.fs.Open(dir)
 			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue // directory doesn't exist, nothing to sync
+				}
+
 				return fmt.Errorf("open dir %q: %w", dir, err)
 			}
 

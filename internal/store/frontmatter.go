@@ -49,6 +49,21 @@ type Value struct {
 	Object map[string]Scalar // Object holds the value when Kind == ValueObject.
 }
 
+// StringValue creates a Value with a string scalar.
+func StringValue(s string) Value {
+	return Value{Kind: ValueScalar, Scalar: Scalar{Kind: ScalarString, String: s}}
+}
+
+// IntValue creates a Value with an integer scalar.
+func IntValue(i int64) Value {
+	return Value{Kind: ValueScalar, Scalar: Scalar{Kind: ScalarInt, Int: i}}
+}
+
+// ListValue creates a Value with a string list.
+func ListValue(items []string) Value {
+	return Value{Kind: ValueList, List: items}
+}
+
 // UnmarshalJSON parses a JSON scalar, list, or object into a frontmatter value.
 func (v *Value) UnmarshalJSON(data []byte) error {
 	if v == nil {
