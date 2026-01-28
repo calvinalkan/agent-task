@@ -129,11 +129,6 @@ func Test_Query_Applies_Filters_And_Ordering_When_Options_Are_Set(t *testing.T) 
 		t.Fatalf("closed_at for %s = %v, want %v", idB.String(), all[1].ClosedAt, closedAt.UTC())
 	}
 
-	shortID, err := store.ShortIDFromUUID(idC)
-	if err != nil {
-		t.Fatalf("short id: %v", err)
-	}
-
 	cases := []struct {
 		name string
 		opts store.QueryOptions
@@ -158,11 +153,6 @@ func Test_Query_Applies_Filters_And_Ordering_When_Options_Are_Set(t *testing.T) 
 			name: "parent",
 			opts: store.QueryOptions{Parent: idA.String()},
 			want: []string{idB.String()},
-		},
-		{
-			name: "short_id",
-			opts: store.QueryOptions{ShortIDPrefix: shortID},
-			want: []string{idC.String()},
 		},
 		{
 			name: "limit_offset",
@@ -311,5 +301,278 @@ func Test_Query_Limit_Counts_Tickets_Not_Rows_When_Blockers_Exist(t *testing.T) 
 	// C has 1 blocker
 	if len(results[1].BlockedBy) != 1 || results[1].BlockedBy[0] != idA.String() {
 		t.Fatalf("offset results[1].BlockedBy = %v, want [%s]", results[1].BlockedBy, idA.String())
+	}
+}
+
+// Contract: GetByPrefix returns single ticket when prefix uniquely matches short_id.
+func Test_GetByPrefix_Returns_Single_Ticket_When_ShortID_Matches(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
+	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
+
+	shortID, err := store.ShortIDFromUUID(id)
+	if err != nil {
+		t.Fatalf("short id: %v", err)
+	}
+
+	fixture := &ticketFixture{
+		ID:        id.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  2,
+		CreatedAt: createdAt,
+		Title:     "Test Ticket",
+	}
+
+	writeTicket(t, ticketDir, fixture)
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	// Use first 4 chars of short_id as prefix
+	prefix := shortID[:4]
+
+	tickets, err := s.GetByPrefix(t.Context(), prefix)
+	if err != nil {
+		t.Fatalf("get by prefix: %v", err)
+	}
+
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %d, want 1", len(tickets))
+	}
+
+	if tickets[0].ID != id.String() {
+		t.Fatalf("id = %s, want %s", tickets[0].ID, id.String())
+	}
+
+	if tickets[0].ShortID != shortID {
+		t.Fatalf("short_id = %s, want %s", tickets[0].ShortID, shortID)
+	}
+}
+
+// Contract: GetByPrefix returns single ticket when prefix matches full UUID.
+func Test_GetByPrefix_Returns_Single_Ticket_When_UUID_Prefix_Matches(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
+	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
+
+	fixture := &ticketFixture{
+		ID:        id.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  2,
+		CreatedAt: createdAt,
+		Title:     "Test Ticket",
+	}
+
+	writeTicket(t, ticketDir, fixture)
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	// Use first 8 chars of UUID as prefix
+	prefix := id.String()[:8]
+
+	tickets, err := s.GetByPrefix(t.Context(), prefix)
+	if err != nil {
+		t.Fatalf("get by prefix: %v", err)
+	}
+
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %d, want 1", len(tickets))
+	}
+
+	if tickets[0].ID != id.String() {
+		t.Fatalf("id = %s, want %s", tickets[0].ID, id.String())
+	}
+}
+
+// Contract: GetByPrefix returns empty slice when no tickets match the prefix.
+func Test_GetByPrefix_Returns_Empty_When_No_Match(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
+	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
+
+	fixture := &ticketFixture{
+		ID:        id.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  2,
+		CreatedAt: createdAt,
+		Title:     "Test Ticket",
+	}
+
+	writeTicket(t, ticketDir, fixture)
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	tickets, err := s.GetByPrefix(t.Context(), "ZZZZZZ")
+	if err != nil {
+		t.Fatalf("get by prefix: %v", err)
+	}
+
+	if len(tickets) != 0 {
+		t.Fatalf("tickets = %d, want 0", len(tickets))
+	}
+}
+
+// Contract: GetByPrefix returns multiple tickets when prefix is ambiguous.
+func Test_GetByPrefix_Returns_Multiple_Tickets_When_Prefix_Ambiguous(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	// Create two tickets with short_ids that share a common prefix.
+	// UUIDs with same timestamp but different random bits will have different short_ids,
+	// but we can craft them to potentially share prefixes or just test with full UUID prefix.
+	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
+	id1 := makeUUIDv7(t, createdAt, 0x111, 0x111111111111111)
+	id2 := makeUUIDv7(t, createdAt, 0x112, 0x222222222222222)
+
+	writeTicket(t, ticketDir, &ticketFixture{
+		ID:        id1.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  1,
+		CreatedAt: createdAt,
+		Title:     "Ticket One",
+	})
+
+	writeTicket(t, ticketDir, &ticketFixture{
+		ID:        id2.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  2,
+		CreatedAt: createdAt,
+		Title:     "Ticket Two",
+	})
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	// Both UUIDs share the same timestamp prefix (first 8 chars of UUIDv7 are timestamp-based)
+	// So using a short prefix should match both
+	prefix := id1.String()[:8]
+
+	tickets, err := s.GetByPrefix(t.Context(), prefix)
+	if err != nil {
+		t.Fatalf("get by prefix: %v", err)
+	}
+
+	if len(tickets) != 2 {
+		t.Fatalf("tickets = %d, want 2", len(tickets))
+	}
+
+	// Results should be ordered by ID
+	if tickets[0].ID != id1.String() {
+		t.Fatalf("tickets[0].ID = %s, want %s", tickets[0].ID, id1.String())
+	}
+
+	if tickets[1].ID != id2.String() {
+		t.Fatalf("tickets[1].ID = %s, want %s", tickets[1].ID, id2.String())
+	}
+}
+
+// Contract: GetByPrefix returns error when prefix is empty.
+func Test_GetByPrefix_Returns_Error_When_Prefix_Empty(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	_, err = s.GetByPrefix(t.Context(), "")
+	if err == nil {
+		t.Fatal("expected error for empty prefix")
+	}
+}
+
+// Contract: GetByPrefix includes blockers in returned tickets.
+func Test_GetByPrefix_Includes_Blockers_When_Present(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
+	blockerID := makeUUIDv7(t, createdAt, 0x100, 0x100000000000000)
+	ticketID := makeUUIDv7(t, createdAt, 0x200, 0x200000000000000)
+
+	writeTicket(t, ticketDir, &ticketFixture{
+		ID:        blockerID.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  1,
+		CreatedAt: createdAt,
+		Title:     "Blocker",
+	})
+
+	writeTicket(t, ticketDir, &ticketFixture{
+		ID:        ticketID.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  2,
+		CreatedAt: createdAt,
+		Title:     "Blocked Ticket",
+		BlockedBy: []string{blockerID.String()},
+	})
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	shortID, err := store.ShortIDFromUUID(ticketID)
+	if err != nil {
+		t.Fatalf("short id: %v", err)
+	}
+
+	tickets, err := s.GetByPrefix(t.Context(), shortID[:4])
+	if err != nil {
+		t.Fatalf("get by prefix: %v", err)
+	}
+
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %d, want 1", len(tickets))
+	}
+
+	if len(tickets[0].BlockedBy) != 1 {
+		t.Fatalf("blockers = %d, want 1", len(tickets[0].BlockedBy))
+	}
+
+	if tickets[0].BlockedBy[0] != blockerID.String() {
+		t.Fatalf("blocker = %s, want %s", tickets[0].BlockedBy[0], blockerID.String())
 	}
 }

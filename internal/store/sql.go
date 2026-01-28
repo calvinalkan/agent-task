@@ -281,11 +281,6 @@ func buildTicketQuery(options *QueryOptions) (string, []any) {
 		args = append(args, options.Parent)
 	}
 
-	if options.ShortIDPrefix != "" {
-		clauses = append(clauses, "t.short_id LIKE ?")
-		args = append(args, options.ShortIDPrefix+"%")
-	}
-
 	whereClause := ""
 	if len(clauses) > 0 {
 		whereClause = " WHERE " + strings.Join(clauses, " AND ")
@@ -348,6 +343,56 @@ func queryTickets(ctx context.Context, db *sql.DB, options *QueryOptions) ([]Tic
 
 	defer func() { _ = rows.Close() }()
 
+	return scanTicketRows(rows)
+}
+
+// nullStringValue extracts a string from sql.NullString, returning empty if not valid.
+func nullStringValue(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+
+	return value.String
+}
+
+// nullTimePtr converts a Unix timestamp to *time.Time, returning nil if not valid.
+func nullTimePtr(value sql.NullInt64) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+
+	parsed := time.Unix(value.Int64, 0).UTC()
+
+	return &parsed
+}
+
+// queryByPrefix finds tickets where short_id or full ID starts with the given prefix.
+// Results are ordered by ID to ensure consistent ordering for disambiguation.
+func queryByPrefix(ctx context.Context, db *sql.DB, prefix string) ([]Ticket, error) {
+	query := `
+		SELECT t.id, t.short_id, t.path, t.mtime_ns, t.status, t.type, t.priority,
+			t.assignee, t.parent, t.created_at, t.closed_at, t.external_ref, t.title,
+			b.blocker_id
+		FROM tickets t
+		LEFT JOIN ticket_blockers b ON t.id = b.ticket_id
+		WHERE t.short_id LIKE ? OR t.id LIKE ?
+		ORDER BY t.id, b.blocker_id`
+
+	pattern := prefix + "%"
+
+	rows, err := db.QueryContext(ctx, query, pattern, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanTicketRows(rows)
+}
+
+// scanTicketRows scans ticket rows from a query result, grouping blockers by ticket.
+// Rows must be ordered by ticket ID then blocker ID for correct grouping.
+func scanTicketRows(rows *sql.Rows) ([]Ticket, error) {
 	var (
 		tickets []Ticket
 		current *Ticket
@@ -371,7 +416,7 @@ func queryTickets(ctx context.Context, db *sql.DB, options *QueryOptions) ([]Tic
 			blockerID sql.NullString
 		)
 
-		scanErr := rows.Scan(
+		err := rows.Scan(
 			&id,
 			&shortID,
 			&path,
@@ -387,8 +432,8 @@ func queryTickets(ctx context.Context, db *sql.DB, options *QueryOptions) ([]Tic
 			&title,
 			&blockerID,
 		)
-		if scanErr != nil {
-			return nil, fmt.Errorf("scan: %w", scanErr)
+		if err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
 		}
 
 		if current == nil || current.ID != id {
@@ -416,7 +461,7 @@ func queryTickets(ctx context.Context, db *sql.DB, options *QueryOptions) ([]Tic
 		}
 	}
 
-	err = rows.Err()
+	err := rows.Err()
 	if err != nil {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
@@ -426,24 +471,4 @@ func queryTickets(ctx context.Context, db *sql.DB, options *QueryOptions) ([]Tic
 	}
 
 	return tickets, nil
-}
-
-// nullStringValue extracts a string from sql.NullString, returning empty if not valid.
-func nullStringValue(value sql.NullString) string {
-	if !value.Valid {
-		return ""
-	}
-
-	return value.String
-}
-
-// nullTimePtr converts a Unix timestamp to *time.Time, returning nil if not valid.
-func nullTimePtr(value sql.NullInt64) *time.Time {
-	if !value.Valid {
-		return nil
-	}
-
-	parsed := time.Unix(value.Int64, 0).UTC()
-
-	return &parsed
 }
