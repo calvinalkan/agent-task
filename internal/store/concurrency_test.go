@@ -197,6 +197,99 @@ func Test_Query_Returns_Error_When_Exclusive_Lock_Held(t *testing.T) {
 	}
 }
 
+// Contract: GetByPrefix uses a shared lock, so it succeeds when another shared lock is held.
+func Test_GetByPrefix_Succeeds_When_Shared_Lock_Held(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	s, err := store.Open(t.Context(), ticketDir, store.WithLockTimeout(testLockTimeout))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
+	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
+
+	shortID, err := store.ShortIDFromUUID(id)
+	if err != nil {
+		t.Fatalf("short id: %v", err)
+	}
+
+	fixture := &ticketFixture{
+		ID:        id.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  2,
+		CreatedAt: createdAt,
+		Title:     "Test Ticket",
+	}
+
+	writeTicket(t, ticketDir, fixture)
+
+	// Reindex to populate SQLite
+	_, err = s.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+
+	// Hold a shared lock - GetByPrefix should still succeed
+	locker := fs.NewLocker(fs.NewReal())
+	walPath := filepath.Join(ticketDir, ".tk", "wal")
+
+	lock, err := locker.RLock(walPath)
+	if err != nil {
+		t.Fatalf("acquire shared lock: %v", err)
+	}
+
+	defer func() { _ = lock.Close() }()
+
+	tickets, err := s.GetByPrefix(t.Context(), shortID[:4])
+	if err != nil {
+		t.Fatalf("get by prefix while shared lock held: %v", err)
+	}
+
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %d, want 1", len(tickets))
+	}
+}
+
+// Contract: GetByPrefix blocks when an exclusive lock is held, timing out after lockTimeout.
+func Test_GetByPrefix_Returns_Error_When_Exclusive_Lock_Held(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	s, err := store.Open(t.Context(), ticketDir, store.WithLockTimeout(testLockTimeout))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	// Hold an exclusive lock - GetByPrefix should block and timeout
+	locker := fs.NewLocker(fs.NewReal())
+	walPath := filepath.Join(ticketDir, ".tk", "wal")
+
+	lock, err := locker.Lock(walPath)
+	if err != nil {
+		t.Fatalf("acquire exclusive lock: %v", err)
+	}
+
+	defer func() { _ = lock.Close() }()
+
+	_, err = s.GetByPrefix(t.Context(), "ABCD")
+	if err == nil {
+		t.Fatal("expected error when exclusive lock held")
+	}
+
+	if !isDeadlineExceeded(err) {
+		t.Fatalf("error = %v, want deadline exceeded", err)
+	}
+}
+
 // Contract: Multiple concurrent readers can proceed without blocking each other.
 func Test_Multiple_Readers_Succeed_When_Called_Concurrently(t *testing.T) {
 	t.Parallel()
