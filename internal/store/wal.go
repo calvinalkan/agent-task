@@ -58,6 +58,8 @@ type walOp struct {
 	Content     string         `json:"content,omitempty"`
 }
 
+// recoverWal replays or discards WAL entries under the WAL lock.
+// If rebuildIndex is true, it rebuilds SQLite from disk after replay.
 func (s *Store) recoverWal(ctx context.Context, rebuildIndex bool) error {
 	// Recovery runs under the WAL lock so readers never observe mid-commit state.
 	state, body, err := readWalState(s.wal)
@@ -111,6 +113,7 @@ func (s *Store) recoverWal(ctx context.Context, rebuildIndex bool) error {
 	}
 }
 
+// rebuildIndex rebuilds the SQLite index from ticket files on disk.
 func (s *Store) rebuildIndex(ctx context.Context) error {
 	entries, scanErr := scanTicketFiles(ctx, s.dir)
 	if scanErr != nil {
@@ -134,6 +137,9 @@ func walHasData(file fs.File) (bool, error) {
 	return info.Size() > 0, nil
 }
 
+// readWalState inspects the WAL footer and checksum to decide whether the WAL
+// is empty, uncommitted, committed, or corrupt. For committed WALs it returns
+// the validated body bytes.
 func readWalState(file fs.File) (walState, []byte, error) {
 	info, err := file.Stat()
 	if err != nil {
@@ -199,6 +205,7 @@ func readWalState(file fs.File) (walState, []byte, error) {
 	return walCommitted, body, nil
 }
 
+// parseWalFooter decodes the WAL footer and verifies the inverted fields.
 func parseWalFooter(buf []byte) (walFooter, bool) {
 	if len(buf) != walFooterSize {
 		return walFooter{}, false
@@ -225,6 +232,7 @@ func parseWalFooter(buf []byte) (walFooter, bool) {
 	return walFooter{bodyLen: bodyLen, crc32c: crc}, true
 }
 
+// truncateWal clears the WAL and fsyncs so readers see an empty log.
 func truncateWal(file fs.File) error {
 	fd := file.Fd()
 	if fd == 0 {
@@ -244,6 +252,7 @@ func truncateWal(file fs.File) error {
 	return nil
 }
 
+// decodeWalOps parses the JSONL body into validated operations.
 func decodeWalOps(body []byte) ([]walOp, error) {
 	reader := bufio.NewReader(bytes.NewReader(body))
 	ops := make([]walOp, 0)
@@ -291,6 +300,7 @@ func decodeWalOps(body []byte) ([]walOp, error) {
 	return ops, nil
 }
 
+// validateWalOp enforces op shape, ID validity, and canonical path rules.
 func validateWalOp(op walOp) (walOp, error) {
 	if op.Op != walOpPut && op.Op != walOpDelete {
 		return walOp{}, fmt.Errorf("%w: unknown op %q", ErrWALReplay, op.Op)
@@ -334,6 +344,7 @@ func validateWalOp(op walOp) (walOp, error) {
 	return op, nil
 }
 
+// validateWalPath rejects unsafe or non-canonical paths.
 func validateWalPath(path string) error {
 	if path == "" {
 		return fmt.Errorf("%w: path is empty", ErrWALReplay)
@@ -363,6 +374,7 @@ func validateWalPath(path string) error {
 	return nil
 }
 
+// replayWalOps applies WAL operations to the filesystem using atomic writes.
 func (s *Store) replayWalOps(ctx context.Context, ops []walOp) error {
 	for _, op := range ops {
 		err := ctx.Err()
@@ -411,6 +423,7 @@ func (s *Store) replayWalOps(ctx context.Context, ops []walOp) error {
 	return nil
 }
 
+// updateIndexFromOps applies WAL operations to SQLite in a single transaction.
 func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -533,6 +546,7 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 	return nil
 }
 
+// indexFromWAL builds an index row for a WAL put after the file write.
 func (s *Store) indexFromWAL(op walOp, fm Frontmatter) (indexTicket, error) {
 	absPath := filepath.Join(s.dir, op.Path)
 
@@ -555,6 +569,7 @@ func (s *Store) indexFromWAL(op walOp, fm Frontmatter) (indexTicket, error) {
 	return entry, nil
 }
 
+// frontmatterFromWAL converts WAL JSON values into the internal Frontmatter shape.
 func frontmatterFromWAL(raw map[string]any) (Frontmatter, error) {
 	if raw == nil {
 		return nil, fmt.Errorf("%w: frontmatter missing", ErrWALReplay)
@@ -574,6 +589,7 @@ func frontmatterFromWAL(raw map[string]any) (Frontmatter, error) {
 	return out, nil
 }
 
+// walValueToFrontmatter validates and converts a WAL value to frontmatter.
 func walValueToFrontmatter(value any) (Value, error) {
 	switch typed := value.(type) {
 	case string:
@@ -615,6 +631,7 @@ func walValueToFrontmatter(value any) (Value, error) {
 	}
 }
 
+// walScalarToFrontmatter validates and converts a WAL scalar to frontmatter.
 func walScalarToFrontmatter(value any) (Scalar, error) {
 	switch typed := value.(type) {
 	case string:
@@ -632,6 +649,7 @@ func walScalarToFrontmatter(value any) (Scalar, error) {
 	}
 }
 
+// renderTicketFile serializes frontmatter and body into a deterministic ticket payload.
 func renderTicketFile(fm Frontmatter, content string) (string, error) {
 	ordered, err := orderFrontmatterKeys(fm)
 	if err != nil {
@@ -662,6 +680,7 @@ func renderTicketFile(fm Frontmatter, content string) (string, error) {
 	return builder.String(), nil
 }
 
+// orderFrontmatterKeys returns deterministic key order with id and schema_version first.
 func orderFrontmatterKeys(fm Frontmatter) ([]string, error) {
 	keys := make([]string, 0, len(fm))
 	for key := range fm {
@@ -692,6 +711,7 @@ func orderFrontmatterKeys(fm Frontmatter) ([]string, error) {
 	return ordered, nil
 }
 
+// formatFrontmatterValue serializes one frontmatter value into YAML.
 func formatFrontmatterValue(key string, value *Value) (string, error) {
 	var builder strings.Builder
 	builder.WriteString(key)
@@ -763,6 +783,7 @@ func formatFrontmatterValue(key string, value *Value) (string, error) {
 	return builder.String(), nil
 }
 
+// formatScalar renders a scalar to a YAML-compatible literal.
 func formatScalar(s Scalar) string {
 	switch s.Kind {
 	case ScalarString:
@@ -780,6 +801,7 @@ func formatScalar(s Scalar) string {
 	}
 }
 
+// syncParentDir fsyncs the parent directory to persist renames/deletes.
 func syncParentDir(fsys fs.FS, path string) error {
 	dir := filepath.Dir(path)
 

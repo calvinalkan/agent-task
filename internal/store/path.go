@@ -9,6 +9,7 @@ import (
 
 // TicketPath derives the canonical ticket location for a UUIDv7 relative to the ticket dir.
 // We key the directory by the embedded UTC timestamp to keep file layout stable.
+// It returns an error when the UUID is not a valid UUIDv7.
 func TicketPath(id uuid.UUID) (string, error) {
 	err := validateUUIDv7(id)
 	if err != nil {

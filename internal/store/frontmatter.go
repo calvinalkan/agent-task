@@ -21,10 +21,10 @@ const (
 
 // Scalar keeps the restricted YAML scalar types explicit for downstream validation.
 type Scalar struct {
-	Kind   ScalarKind
-	String string
-	Int    int64
-	Bool   bool
+	Kind   ScalarKind // Kind describes which scalar value is populated.
+	String string     // String holds the scalar string value when Kind == ScalarString.
+	Int    int64      // Int holds the scalar integer value when Kind == ScalarInt.
+	Bool   bool       // Bool holds the scalar boolean value when Kind == ScalarBool.
 }
 
 // ValueKind describes the supported frontmatter shapes.
@@ -39,10 +39,10 @@ const (
 
 // Value represents a validated frontmatter value in the supported YAML subset.
 type Value struct {
-	Kind   ValueKind
-	Scalar Scalar
-	List   []string
-	Object map[string]Scalar
+	Kind   ValueKind         // Kind describes which Value shape is populated.
+	Scalar Scalar            // Scalar holds the value when Kind == ValueScalar.
+	List   []string          // List holds the value when Kind == ValueList.
+	Object map[string]Scalar // Object holds the value when Kind == ValueObject.
 }
 
 // Frontmatter maps top-level keys to validated values.

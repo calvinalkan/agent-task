@@ -25,6 +25,9 @@ type Store struct {
 
 // Open initializes the SQLite index for a ticket directory.
 // If the schema version is missing or mismatched, it rebuilds to avoid stale reads.
+//
+// Open acquires the WAL lock before recovery. It may return [ErrWALCorrupt],
+// [ErrWALReplay], or [ErrIndexUpdate] if recovery or index updates fail.
 func Open(ctx context.Context, dir string) (*Store, error) {
 	if ctx == nil {
 		return nil, errors.New("open store: context is nil")
@@ -112,7 +115,8 @@ func Open(ctx context.Context, dir string) (*Store, error) {
 	return store, nil
 }
 
-// Close releases the SQLite handle opened by Open.
+// Close releases the SQLite and WAL handles opened by [Open].
+// It is safe to call Close on a nil Store.
 func (s *Store) Close() error {
 	if s == nil || s.sql == nil {
 		return nil

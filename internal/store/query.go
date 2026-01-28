@@ -9,8 +9,43 @@ import (
 	"time"
 )
 
+// Summary is the SQLite-backed view returned by Query.
+// It mirrors the derived index and never reads the filesystem.
+type Summary struct {
+	ID          string     // ID is the UUIDv7 stored in frontmatter.
+	ShortID     string     // ShortID is the 12-char Crockford base32 identifier.
+	Path        string     // Path is the canonical relative path to the ticket.
+	MtimeNS     int64      // MtimeNS is the file modification time in nanoseconds.
+	Status      string     // Status is the ticket status string (open/in_progress/closed).
+	Type        string     // Type is the ticket type string (bug/feature/task/etc.).
+	Priority    int64      // Priority is the numeric priority from frontmatter.
+	Assignee    string     // Assignee is empty when unset in frontmatter.
+	Parent      string     // Parent holds the parent ticket ID, empty when unset.
+	CreatedAt   time.Time  // CreatedAt is the UTC timestamp from frontmatter.
+	ClosedAt    *time.Time // ClosedAt is nil when the ticket is not closed.
+	ExternalRef string     // ExternalRef is empty when unset in frontmatter.
+	Title       string     // Title is parsed from the ticket body.
+	BlockedBy   []string   // BlockedBy contains blocker IDs, sorted by ID.
+}
+
+// QueryOptions defines optional SQLite filters for Query.
+// Zero values mean "no filter"; Priority uses 0 to mean "any".
+type QueryOptions struct {
+	Status        string // Status filters by exact status when non-empty.
+	Type          string // Type filters by exact ticket type when non-empty.
+	Priority      int    // Priority filters by exact priority when > 0.
+	Parent        string // Parent filters by exact parent ID when non-empty.
+	ShortIDPrefix string // ShortIDPrefix filters by short ID prefix when non-empty.
+	Limit         int    // Limit caps the number of rows when > 0.
+	Offset        int    // Offset skips rows when > 0.
+}
+
 // Query reads ticket summaries from SQLite. It avoids filesystem access so callers
 // can list quickly after a rebuild or commit.
+//
+// Query acquires a shared WAL lock and replays any committed WAL entries before
+// returning results. It may return [ErrWALCorrupt], [ErrWALReplay], or
+// [ErrIndexUpdate] if recovery fails.
 func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Summary, error) {
 	if ctx == nil {
 		return nil, errors.New("query: context is nil")

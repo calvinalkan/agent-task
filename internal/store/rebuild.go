@@ -36,7 +36,7 @@ const rebuildFrontmatterLineLimit = 100
 //
 // The index is treated as disposable: rebuild is intentionally strict about ticket validity.
 // Rebuild returns the number of indexed tickets and an error that matches [ErrIndexScan]
-// when files cannot be indexed.
+// when files cannot be indexed. Use errors.Is(err, ErrIndexScan) to detect scan failures.
 //
 // If any scan errors are encountered, rebuild returns them without touching SQLite
 // to avoid publishing a partial or stale index. Fix the files and rerun rebuild.
@@ -502,13 +502,14 @@ func isValidPriority(priority int64) bool {
 var errSkipInternalPath = errors.New("skip internal .tk path")
 
 // ErrIndexScan is returned (via errors.Is) when scanning hits per-file validation issues.
+// Use errors.Is(err, ErrIndexScan) to detect scan failures.
 var ErrIndexScan = errors.New("index scan")
 
 // FileIssueError captures a single file scan problem.
 type FileIssueError struct {
-	Path string
-	ID   string
-	Err  error
+	Path string // Path is the absolute path of the problematic file.
+	ID   string // ID is the parsed ticket ID when available.
+	Err  error  // Err is the underlying validation or parse error.
 }
 
 func (e FileIssueError) Error() string {
@@ -516,9 +517,10 @@ func (e FileIssueError) Error() string {
 }
 
 // IndexScanError aggregates per-file scan issues.
+// It unwraps to [ErrIndexScan] for errors.Is checks.
 type IndexScanError struct {
-	Total  int
-	Issues []FileIssueError
+	Total  int              // Total is the number of invalid files encountered.
+	Issues []FileIssueError // Issues contains per-file errors for reporting.
 }
 
 func (e *IndexScanError) Error() string {

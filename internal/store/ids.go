@@ -26,6 +26,7 @@ const (
 
 // ShortIDFromUUID derives a stable, 12-char base32 (Crockford) ID from the
 // UUIDv7 random bits so filenames stay stable even if timestamps are identical.
+// It returns an error when the UUID is not a valid UUIDv7.
 func ShortIDFromUUID(id uuid.UUID) (string, error) {
 	err := validateUUIDv7(id)
 	if err != nil {
