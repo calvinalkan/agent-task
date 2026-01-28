@@ -57,7 +57,7 @@ func Test_Rebuild_Builds_SQLite_Index_When_Tickets_Are_Valid(t *testing.T) {
 
 	writeIgnoredTicket(t, ticketDir)
 
-	indexed, err := store.Rebuild(t.Context(), ticketDir)
+	indexed, err := store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -212,6 +212,80 @@ func Test_Rebuild_Builds_SQLite_Index_When_Tickets_Are_Valid(t *testing.T) {
 	}
 }
 
+// Contract: rebuild replays a committed WAL before rebuilding the index.
+func Test_Rebuild_Replays_WAL_When_Committed(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	ticketDir := filepath.Join(root, ".tickets")
+
+	err := os.MkdirAll(ticketDir, 0o750)
+	if err != nil {
+		t.Fatalf("mkdir ticket dir: %v", err)
+	}
+
+	createdAt := time.Date(2026, 1, 27, 9, 30, 0, 0, time.UTC)
+	id := makeUUIDv7(t, createdAt, 0xabc, 0x2222222222222222)
+
+	relPath, err := store.TicketPath(id)
+	if err != nil {
+		t.Fatalf("ticket path: %v", err)
+	}
+
+	fixture := &ticketFixture{
+		ID:        id.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  2,
+		CreatedAt: createdAt,
+		Title:     "Rebuild WAL",
+	}
+
+	walPath := filepath.Join(ticketDir, ".tk", "wal")
+	writeWalFile(t, walPath, []walRecord{
+		{
+			Op:          "put",
+			ID:          fixture.ID,
+			Path:        relPath,
+			Frontmatter: walFrontmatterFromTicket(fixture),
+			Content:     "# Rebuild WAL\nBody\n",
+		},
+	})
+
+	indexed, err := store.Reindex(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	if indexed != 1 {
+		t.Fatalf("indexed = %d, want 1", indexed)
+	}
+
+	info, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+
+	if info.Size() != 0 {
+		t.Fatalf("wal size = %d, want 0", info.Size())
+	}
+
+	absPath := filepath.Join(ticketDir, relPath)
+	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# Rebuild WAL\nBody\n")
+
+	actual := readFileString(t, absPath)
+	if actual != expected {
+		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
+	}
+
+	db := openIndex(t, ticketDir)
+	t.Cleanup(func() { _ = db.Close() })
+
+	if count := countTickets(t, db); count != 1 {
+		t.Fatalf("ticket count = %d, want 1", count)
+	}
+}
+
 func Test_Rebuild_Skips_Orphaned_Tickets_When_Path_Mismatches(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -248,7 +322,7 @@ func Test_Rebuild_Skips_Orphaned_Tickets_When_Path_Mismatches(t *testing.T) {
 		Title:     "Orphan Ticket",
 	})
 
-	indexed, err := store.Rebuild(t.Context(), ticketDir)
+	indexed, err := store.Reindex(t.Context(), ticketDir)
 	if err == nil {
 		t.Fatal("expected rebuild error for orphan")
 	}
@@ -273,7 +347,7 @@ func Test_Rebuild_Returns_Context_Error_When_Canceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	indexed, err := store.Rebuild(ctx, t.TempDir())
+	indexed, err := store.Reindex(ctx, t.TempDir())
 	if err == nil {
 		t.Fatal("expected rebuild error for canceled context")
 	}
@@ -343,7 +417,7 @@ func Test_Rebuild_Indexes_Valid_Tickets_When_Other_Files_Invalid(t *testing.T) {
 	missingTitlePath := writeRawTicket(t, ticketDir, missingTitleID, missingTitleContent)
 	assertFileStartsWith(t, ticketDir, missingTitlePath, "---")
 
-	indexed, err := store.Rebuild(t.Context(), ticketDir)
+	indexed, err := store.Reindex(t.Context(), ticketDir)
 	if err == nil {
 		t.Fatal("expected rebuild error for invalid tickets")
 	}
@@ -374,7 +448,7 @@ func Test_Rebuild_Skips_Tk_Directory_Files_When_Markdown_Present(t *testing.T) {
 	internalPath := filepath.Join(".tk", "ignored.md")
 	writeRawPath(t, ticketDir, internalPath, "---\nnot: valid\n")
 
-	indexed, err := store.Rebuild(t.Context(), ticketDir)
+	indexed, err := store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}

@@ -19,7 +19,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 		name  string
 		fm    string
 		tail  string
-		check func(t *testing.T, fm store.Frontmatter)
+		check func(t *testing.T, fm store.TicketFrontmatter)
 	}{
 		{
 			name: "scalar values",
@@ -34,7 +34,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"empty: ''",
 			}, "\n"),
 			tail: "# Title\n",
-			check: func(t *testing.T, fm store.Frontmatter) {
+			check: func(t *testing.T, fm store.TicketFrontmatter) {
 				t.Helper()
 				requireScalarString(t, fm, "id", "018f5f25-7e7d-7f0a-8c5c-123456789abc")
 				requireScalarInt(t, fm, "schema_version", 1)
@@ -60,7 +60,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"tags: [ops, \"on-call\"]",
 			}, "\n"),
 			tail: "body text\n",
-			check: func(t *testing.T, fm store.Frontmatter) {
+			check: func(t *testing.T, fm store.TicketFrontmatter) {
 				t.Helper()
 				requireList(t, fm, "blocked-by", []string{"abc", "def"})
 				requireList(t, fm, "tags", []string{"ops", "on-call"})
@@ -75,7 +75,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 			name: "empty list",
 			fm:   "blocked-by: []",
 			tail: "",
-			check: func(t *testing.T, fm store.Frontmatter) {
+			check: func(t *testing.T, fm store.TicketFrontmatter) {
 				t.Helper()
 				requireList(t, fm, "blocked-by", []string{})
 			},
@@ -88,7 +88,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"status: open",
 			}, "\n"),
 			tail: "",
-			check: func(t *testing.T, fm store.Frontmatter) {
+			check: func(t *testing.T, fm store.TicketFrontmatter) {
 				t.Helper()
 				requireList(t, fm, "blocked-by", []string{"abc"})
 				requireScalarString(t, fm, "status", "open")
@@ -102,7 +102,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"status: open",
 			}, "\n"),
 			tail: "",
-			check: func(t *testing.T, fm store.Frontmatter) {
+			check: func(t *testing.T, fm store.TicketFrontmatter) {
 				t.Helper()
 				requireObject(t, fm, "meta", map[string]store.Scalar{
 					"owner": {Kind: store.ScalarString, String: "alice"},
@@ -116,7 +116,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"delta: -12",
 			}, "\n"),
 			tail: "",
-			check: func(t *testing.T, fm store.Frontmatter) {
+			check: func(t *testing.T, fm store.TicketFrontmatter) {
 				t.Helper()
 				requireScalarInt(t, fm, "delta", -12)
 			},
@@ -140,6 +140,66 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 
 			tc.check(t, fm)
 		})
+	}
+}
+
+// Contract: frontmatter marshal keeps delimiter defaults and key ordering stable.
+func Test_TicketFrontmatter_MarshalYAML_Returns_Delimited_Output_When_Defaults(t *testing.T) {
+	t.Parallel()
+
+	fm := store.TicketFrontmatter{
+		"type":           {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "task"}},
+		"id":             {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "123"}},
+		"schema_version": {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarInt, Int: 1}},
+		"status":         {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "open"}},
+		"priority":       {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarInt, Int: 2}},
+	}
+
+	got, err := fm.MarshalYAML()
+	if err != nil {
+		t.Fatalf("marshal yaml: %v", err)
+	}
+
+	want := strings.Join([]string{
+		"---",
+		"id: 123",
+		"schema_version: 1",
+		"priority: 2",
+		"status: open",
+		"type: task",
+		"---",
+		"",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("yaml output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+}
+
+// Contract: frontmatter marshal can omit delimiters when requested.
+func Test_TicketFrontmatter_MarshalYAML_Omits_Delimiters_When_Option_Set(t *testing.T) {
+	t.Parallel()
+
+	fm := store.TicketFrontmatter{
+		"id":             {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "123"}},
+		"schema_version": {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarInt, Int: 1}},
+		"status":         {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "open"}},
+	}
+
+	got, err := fm.MarshalYAML(store.WithYAMLDelimiters(false))
+	if err != nil {
+		t.Fatalf("marshal yaml: %v", err)
+	}
+
+	want := strings.Join([]string{
+		"id: 123",
+		"schema_version: 1",
+		"status: open",
+		"",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("yaml output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
 	}
 }
 
@@ -747,7 +807,7 @@ func Benchmark_FrontmatterParser_Parse(b *testing.B) {
 	})
 }
 
-func requireScalarString(t *testing.T, fm store.Frontmatter, key, want string) {
+func requireScalarString(t *testing.T, fm store.TicketFrontmatter, key, want string) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
@@ -760,7 +820,7 @@ func requireScalarString(t *testing.T, fm store.Frontmatter, key, want string) {
 	}
 }
 
-func requireScalarInt(t *testing.T, fm store.Frontmatter, key string, want int64) {
+func requireScalarInt(t *testing.T, fm store.TicketFrontmatter, key string, want int64) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
@@ -773,7 +833,7 @@ func requireScalarInt(t *testing.T, fm store.Frontmatter, key string, want int64
 	}
 }
 
-func requireScalarBool(t *testing.T, fm store.Frontmatter, key string, want bool) {
+func requireScalarBool(t *testing.T, fm store.TicketFrontmatter, key string, want bool) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
@@ -786,7 +846,7 @@ func requireScalarBool(t *testing.T, fm store.Frontmatter, key string, want bool
 	}
 }
 
-func requireList(t *testing.T, fm store.Frontmatter, key string, want []string) {
+func requireList(t *testing.T, fm store.TicketFrontmatter, key string, want []string) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
@@ -799,7 +859,7 @@ func requireList(t *testing.T, fm store.Frontmatter, key string, want []string) 
 	}
 }
 
-func requireObject(t *testing.T, fm store.Frontmatter, key string, want map[string]store.Scalar) {
+func requireObject(t *testing.T, fm store.TicketFrontmatter, key string, want map[string]store.Scalar) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
@@ -812,7 +872,7 @@ func requireObject(t *testing.T, fm store.Frontmatter, key string, want map[stri
 	}
 }
 
-func requireValue(t *testing.T, fm store.Frontmatter, key string) store.Value {
+func requireValue(t *testing.T, fm store.TicketFrontmatter, key string) store.Value {
 	t.Helper()
 
 	value, ok := fm[key]

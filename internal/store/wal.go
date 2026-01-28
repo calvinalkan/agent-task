@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -13,8 +14,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -36,105 +35,77 @@ const (
 
 var walCRC32C = crc32.MakeTable(crc32.Castagnoli)
 
+// ErrWALCorrupt reports a committed WAL with a mismatched checksum.
+// Callers should use errors.Is(err, ErrWALCorrupt).
+var ErrWALCorrupt = errors.New("wal corrupt")
+
+// ErrWALReplay reports WAL validation or replay failures.
+// Callers should use errors.Is(err, ErrWALReplay).
+var ErrWALReplay = errors.New("wal replay")
+
+// ErrIndexUpdate reports failures updating the SQLite index from WAL ops.
+// Callers should use errors.Is(err, ErrIndexUpdate).
+var ErrIndexUpdate = errors.New("index update")
+
+// walState describes the WAL state discovered during recovery.
 type walState uint8
 
 const (
-	walEmpty walState = iota
-	walUncommitted
-	walCommitted
-	walCorrupt
+	walEmpty       walState = iota // WAL has no data.
+	walUncommitted                 // WAL has data but no valid footer.
+	walCommitted                   // WAL has a valid footer and checksum.
 )
 
-type walFooter struct {
-	bodyLen uint64
-	crc32c  uint32
-}
-
 type walOp struct {
-	Op          string         `json:"op"`
-	ID          string         `json:"id"`
-	Path        string         `json:"path"`
-	Frontmatter map[string]any `json:"frontmatter,omitempty"`
-	Content     string         `json:"content,omitempty"`
+	Op          string            `json:"op"`
+	ID          string            `json:"id"`
+	Path        string            `json:"path"`
+	Frontmatter TicketFrontmatter `json:"frontmatter,omitempty"`
+	Content     string            `json:"content,omitempty"`
 }
 
-// recoverWal replays or discards WAL entries under the WAL lock.
-// If rebuildIndex is true, it rebuilds SQLite from disk after replay.
-func (s *Store) recoverWal(ctx context.Context, rebuildIndex bool) error {
+type walRecovery struct {
+	state walState
+	ops   []walOp
+}
+
+// recoverWalLocked replays or discards WAL entries under the WAL lock (must be held by caller).
+// It only handles WAL and filesystem recovery, leaving index policy to the caller.
+func (s *Store) recoverWalLocked(ctx context.Context) (walRecovery, error) {
 	// Recovery runs under the WAL lock so readers never observe mid-commit state.
 	state, body, err := readWalState(s.wal)
 	if err != nil {
-		return err
+		return walRecovery{}, err
 	}
 
 	switch state {
 	case walEmpty:
-		if rebuildIndex {
-			err = s.rebuildIndex(ctx)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
+		return walRecovery{state: walEmpty}, nil
 	case walUncommitted:
+		// Stage: discard partial WAL (no commit point reached).
 		err = truncateWal(s.wal)
 		if err != nil {
-			return err
+			return walRecovery{}, fmt.Errorf("truncate uncommitted: %w", err)
 		}
 
-		return s.rebuildIndex(ctx)
-	case walCorrupt:
-		return ErrWALCorrupt
+		return walRecovery{state: walUncommitted}, nil
 	case walCommitted:
+		// Stage: decode WAL ops.
 		ops, err := decodeWalOps(body)
 		if err != nil {
-			return err
+			return walRecovery{}, fmt.Errorf("decode wal ops: %w", err)
 		}
 
+		// Stage: replay filesystem changes.
 		err = s.replayWalOps(ctx, ops)
 		if err != nil {
-			return err
+			return walRecovery{}, fmt.Errorf("replay wal ops: %w", err)
 		}
 
-		if rebuildIndex {
-			err = s.rebuildIndex(ctx)
-		} else {
-			err = s.updateIndexFromOps(ctx, ops)
-		}
-
-		if err != nil {
-			return err
-		}
-
-		return truncateWal(s.wal)
+		return walRecovery{state: walCommitted, ops: ops}, nil
 	default:
-		return fmt.Errorf("wal: unknown state %d", state)
+		return walRecovery{}, fmt.Errorf("unknown state %d", state)
 	}
-}
-
-// rebuildIndex rebuilds the SQLite index from ticket files on disk.
-func (s *Store) rebuildIndex(ctx context.Context) error {
-	entries, scanErr := scanTicketFiles(ctx, s.dir)
-	if scanErr != nil {
-		return scanErr
-	}
-
-	_, err := rebuildIndexInTxn(ctx, s.sql, entries)
-	if err != nil {
-		return fmt.Errorf("rebuild index: %w", err)
-	}
-
-	return nil
-}
-
-func walHasData(file fs.File) (bool, error) {
-	info, err := file.Stat()
-	if err != nil {
-		return false, fmt.Errorf("stat wal: %w", err)
-	}
-
-	return info.Size() > 0, nil
 }
 
 // readWalState inspects the WAL footer and checksum to decide whether the WAL
@@ -171,21 +142,34 @@ func readWalState(file fs.File) (walState, []byte, error) {
 		return walEmpty, nil, fmt.Errorf("read wal footer: %w", err)
 	}
 
-	footer, ok := parseWalFooter(footerBuf)
-	if !ok {
+	if string(footerBuf[:8]) != walMagic {
 		return walUncommitted, nil, nil
 	}
 
-	if footer.bodyLen > math.MaxInt64 {
+	bodyLen := binary.LittleEndian.Uint64(footerBuf[8:16])
+
+	bodyLenInv := binary.LittleEndian.Uint64(footerBuf[16:24])
+	if ^bodyLen != bodyLenInv {
+		return walUncommitted, nil, nil
+	}
+
+	crc := binary.LittleEndian.Uint32(footerBuf[24:28])
+
+	crcInv := binary.LittleEndian.Uint32(footerBuf[28:32])
+	if ^crc != crcInv {
+		return walUncommitted, nil, nil
+	}
+
+	if bodyLen > math.MaxInt64 {
 		return walUncommitted, nil, nil
 	}
 
 	maxBody := size - walFooterSize
-	if int64(footer.bodyLen) > maxBody {
+	if int64(bodyLen) > maxBody {
 		return walUncommitted, nil, nil
 	}
 
-	body := make([]byte, footer.bodyLen)
+	body := make([]byte, bodyLen)
 
 	_, err = file.Seek(0, io.SeekStart)
 	if err != nil {
@@ -198,38 +182,11 @@ func readWalState(file fs.File) (walState, []byte, error) {
 	}
 
 	checksum := crc32.Checksum(body, walCRC32C)
-	if checksum != footer.crc32c {
-		return walCorrupt, nil, nil
+	if checksum != crc {
+		return walCommitted, nil, fmt.Errorf("wal checksum mismatch (expected %08x got %08x): %w", crc, checksum, ErrWALCorrupt)
 	}
 
 	return walCommitted, body, nil
-}
-
-// parseWalFooter decodes the WAL footer and verifies the inverted fields.
-func parseWalFooter(buf []byte) (walFooter, bool) {
-	if len(buf) != walFooterSize {
-		return walFooter{}, false
-	}
-
-	if string(buf[:8]) != walMagic {
-		return walFooter{}, false
-	}
-
-	bodyLen := binary.LittleEndian.Uint64(buf[8:16])
-
-	bodyLenInv := binary.LittleEndian.Uint64(buf[16:24])
-	if ^bodyLen != bodyLenInv {
-		return walFooter{}, false
-	}
-
-	crc := binary.LittleEndian.Uint32(buf[24:28])
-
-	crcInv := binary.LittleEndian.Uint32(buf[28:32])
-	if ^crc != crcInv {
-		return walFooter{}, false
-	}
-
-	return walFooter{bodyLen: bodyLen, crc32c: crc}, true
 }
 
 // truncateWal clears the WAL and fsyncs so readers see an empty log.
@@ -282,7 +239,7 @@ func decodeWalOps(body []byte) ([]walOp, error) {
 
 		unmarshalErr := json.Unmarshal(line, &op)
 		if unmarshalErr != nil {
-			return nil, fmt.Errorf("parse wal line: %w", unmarshalErr)
+			return nil, fmt.Errorf("parse wal line: %w: %w", ErrWALReplay, unmarshalErr)
 		}
 
 		validated, err := validateWalOp(op)
@@ -303,75 +260,65 @@ func decodeWalOps(body []byte) ([]walOp, error) {
 // validateWalOp enforces op shape, ID validity, and canonical path rules.
 func validateWalOp(op walOp) (walOp, error) {
 	if op.Op != walOpPut && op.Op != walOpDelete {
-		return walOp{}, fmt.Errorf("%w: unknown op %q", ErrWALReplay, op.Op)
+		return walOp{}, fmt.Errorf("validate wal op %q: %w", op.Op, ErrWALReplay)
 	}
 
 	err := validateIDString(op.ID)
 	if err != nil {
-		return walOp{}, fmt.Errorf("%w: invalid id %q: %w", ErrWALReplay, op.ID, err)
+		return walOp{}, fmt.Errorf("validate wal id %q: %w: %w", op.ID, ErrWALReplay, err)
 	}
 
 	id, err := uuid.Parse(op.ID)
 	if err != nil {
-		return walOp{}, fmt.Errorf("%w: parse id %q: %w", ErrWALReplay, op.ID, err)
+		return walOp{}, fmt.Errorf("parse wal id %q: %w: %w", op.ID, ErrWALReplay, err)
 	}
 
 	err = validateUUIDv7(id)
 	if err != nil {
-		return walOp{}, fmt.Errorf("%w: validate id %q: %w", ErrWALReplay, op.ID, err)
+		return walOp{}, fmt.Errorf("validate wal id %q: %w: %w", op.ID, ErrWALReplay, err)
 	}
 
-	err = validateWalPath(op.Path)
-	if err != nil {
-		return walOp{}, err
+	if op.Path == "" {
+		return walOp{}, fmt.Errorf("validate wal path: %w", ErrWALReplay)
+	}
+
+	if strings.Contains(op.Path, "\\") {
+		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+	}
+
+	if filepath.IsAbs(op.Path) {
+		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+	}
+
+	clean := filepath.Clean(op.Path)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+	}
+
+	if clean != op.Path {
+		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+	}
+
+	if !strings.HasSuffix(op.Path, ".md") {
+		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
 	}
 
 	expected, err := TicketPath(id)
 	if err != nil {
-		return walOp{}, fmt.Errorf("%w: derive path for %q: %w", ErrWALReplay, op.ID, err)
+		return walOp{}, fmt.Errorf("derive wal path for %q: %w: %w", op.ID, ErrWALReplay, err)
 	}
 
 	if filepath.Clean(op.Path) != filepath.Clean(expected) {
-		return walOp{}, fmt.Errorf("%w: path %q does not match id %q", ErrWALReplay, op.Path, op.ID)
+		return walOp{}, fmt.Errorf("validate wal path %q for id %q: %w", op.Path, op.ID, ErrWALReplay)
 	}
 
 	if op.Op == walOpPut {
 		if op.Frontmatter == nil {
-			return walOp{}, fmt.Errorf("%w: missing frontmatter for %q", ErrWALReplay, op.ID)
+			return walOp{}, fmt.Errorf("validate wal op %q missing frontmatter: %w", op.ID, ErrWALReplay)
 		}
 	}
 
 	return op, nil
-}
-
-// validateWalPath rejects unsafe or non-canonical paths.
-func validateWalPath(path string) error {
-	if path == "" {
-		return fmt.Errorf("%w: path is empty", ErrWALReplay)
-	}
-
-	if strings.Contains(path, "\\") {
-		return fmt.Errorf("%w: path contains backslash", ErrWALReplay)
-	}
-
-	if filepath.IsAbs(path) {
-		return fmt.Errorf("%w: path is absolute", ErrWALReplay)
-	}
-
-	clean := filepath.Clean(path)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("%w: path escapes root", ErrWALReplay)
-	}
-
-	if clean != path {
-		return fmt.Errorf("%w: path is not clean", ErrWALReplay)
-	}
-
-	if !strings.HasSuffix(path, ".md") {
-		return fmt.Errorf("%w: path must end with .md", ErrWALReplay)
-	}
-
-	return nil
 }
 
 // replayWalOps applies WAL operations to the filesystem using atomic writes.
@@ -379,44 +326,51 @@ func (s *Store) replayWalOps(ctx context.Context, ops []walOp) error {
 	for _, op := range ops {
 		err := ctx.Err()
 		if err != nil {
-			return fmt.Errorf("replay wal: %w", context.Cause(ctx))
+			return fmt.Errorf("replay canceled: %w", context.Cause(ctx))
 		}
 
 		absPath := filepath.Join(s.dir, op.Path)
 
 		switch op.Op {
 		case walOpPut:
-			fm, err := frontmatterFromWAL(op.Frontmatter)
+			content, err := renderTicketFile(op.Frontmatter, op.Content)
 			if err != nil {
-				return err
-			}
-
-			content, err := renderTicketFile(fm, op.Content)
-			if err != nil {
-				return err
+				return fmt.Errorf("render ticket %s: %w", op.ID, err)
 			}
 
 			err = s.fs.MkdirAll(filepath.Dir(absPath), 0o750)
 			if err != nil {
-				return fmt.Errorf("%w: mkdir %s: %w", ErrWALReplay, absPath, err)
+				return fmt.Errorf("mkdir %s: %w", absPath, err)
 			}
 
 			err = s.atomic.WriteWithDefaults(absPath, strings.NewReader(content))
 			if err != nil {
-				return fmt.Errorf("%w: write %s: %w", ErrWALReplay, absPath, err)
+				return fmt.Errorf("write %s: %w", absPath, err)
 			}
 		case walOpDelete:
 			err := s.fs.Remove(absPath)
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("%w: delete %s: %w", ErrWALReplay, absPath, err)
+				return fmt.Errorf("delete %s: %w", absPath, err)
 			}
 
-			err = syncParentDir(s.fs, absPath)
+			dir := filepath.Dir(absPath)
+
+			fh, err := s.fs.Open(dir)
 			if err != nil {
-				return fmt.Errorf("%w: sync dir for %s: %w", ErrWALReplay, absPath, err)
+				return fmt.Errorf("open dir %q: %w", dir, err)
+			}
+
+			func() {
+				defer func() { _ = fh.Close() }()
+
+				err = fh.Sync()
+			}()
+
+			if err != nil {
+				return fmt.Errorf("sync dir %q: %w", dir, err)
 			}
 		default:
-			return fmt.Errorf("%w: unknown op %q", ErrWALReplay, op.Op)
+			return fmt.Errorf("replay op %q: %w", op.Op, ErrWALReplay)
 		}
 	}
 
@@ -427,7 +381,7 @@ func (s *Store) replayWalOps(ctx context.Context, ops []walOp) error {
 func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("%w: begin txn: %w", ErrIndexUpdate, err)
+		return fmt.Errorf("update index begin txn: %w: %w", ErrIndexUpdate, err)
 	}
 
 	committed := false
@@ -455,7 +409,7 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 			title
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		return fmt.Errorf("%w: prepare insert: %w", ErrIndexUpdate, err)
+		return fmt.Errorf("update index prepare insert: %w: %w", ErrIndexUpdate, err)
 	}
 
 	defer func() { _ = insertTicket.Close() }()
@@ -463,7 +417,7 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 	insertBlocker, err := tx.PrepareContext(ctx, `
 		INSERT INTO ticket_blockers (ticket_id, blocker_id) VALUES (?, ?)`)
 	if err != nil {
-		return fmt.Errorf("%w: prepare blocker insert: %w", ErrIndexUpdate, err)
+		return fmt.Errorf("update index prepare blocker insert: %w: %w", ErrIndexUpdate, err)
 	}
 
 	defer func() { _ = insertBlocker.Close() }()
@@ -471,29 +425,27 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 	for _, op := range ops {
 		err = ctx.Err()
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrIndexUpdate, context.Cause(ctx))
+			return fmt.Errorf("update index canceled: %w: %w", ErrIndexUpdate, context.Cause(ctx))
 		}
 
 		switch op.Op {
 		case walOpDelete:
 			_, err = tx.ExecContext(ctx, "DELETE FROM ticket_blockers WHERE ticket_id = ?", op.ID)
 			if err != nil {
-				return fmt.Errorf("%w: delete blockers %s: %w", ErrIndexUpdate, op.ID, err)
+				return fmt.Errorf("update index delete blockers %s: %w: %w", op.ID, ErrIndexUpdate, err)
 			}
 
 			_, err = tx.ExecContext(ctx, "DELETE FROM tickets WHERE id = ?", op.ID)
 			if err != nil {
-				return fmt.Errorf("%w: delete ticket %s: %w", ErrIndexUpdate, op.ID, err)
+				return fmt.Errorf("update index delete ticket %s: %w: %w", op.ID, ErrIndexUpdate, err)
 			}
 		case walOpPut:
-			var fm Frontmatter
-
-			fm, err = frontmatterFromWAL(op.Frontmatter)
-			if err != nil {
-				return err
+			fm := op.Frontmatter
+			if fm == nil {
+				return fmt.Errorf("update index missing frontmatter for %s: %w", op.ID, ErrWALReplay)
 			}
 
-			var entry indexTicket
+			var entry Ticket
 
 			entry, err = s.indexFromWAL(op, fm)
 			if err != nil {
@@ -502,7 +454,17 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 
 			_, err = tx.ExecContext(ctx, "DELETE FROM ticket_blockers WHERE ticket_id = ?", entry.ID)
 			if err != nil {
-				return fmt.Errorf("%w: clear blockers %s: %w", ErrIndexUpdate, entry.ID, err)
+				return fmt.Errorf("update index clear blockers %s: %w: %w", entry.ID, ErrIndexUpdate, err)
+			}
+
+			assignee := sql.NullString{String: entry.Assignee, Valid: entry.Assignee != ""}
+			parent := sql.NullString{String: entry.Parent, Valid: entry.Parent != ""}
+			external := sql.NullString{String: entry.ExternalRef, Valid: entry.ExternalRef != ""}
+			createdAt := entry.CreatedAt.Unix()
+
+			closedAt := sql.NullInt64{}
+			if entry.ClosedAt != nil {
+				closedAt = sql.NullInt64{Int64: entry.ClosedAt.Unix(), Valid: true}
 			}
 
 			_, err = insertTicket.ExecContext(
@@ -514,31 +476,31 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 				entry.Status,
 				entry.Type,
 				entry.Priority,
-				entry.Assignee,
-				entry.Parent,
-				entry.CreatedAt,
-				entry.ClosedAt,
-				entry.ExternalRef,
+				assignee,
+				parent,
+				createdAt,
+				closedAt,
+				external,
 				entry.Title,
 			)
 			if err != nil {
-				return fmt.Errorf("%w: insert ticket %s: %w", ErrIndexUpdate, entry.ID, err)
+				return fmt.Errorf("update index insert ticket %s: %w: %w", entry.ID, ErrIndexUpdate, err)
 			}
 
 			for _, blocker := range entry.BlockedBy {
 				_, err = insertBlocker.ExecContext(ctx, entry.ID, blocker)
 				if err != nil {
-					return fmt.Errorf("%w: insert blocker %s: %w", ErrIndexUpdate, entry.ID, err)
+					return fmt.Errorf("update index insert blocker %s: %w: %w", entry.ID, ErrIndexUpdate, err)
 				}
 			}
 		default:
-			return fmt.Errorf("%w: unknown op %q", ErrIndexUpdate, op.Op)
+			return fmt.Errorf("update index unknown op %q: %w", op.Op, ErrIndexUpdate)
 		}
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		return fmt.Errorf("%w: commit: %w", ErrIndexUpdate, err)
+		return fmt.Errorf("update index commit: %w: %w", ErrIndexUpdate, err)
 	}
 
 	committed = true
@@ -547,12 +509,12 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 }
 
 // indexFromWAL builds an index row for a WAL put after the file write.
-func (s *Store) indexFromWAL(op walOp, fm Frontmatter) (indexTicket, error) {
+func (s *Store) indexFromWAL(op walOp, fm TicketFrontmatter) (Ticket, error) {
 	absPath := filepath.Join(s.dir, op.Path)
 
 	info, err := s.fs.Stat(absPath)
 	if err != nil {
-		return indexTicket{}, fmt.Errorf("%w: stat %s: %w", ErrIndexUpdate, absPath, err)
+		return Ticket{}, fmt.Errorf("index stat %s: %w: %w", absPath, ErrIndexUpdate, err)
 	}
 
 	stat := fileproc.Stat{
@@ -561,116 +523,24 @@ func (s *Store) indexFromWAL(op walOp, fm Frontmatter) (indexTicket, error) {
 		Mode:    uint32(info.Mode()),
 	}
 
-	entry, _, err := indexTicketFromFrontmatter(op.Path, absPath, s.dir, stat, fm, strings.NewReader(op.Content))
+	entry, _, err := ticketFromFrontmatter(op.Path, absPath, s.dir, stat, fm, strings.NewReader(op.Content))
 	if err != nil {
-		return indexTicket{}, fmt.Errorf("%w: index %s: %w", ErrIndexUpdate, op.ID, err)
+		return Ticket{}, fmt.Errorf("index parse %s: %w: %w", op.ID, ErrIndexUpdate, err)
 	}
 
 	return entry, nil
 }
 
-// frontmatterFromWAL converts WAL JSON values into the internal Frontmatter shape.
-func frontmatterFromWAL(raw map[string]any) (Frontmatter, error) {
-	if raw == nil {
-		return nil, fmt.Errorf("%w: frontmatter missing", ErrWALReplay)
-	}
-
-	out := make(Frontmatter, len(raw))
-
-	for key, value := range raw {
-		parsed, err := walValueToFrontmatter(value)
-		if err != nil {
-			return nil, fmt.Errorf("%w: frontmatter %s: %w", ErrWALReplay, key, err)
-		}
-
-		out[key] = parsed
-	}
-
-	return out, nil
-}
-
-// walValueToFrontmatter validates and converts a WAL value to frontmatter.
-func walValueToFrontmatter(value any) (Value, error) {
-	switch typed := value.(type) {
-	case string:
-		return Value{Kind: ValueScalar, Scalar: Scalar{Kind: ScalarString, String: typed}}, nil
-	case bool:
-		return Value{Kind: ValueScalar, Scalar: Scalar{Kind: ScalarBool, Bool: typed}}, nil
-	case float64:
-		if typed != float64(int64(typed)) {
-			return Value{}, errors.New("numeric value must be integer")
-		}
-
-		return Value{Kind: ValueScalar, Scalar: Scalar{Kind: ScalarInt, Int: int64(typed)}}, nil
-	case []any:
-		list := make([]string, 0, len(typed))
-		for _, item := range typed {
-			str, ok := item.(string)
-			if !ok {
-				return Value{}, errors.New("list items must be strings")
-			}
-
-			list = append(list, str)
-		}
-
-		return Value{Kind: ValueList, List: list}, nil
-	case map[string]any:
-		obj := make(map[string]Scalar, len(typed))
-		for k, v := range typed {
-			scalar, err := walScalarToFrontmatter(v)
-			if err != nil {
-				return Value{}, fmt.Errorf("object %s: %w", k, err)
-			}
-
-			obj[k] = scalar
-		}
-
-		return Value{Kind: ValueObject, Object: obj}, nil
-	default:
-		return Value{}, errors.New("unsupported value type")
-	}
-}
-
-// walScalarToFrontmatter validates and converts a WAL scalar to frontmatter.
-func walScalarToFrontmatter(value any) (Scalar, error) {
-	switch typed := value.(type) {
-	case string:
-		return Scalar{Kind: ScalarString, String: typed}, nil
-	case bool:
-		return Scalar{Kind: ScalarBool, Bool: typed}, nil
-	case float64:
-		if typed != float64(int64(typed)) {
-			return Scalar{}, errors.New("numeric value must be integer")
-		}
-
-		return Scalar{Kind: ScalarInt, Int: int64(typed)}, nil
-	default:
-		return Scalar{}, errors.New("unsupported scalar type")
-	}
-}
-
 // renderTicketFile serializes frontmatter and body into a deterministic ticket payload.
-func renderTicketFile(fm Frontmatter, content string) (string, error) {
-	ordered, err := orderFrontmatterKeys(fm)
+func renderTicketFile(fm TicketFrontmatter, content string) (string, error) {
+	frontmatter, err := fm.MarshalYAML()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("render frontmatter: %w: %w", ErrWALReplay, err)
 	}
 
 	builder := strings.Builder{}
-	builder.WriteString("---\n")
-
-	for _, key := range ordered {
-		value := fm[key]
-
-		line, err := formatFrontmatterValue(key, &value)
-		if err != nil {
-			return "", err
-		}
-
-		builder.WriteString(line)
-	}
-
-	builder.WriteString("---\n\n")
+	builder.WriteString(frontmatter)
+	builder.WriteString("\n")
 	builder.WriteString(content)
 
 	if !strings.HasSuffix(content, "\n") {
@@ -678,144 +548,4 @@ func renderTicketFile(fm Frontmatter, content string) (string, error) {
 	}
 
 	return builder.String(), nil
-}
-
-// orderFrontmatterKeys returns deterministic key order with id and schema_version first.
-func orderFrontmatterKeys(fm Frontmatter) ([]string, error) {
-	keys := make([]string, 0, len(fm))
-	for key := range fm {
-		keys = append(keys, key)
-	}
-
-	if _, ok := fm["id"]; !ok {
-		return nil, fmt.Errorf("%w: missing id", ErrWALReplay)
-	}
-
-	if _, ok := fm["schema_version"]; !ok {
-		return nil, fmt.Errorf("%w: missing schema_version", ErrWALReplay)
-	}
-
-	slices.Sort(keys)
-
-	ordered := make([]string, 0, len(keys))
-	ordered = append(ordered, "id", "schema_version")
-
-	for _, key := range keys {
-		if key == "id" || key == "schema_version" {
-			continue
-		}
-
-		ordered = append(ordered, key)
-	}
-
-	return ordered, nil
-}
-
-// formatFrontmatterValue serializes one frontmatter value into YAML.
-func formatFrontmatterValue(key string, value *Value) (string, error) {
-	var builder strings.Builder
-	builder.WriteString(key)
-	builder.WriteString(": ")
-
-	switch value.Kind {
-	case ValueScalar:
-		switch value.Scalar.Kind {
-		case ScalarString:
-			builder.WriteString(value.Scalar.String)
-		case ScalarInt:
-			builder.WriteString(strconv.FormatInt(value.Scalar.Int, 10))
-		case ScalarBool:
-			if value.Scalar.Bool {
-				builder.WriteString("true")
-			} else {
-				builder.WriteString("false")
-			}
-		default:
-			return "", fmt.Errorf("%w: unsupported scalar kind", ErrWALReplay)
-		}
-
-		builder.WriteString("\n")
-	case ValueList:
-		if len(value.List) == 0 {
-			builder.WriteString("[]\n")
-
-			break
-		}
-
-		builder.WriteString("\n")
-
-		for _, item := range value.List {
-			if item == "" {
-				return "", fmt.Errorf("%w: empty list item for %s", ErrWALReplay, key)
-			}
-
-			builder.WriteString("  - ")
-			builder.WriteString(item)
-			builder.WriteString("\n")
-		}
-	case ValueObject:
-		if len(value.Object) == 0 {
-			return "", fmt.Errorf("%w: empty object for %s", ErrWALReplay, key)
-		}
-
-		builder.WriteString("\n")
-
-		keys := make([]string, 0, len(value.Object))
-		for k := range value.Object {
-			keys = append(keys, k)
-		}
-
-		slices.Sort(keys)
-
-		for _, objKey := range keys {
-			scalar := value.Object[objKey]
-
-			builder.WriteString("  ")
-			builder.WriteString(objKey)
-			builder.WriteString(": ")
-			builder.WriteString(formatScalar(scalar))
-			builder.WriteString("\n")
-		}
-	default:
-		return "", fmt.Errorf("%w: unsupported value kind", ErrWALReplay)
-	}
-
-	return builder.String(), nil
-}
-
-// formatScalar renders a scalar to a YAML-compatible literal.
-func formatScalar(s Scalar) string {
-	switch s.Kind {
-	case ScalarString:
-		return s.String
-	case ScalarInt:
-		return strconv.FormatInt(s.Int, 10)
-	case ScalarBool:
-		if s.Bool {
-			return "true"
-		}
-
-		return "false"
-	default:
-		return ""
-	}
-}
-
-// syncParentDir fsyncs the parent directory to persist renames/deletes.
-func syncParentDir(fsys fs.FS, path string) error {
-	dir := filepath.Dir(path)
-
-	fh, err := fsys.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open dir %q: %w", dir, err)
-	}
-
-	defer func() { _ = fh.Close() }()
-
-	err = fh.Sync()
-	if err != nil {
-		return fmt.Errorf("sync dir %q: %w", dir, err)
-	}
-
-	return nil
 }

@@ -3,10 +3,14 @@ package store
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 // ScalarKind distinguishes scalar YAML values inside ticket frontmatter.
@@ -45,8 +49,285 @@ type Value struct {
 	Object map[string]Scalar // Object holds the value when Kind == ValueObject.
 }
 
-// Frontmatter maps top-level keys to validated values.
-type Frontmatter map[string]Value
+// UnmarshalJSON parses a JSON scalar, list, or object into a frontmatter value.
+func (v *Value) UnmarshalJSON(data []byte) error {
+	if v == nil {
+		return errors.New("unmarshal frontmatter value: nil receiver")
+	}
+
+	var raw any
+
+	err := json.Unmarshal(data, &raw)
+	if err != nil {
+		return fmt.Errorf("unmarshal frontmatter value: %w", err)
+	}
+
+	switch typed := raw.(type) {
+	case string:
+		v.Kind = ValueScalar
+		v.Scalar = Scalar{Kind: ScalarString, String: typed}
+	case bool:
+		v.Kind = ValueScalar
+		v.Scalar = Scalar{Kind: ScalarBool, Bool: typed}
+	case float64:
+		if typed != math.Trunc(typed) {
+			return errors.New("unmarshal frontmatter value: numeric value must be integer")
+		}
+
+		v.Kind = ValueScalar
+		v.Scalar = Scalar{Kind: ScalarInt, Int: int64(typed)}
+	case []any:
+		list := make([]string, 0, len(typed))
+		for _, item := range typed {
+			str, ok := item.(string)
+			if !ok {
+				return errors.New("unmarshal frontmatter value: list items must be strings")
+			}
+
+			list = append(list, str)
+		}
+
+		v.Kind = ValueList
+		v.List = list
+		v.Object = nil
+	case map[string]any:
+		obj := make(map[string]Scalar, len(typed))
+		for key, value := range typed {
+			switch scalar := value.(type) {
+			case string:
+				obj[key] = Scalar{Kind: ScalarString, String: scalar}
+			case bool:
+				obj[key] = Scalar{Kind: ScalarBool, Bool: scalar}
+			case float64:
+				if scalar != math.Trunc(scalar) {
+					return fmt.Errorf("unmarshal frontmatter value: object %s must be integer", key)
+				}
+
+				obj[key] = Scalar{Kind: ScalarInt, Int: int64(scalar)}
+			default:
+				return fmt.Errorf("unmarshal frontmatter value: object %s must be scalar", key)
+			}
+		}
+
+		v.Kind = ValueObject
+		v.Object = obj
+		v.List = nil
+	default:
+		return fmt.Errorf("unmarshal frontmatter value: unsupported type %T", raw)
+	}
+
+	return nil
+}
+
+// TicketFrontmatter maps top-level keys to validated values.
+type TicketFrontmatter map[string]Value
+
+// MarshalJSON renders the frontmatter map as a JSON object.
+func (fm TicketFrontmatter) MarshalJSON() ([]byte, error) {
+	obj := make(map[string]any, len(fm))
+	for key, value := range fm {
+		switch value.Kind {
+		case ValueScalar:
+			switch value.Scalar.Kind {
+			case ScalarString:
+				obj[key] = value.Scalar.String
+			case ScalarInt:
+				obj[key] = value.Scalar.Int
+			case ScalarBool:
+				obj[key] = value.Scalar.Bool
+			default:
+				return nil, fmt.Errorf("marshal frontmatter %s: unsupported scalar kind %d", key, value.Scalar.Kind)
+			}
+		case ValueList:
+			obj[key] = value.List
+		case ValueObject:
+			inner := make(map[string]any, len(value.Object))
+			for objKey, scalar := range value.Object {
+				switch scalar.Kind {
+				case ScalarString:
+					inner[objKey] = scalar.String
+				case ScalarInt:
+					inner[objKey] = scalar.Int
+				case ScalarBool:
+					inner[objKey] = scalar.Bool
+				default:
+					return nil, fmt.Errorf("marshal frontmatter %s.%s: unsupported scalar kind %d", key, objKey, scalar.Kind)
+				}
+			}
+
+			obj[key] = inner
+		default:
+			return nil, fmt.Errorf("marshal frontmatter %s: unsupported value kind %d", key, value.Kind)
+		}
+	}
+
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("marshal frontmatter: %w", err)
+	}
+
+	return data, nil
+}
+
+// MarshalOptions configures frontmatter serialization.
+type MarshalOptions struct {
+	IncludeDelimiters bool // IncludeDelimiters writes --- fence lines before and after.
+}
+
+// MarshalOption mutates MarshalOptions.
+type MarshalOption func(*MarshalOptions)
+
+// WithYAMLDelimiters toggles whether MarshalYAML includes --- delimiters.
+// The default is true to match the on-disk ticket format.
+func WithYAMLDelimiters(include bool) MarshalOption {
+	return func(opts *MarshalOptions) {
+		opts.IncludeDelimiters = include
+	}
+}
+
+// MarshalYAML serializes frontmatter in a deterministic YAML subset.
+// It sorts keys alphabetically, always writes "id" then "schema_version" first,
+// and returns an error if either is missing.
+func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
+	options := MarshalOptions{IncludeDelimiters: true}
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+
+		opt(&options)
+	}
+
+	if fm == nil {
+		return "", errors.New("marshal frontmatter: nil map")
+	}
+
+	if _, ok := fm["id"]; !ok {
+		return "", errors.New("marshal frontmatter: missing id")
+	}
+
+	if _, ok := fm["schema_version"]; !ok {
+		return "", errors.New("marshal frontmatter: missing schema_version")
+	}
+
+	keys := make([]string, 0, len(fm))
+	for key := range fm {
+		keys = append(keys, key)
+	}
+
+	slices.Sort(keys)
+
+	ordered := make([]string, 0, len(keys))
+	ordered = append(ordered, "id", "schema_version")
+
+	for _, key := range keys {
+		if key == "id" || key == "schema_version" {
+			continue
+		}
+
+		ordered = append(ordered, key)
+	}
+
+	var builder strings.Builder
+	if options.IncludeDelimiters {
+		builder.WriteString("---\n")
+	}
+
+	for _, key := range ordered {
+		value, ok := fm[key]
+		if !ok {
+			return "", fmt.Errorf("marshal frontmatter: missing %s", key)
+		}
+
+		builder.WriteString(key)
+		builder.WriteString(": ")
+
+		switch value.Kind {
+		case ValueScalar:
+			switch value.Scalar.Kind {
+			case ScalarString:
+				builder.WriteString(value.Scalar.String)
+			case ScalarInt:
+				builder.WriteString(strconv.FormatInt(value.Scalar.Int, 10))
+			case ScalarBool:
+				if value.Scalar.Bool {
+					builder.WriteString("true")
+				} else {
+					builder.WriteString("false")
+				}
+			default:
+				return "", fmt.Errorf("marshal frontmatter %s: unsupported scalar kind %d", key, value.Scalar.Kind)
+			}
+
+			builder.WriteString("\n")
+		case ValueList:
+			if len(value.List) == 0 {
+				builder.WriteString("[]\n")
+
+				break
+			}
+
+			builder.WriteString("\n")
+
+			for _, item := range value.List {
+				if item == "" {
+					return "", fmt.Errorf("marshal frontmatter %s: empty list item", key)
+				}
+
+				builder.WriteString("  - ")
+				builder.WriteString(item)
+				builder.WriteString("\n")
+			}
+		case ValueObject:
+			if len(value.Object) == 0 {
+				return "", fmt.Errorf("marshal frontmatter %s: empty object", key)
+			}
+
+			builder.WriteString("\n")
+
+			objKeys := make([]string, 0, len(value.Object))
+			for objKey := range value.Object {
+				objKeys = append(objKeys, objKey)
+			}
+
+			slices.Sort(objKeys)
+
+			for _, objKey := range objKeys {
+				scalar := value.Object[objKey]
+
+				builder.WriteString("  ")
+				builder.WriteString(objKey)
+				builder.WriteString(": ")
+
+				switch scalar.Kind {
+				case ScalarString:
+					builder.WriteString(scalar.String)
+				case ScalarInt:
+					builder.WriteString(strconv.FormatInt(scalar.Int, 10))
+				case ScalarBool:
+					if scalar.Bool {
+						builder.WriteString("true")
+					} else {
+						builder.WriteString("false")
+					}
+				default:
+					return "", fmt.Errorf("marshal frontmatter %s.%s: unsupported scalar kind %d", key, objKey, scalar.Kind)
+				}
+
+				builder.WriteString("\n")
+			}
+		default:
+			return "", fmt.Errorf("marshal frontmatter %s: unsupported value kind %d", key, value.Kind)
+		}
+	}
+
+	if options.IncludeDelimiters {
+		builder.WriteString("---\n")
+	}
+
+	return builder.String(), nil
+}
 
 const (
 	frontmatterDelimiter = "---"
@@ -119,7 +400,7 @@ func WithTrimLeadingBlankTail(trim bool) ParseOption {
 //	}
 //	_ = fm["status"]
 //	_ = tail // "# Title\nBody\n"
-func ParseFrontmatter(src []byte, opts ...ParseOption) (Frontmatter, []byte, error) {
+func ParseFrontmatter(src []byte, opts ...ParseOption) (TicketFrontmatter, []byte, error) {
 	options := applyParseOptions(opts)
 
 	source := sliceLineSource(src)
@@ -176,7 +457,7 @@ func ParseFrontmatter(src []byte, opts ...ParseOption) (Frontmatter, []byte, err
 //	body, _ := io.ReadAll(tail)
 //	_ = fm["status"]
 //	_ = body
-func ParseFrontmatterReader(r io.Reader, opts ...ParseOption) (Frontmatter, io.Reader, error) {
+func ParseFrontmatterReader(r io.Reader, opts ...ParseOption) (TicketFrontmatter, io.Reader, error) {
 	options := applyParseOptions(opts)
 
 	var br *bufio.Reader
@@ -244,8 +525,8 @@ func newFrontmatterParser(source lineSource, stopAtDelimiter bool, lineLimit int
 	return &frontmatterParser{source: source, stopAtDelimiter: stopAtDelimiter, lineLimit: lineLimit}
 }
 
-func (p *frontmatterParser) parse() (Frontmatter, bool, error) {
-	out := make(Frontmatter)
+func (p *frontmatterParser) parse() (TicketFrontmatter, bool, error) {
+	out := make(TicketFrontmatter)
 
 	for {
 		tok, ok, err := p.source.next()

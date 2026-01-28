@@ -16,6 +16,8 @@ import (
 
 	"github.com/calvinalkan/fileproc"
 	"github.com/google/uuid"
+
+	"github.com/calvinalkan/agent-task/pkg/fs"
 )
 
 const (
@@ -32,15 +34,45 @@ const (
 // Limit frontmatter scan length to avoid unbounded reads when a delimiter is missing.
 const rebuildFrontmatterLineLimit = 100
 
-// Rebuild scans ticket files and rebuilds the SQLite index from scratch.
+// ErrIndexScan is returned (via errors.Is) when scanning hits per-file validation issues.
+// Use errors.Is(err, ErrIndexScan) to detect scan failures.
+var ErrIndexScan = errors.New("index scan")
+
+// FileIssueError captures a single file scan problem.
+type FileIssueError struct {
+	Path string // Path is the absolute path of the problematic file.
+	ID   string // ID is the parsed ticket ID when available.
+	Err  error  // Err is the underlying validation or parse error.
+}
+
+func (e FileIssueError) Error() string {
+	return e.Err.Error()
+}
+
+// IndexScanError aggregates per-file scan issues.
+// It unwraps to [ErrIndexScan] for errors.Is checks.
+type IndexScanError struct {
+	Total  int              // Total is the number of invalid files encountered.
+	Issues []FileIssueError // Issues contains per-file errors for reporting.
+}
+
+func (e *IndexScanError) Error() string {
+	return fmt.Sprintf("scan: %d invalid files", e.Total)
+}
+
+func (*IndexScanError) Unwrap() error {
+	return ErrIndexScan
+}
+
+// Reindex scans ticket files and rebuilds the SQLite index from scratch.
 //
 // The index is treated as disposable: rebuild is intentionally strict about ticket validity.
-// Rebuild returns the number of indexed tickets and an error that matches [ErrIndexScan]
+// Reindex returns the number of indexed tickets and an error that matches [ErrIndexScan]
 // when files cannot be indexed. Use errors.Is(err, ErrIndexScan) to detect scan failures.
 //
 // If any scan errors are encountered, rebuild returns them without touching SQLite
 // to avoid publishing a partial or stale index. Fix the files and rerun rebuild.
-func Rebuild(ctx context.Context, dir string) (int, error) {
+func Reindex(ctx context.Context, dir string) (int, error) {
 	if ctx == nil {
 		return 0, errors.New("rebuild index: context is nil")
 	}
@@ -57,20 +89,48 @@ func Rebuild(ctx context.Context, dir string) (int, error) {
 	ticketsDir := filepath.Clean(dir)
 	tkDir := filepath.Join(ticketsDir, ".tk")
 
-	entries, scanErr := scanTicketFiles(ctx, ticketsDir)
+	fsReal := fs.NewReal()
+	locker := fs.NewLocker(fsReal)
+	atomicWriter := fs.NewAtomicWriter(fsReal)
 
-	err = ctx.Err()
-	if err != nil {
-		return 0, fmt.Errorf("rebuild index: canceled: %w", context.Cause(ctx))
-	}
-
-	if scanErr != nil {
-		return 0, scanErr
-	}
-
-	err = os.MkdirAll(tkDir, 0o750)
+	err = fsReal.MkdirAll(tkDir, 0o750)
 	if err != nil {
 		return 0, fmt.Errorf("rebuild index: create .tk directory: %w", err)
+	}
+
+	walPath := filepath.Join(tkDir, "wal")
+
+	lock, err := locker.Lock(walPath)
+	if err != nil {
+		return 0, fmt.Errorf("rebuild index: lock wal: %w", err)
+	}
+
+	defer func() { _ = lock.Close() }()
+
+	walFile, err := fsReal.OpenFile(walPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return 0, fmt.Errorf("rebuild index: open wal: %w", err)
+	}
+
+	defer func() { _ = walFile.Close() }()
+
+	store := &Store{
+		dir:     ticketsDir,
+		fs:      fsReal,
+		locker:  locker,
+		atomic:  atomicWriter,
+		wal:     walFile,
+		walPath: walPath,
+	}
+
+	recovery, err := store.recoverWalLocked(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	entries, scanErr := scanTicketFiles(ctx, ticketsDir)
+	if scanErr != nil {
+		return 0, scanErr
 	}
 
 	db, err := openSQLite(ctx, filepath.Join(tkDir, "index.sqlite"))
@@ -80,41 +140,33 @@ func Rebuild(ctx context.Context, dir string) (int, error) {
 
 	defer func() { _ = db.Close() }()
 
-	indexed, err := rebuildIndexInTxn(ctx, db, entries)
+	indexed, err := reindexSqlInTxn(ctx, db, entries)
 	if err != nil {
 		return 0, fmt.Errorf("rebuild index: %w", err)
+	}
+
+	if recovery.state == walCommitted {
+		err = truncateWal(walFile)
+		if err != nil {
+			return 0, fmt.Errorf("rebuild index: truncate wal: %w", err)
+		}
 	}
 
 	return indexed, nil
 }
 
-type indexTicket struct {
-	ID          string
-	ShortID     string
-	Path        string
-	MtimeNS     int64
-	Status      string
-	Type        string
-	Priority    int64
-	Assignee    sql.NullString
-	Parent      sql.NullString
-	CreatedAt   int64
-	ClosedAt    sql.NullInt64
-	ExternalRef sql.NullString
-	Title       string
-	BlockedBy   []string
-}
-
-func scanTicketFiles(ctx context.Context, root string) ([]fileproc.Result[indexTicket], error) {
+// scanTicketFiles finds all the md files in the data directory and parses them to a Ticket.
+func scanTicketFiles(ctx context.Context, root string) ([]fileproc.Result[Ticket], error) {
 	opts := fileproc.Options{
 		Recursive: true,
 		Suffix:    ".md",
 		OnError: func(err error, _, _ int) bool {
+			// Don't collect internalSkip errors in errs result in ProcessStat().
 			return !errors.Is(err, errSkipInternalPath)
 		},
 	}
 
-	results, errs := fileproc.ProcessStat(ctx, root, func(path []byte, st fileproc.Stat, f fileproc.LazyFile) (*indexTicket, error) {
+	results, errs := fileproc.ProcessStat(ctx, root, func(path []byte, st fileproc.Stat, f fileproc.LazyFile) (*Ticket, error) {
 		if bytes.HasPrefix(path, []byte(".tk/")) {
 			return nil, errSkipInternalPath
 		}
@@ -130,7 +182,7 @@ func scanTicketFiles(ctx context.Context, root string) ([]fileproc.Result[indexT
 		relPath := string(path)
 		contextLabel := filepath.Join(root, relPath)
 
-		entry, id, entryErr := indexTicketFromFrontmatter(relPath, contextLabel, root, st, fm, tail)
+		entry, id, entryErr := ticketFromFrontmatter(relPath, contextLabel, root, st, fm, tail)
 		if entryErr != nil {
 			return nil, &FileIssueError{
 				Path: contextLabel,
@@ -180,130 +232,243 @@ func scanTicketFiles(ctx context.Context, root string) ([]fileproc.Result[indexT
 	return results, nil
 }
 
-func indexTicketFromFrontmatter(relPath, contextLabel, root string, st fileproc.Stat, fm Frontmatter, tail io.Reader) (indexTicket, string, error) {
+// reindexSqlInTxn rebuilds the derived index in a single SQLite transaction.
+func reindexSqlInTxn(ctx context.Context, db *sql.DB, entries []fileproc.Result[Ticket]) (int, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin rebuild txn: %w", err)
+	}
+
+	committed := false
+
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	err = dropAndRecreateSchema(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+
+	insertTicket, err := tx.PrepareContext(ctx, `
+		INSERT INTO tickets (
+			id,
+			short_id,
+			path,
+			mtime_ns,
+			status,
+			type,
+			priority,
+			assignee,
+			parent,
+			created_at,
+			closed_at,
+			external_ref,
+			title
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare insert: %w", err)
+	}
+
+	defer func() { _ = insertTicket.Close() }()
+
+	insertBlocker, err := tx.PrepareContext(ctx, `
+		INSERT INTO ticket_blockers (ticket_id, blocker_id) VALUES (?, ?)`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare blocker insert: %w", err)
+	}
+
+	defer func() { _ = insertBlocker.Close() }()
+
+	indexed := 0
+
+	for i := range entries {
+		entry := entries[i].Value
+		if entry == nil {
+			continue
+		}
+
+		assignee := sql.NullString{String: entry.Assignee, Valid: entry.Assignee != ""}
+		parent := sql.NullString{String: entry.Parent, Valid: entry.Parent != ""}
+		external := sql.NullString{String: entry.ExternalRef, Valid: entry.ExternalRef != ""}
+		createdAt := entry.CreatedAt.Unix()
+
+		closedAt := sql.NullInt64{}
+		if entry.ClosedAt != nil {
+			closedAt = sql.NullInt64{Int64: entry.ClosedAt.Unix(), Valid: true}
+		}
+
+		_, err = insertTicket.ExecContext(
+			ctx,
+			entry.ID,
+			entry.ShortID,
+			entry.Path,
+			entry.MtimeNS,
+			entry.Status,
+			entry.Type,
+			entry.Priority,
+			assignee,
+			parent,
+			createdAt,
+			closedAt,
+			external,
+			entry.Title,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("insert index row for %s (%s): %w", entry.ID, entry.Path, err)
+		}
+
+		indexed++
+
+		for _, blocker := range entry.BlockedBy {
+			_, err = insertBlocker.ExecContext(ctx, entry.ID, blocker)
+			if err != nil {
+				return 0, fmt.Errorf("insert blocker for %s (%s): %w", entry.ID, entry.Path, err)
+			}
+		}
+	}
+
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
+	if err != nil {
+		return 0, fmt.Errorf("set user_version: %w", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return 0, fmt.Errorf("commit rebuild txn: %w", err)
+	}
+
+	committed = true
+
+	return indexed, nil
+}
+
+func ticketFromFrontmatter(relPath, contextLabel, root string, st fileproc.Stat, fm TicketFrontmatter, tail io.Reader) (Ticket, string, error) {
 	idRaw, err := requireScalarString(fm, "id", contextLabel)
 	if err != nil {
-		return indexTicket{}, "", err
+		return Ticket{}, "", err
 	}
 
 	err = validateIDString(idRaw)
 	if err != nil {
-		return indexTicket{}, idRaw, fmt.Errorf("validate id at %s: %w", contextLabel, err)
+		return Ticket{}, idRaw, fmt.Errorf("validate id at %s: %w", contextLabel, err)
 	}
 
 	id, err := uuid.Parse(idRaw)
 	if err != nil {
-		return indexTicket{}, idRaw, fmt.Errorf("parse id at %s: %w", contextLabel, err)
+		return Ticket{}, idRaw, fmt.Errorf("parse id at %s: %w", contextLabel, err)
 	}
 
 	err = validateUUIDv7(id)
 	if err != nil {
-		return indexTicket{}, idRaw, fmt.Errorf("validate id at %s: %w", contextLabel, err)
+		return Ticket{}, idRaw, fmt.Errorf("validate id at %s: %w", contextLabel, err)
 	}
 
 	expectedRel, err := TicketPath(id)
 	if err != nil {
-		return indexTicket{}, idRaw, fmt.Errorf("derive path for %s: %w", idRaw, err)
+		return Ticket{}, idRaw, fmt.Errorf("derive path for %s: %w", idRaw, err)
 	}
 
 	if filepath.Clean(relPath) != filepath.Clean(expectedRel) {
 		expectedPath := filepath.Join(root, expectedRel)
 
-		return indexTicket{}, idRaw, fmt.Errorf("validate path: id %s stored at %s (expected %s)", idRaw, contextLabel, expectedPath)
+		return Ticket{}, idRaw, fmt.Errorf("validate path: id %s stored at %s (expected %s)", idRaw, contextLabel, expectedPath)
 	}
 
 	contextLabel = fmt.Sprintf("%s (id %s)", contextLabel, idRaw)
 
 	schema, err := requireScalarInt(fm, "schema_version", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	if schema < 1 || schema != int64(schemaVersion) {
-		return indexTicket{}, idRaw, fmt.Errorf("parse frontmatter at %s: schema_version %d is unsupported (expected %d)", contextLabel, schema, schemaVersion)
+		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: schema_version %d is unsupported (expected %d)", contextLabel, schema, schemaVersion)
 	}
 
 	status, err := requireScalarString(fm, "status", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	if !isValidStatus(status) {
-		return indexTicket{}, idRaw, fmt.Errorf("parse frontmatter at %s: status %q is invalid (expected open, in_progress, closed)", contextLabel, status)
+		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: status %q is invalid (expected open, in_progress, closed)", contextLabel, status)
 	}
 
 	kind, err := requireScalarString(fm, "type", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	if !isValidType(kind) {
-		return indexTicket{}, idRaw, fmt.Errorf("parse frontmatter at %s: type %q is invalid (expected bug, feature, task, epic, chore)", contextLabel, kind)
+		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: type %q is invalid (expected bug, feature, task, epic, chore)", contextLabel, kind)
 	}
 
 	priority, err := requireScalarInt(fm, "priority", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	if !isValidPriority(priority) {
-		return indexTicket{}, idRaw, fmt.Errorf("parse frontmatter at %s: priority %d is invalid (expected %d-%d)", contextLabel, priority, minPriority, maxPriority)
+		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: priority %d is invalid (expected %d-%d)", contextLabel, priority, minPriority, maxPriority)
 	}
 
 	createdRaw, err := requireScalarString(fm, "created", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	createdAt, err := parseRFC3339(createdRaw)
 	if err != nil {
-		return indexTicket{}, idRaw, fmt.Errorf("parse frontmatter at %s: created timestamp %q: %w", contextLabel, createdRaw, err)
+		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: created timestamp %q: %w", contextLabel, createdRaw, err)
 	}
 
 	closedAt, err := optionalRFC3339(fm, "closed", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	if status == statusClosed && !closedAt.Valid {
-		return indexTicket{}, idRaw, fmt.Errorf("parse frontmatter at %s: closed timestamp required when status is %q", contextLabel, statusClosed)
+		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: closed timestamp required when status is %q", contextLabel, statusClosed)
 	}
 
 	if status != statusClosed && closedAt.Valid {
-		return indexTicket{}, idRaw, fmt.Errorf("parse frontmatter at %s: closed timestamp present when status is %q", contextLabel, status)
+		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: closed timestamp present when status is %q", contextLabel, status)
 	}
 
 	assignee, err := optionalScalarString(fm, "assignee", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	parent, err := optionalScalarString(fm, "parent", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	externalRef, err := optionalScalarString(fm, "external-ref", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	blockedBy, err := optionalList(fm, "blocked-by", contextLabel)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
 	title, err := extractTitle(tail)
 	if err != nil {
-		return indexTicket{}, idRaw, fmt.Errorf("parse body at %s: %w", contextLabel, err)
+		return Ticket{}, idRaw, fmt.Errorf("parse body at %s: %w", contextLabel, err)
 	}
 
 	shortID, err := ShortIDFromUUID(id)
 	if err != nil {
-		return indexTicket{}, idRaw, err
+		return Ticket{}, idRaw, err
 	}
 
-	return indexTicket{
+	return Ticket{
 		ID:          id.String(),
 		ShortID:     shortID,
 		Path:        expectedRel,
@@ -311,11 +476,11 @@ func indexTicketFromFrontmatter(relPath, contextLabel, root string, st fileproc.
 		Status:      status,
 		Type:        kind,
 		Priority:    priority,
-		Assignee:    assignee,
-		Parent:      parent,
-		CreatedAt:   createdAt.Unix(),
-		ClosedAt:    closedAt,
-		ExternalRef: externalRef,
+		Assignee:    nullStringValue(assignee),
+		Parent:      nullStringValue(parent),
+		CreatedAt:   createdAt.UTC(),
+		ClosedAt:    nullTimePtr(closedAt),
+		ExternalRef: nullStringValue(externalRef),
 		Title:       title,
 		BlockedBy:   blockedBy,
 	}, idRaw, nil
@@ -346,7 +511,7 @@ func extractTitle(r io.Reader) (string, error) {
 	return "", errors.New("missing title (expected '# <title>')")
 }
 
-func requireScalarString(fm Frontmatter, key, contextLabel string) (string, error) {
+func requireScalarString(fm TicketFrontmatter, key, contextLabel string) (string, error) {
 	value, ok := fm[key]
 	if !ok {
 		return "", fmt.Errorf("parse frontmatter at %s: missing required field %q", contextLabel, key)
@@ -363,7 +528,7 @@ func requireScalarString(fm Frontmatter, key, contextLabel string) (string, erro
 	return value.Scalar.String, nil
 }
 
-func requireScalarInt(fm Frontmatter, key, contextLabel string) (int64, error) {
+func requireScalarInt(fm TicketFrontmatter, key, contextLabel string) (int64, error) {
 	value, ok := fm[key]
 	if !ok {
 		return 0, fmt.Errorf("parse frontmatter at %s: missing required field %q", contextLabel, key)
@@ -376,7 +541,7 @@ func requireScalarInt(fm Frontmatter, key, contextLabel string) (int64, error) {
 	return value.Scalar.Int, nil
 }
 
-func optionalScalarString(fm Frontmatter, key, contextLabel string) (sql.NullString, error) {
+func optionalScalarString(fm TicketFrontmatter, key, contextLabel string) (sql.NullString, error) {
 	value, ok := fm[key]
 	if !ok {
 		return sql.NullString{}, nil
@@ -393,7 +558,7 @@ func optionalScalarString(fm Frontmatter, key, contextLabel string) (sql.NullStr
 	return sql.NullString{String: value.Scalar.String, Valid: true}, nil
 }
 
-func optionalList(fm Frontmatter, key, contextLabel string) ([]string, error) {
+func optionalList(fm TicketFrontmatter, key, contextLabel string) ([]string, error) {
 	value, ok := fm[key]
 	if !ok {
 		return nil, nil
@@ -426,7 +591,7 @@ func optionalList(fm Frontmatter, key, contextLabel string) ([]string, error) {
 	return out, nil
 }
 
-func optionalRFC3339(fm Frontmatter, key, contextLabel string) (sql.NullInt64, error) {
+func optionalRFC3339(fm TicketFrontmatter, key, contextLabel string) (sql.NullInt64, error) {
 	value, ok := fm[key]
 	if !ok {
 		return sql.NullInt64{}, nil
@@ -500,33 +665,3 @@ func isValidPriority(priority int64) bool {
 }
 
 var errSkipInternalPath = errors.New("skip internal .tk path")
-
-// ErrIndexScan is returned (via errors.Is) when scanning hits per-file validation issues.
-// Use errors.Is(err, ErrIndexScan) to detect scan failures.
-var ErrIndexScan = errors.New("index scan")
-
-// FileIssueError captures a single file scan problem.
-type FileIssueError struct {
-	Path string // Path is the absolute path of the problematic file.
-	ID   string // ID is the parsed ticket ID when available.
-	Err  error  // Err is the underlying validation or parse error.
-}
-
-func (e FileIssueError) Error() string {
-	return e.Err.Error()
-}
-
-// IndexScanError aggregates per-file scan issues.
-// It unwraps to [ErrIndexScan] for errors.Is checks.
-type IndexScanError struct {
-	Total  int              // Total is the number of invalid files encountered.
-	Issues []FileIssueError // Issues contains per-file errors for reporting.
-}
-
-func (e *IndexScanError) Error() string {
-	return fmt.Sprintf("scan: %d invalid files", e.Total)
-}
-
-func (*IndexScanError) Unwrap() error {
-	return ErrIndexScan
-}

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -239,11 +238,11 @@ func listMarkdownFiles(t *testing.T, root string) []string {
 	return files
 }
 
-func assertSummaryMatchesFixture(t *testing.T, summary *store.Summary, fixture *ticketFixture, relPath string, mtimeNS int64) {
+func assertTicketMatchesFixture(t *testing.T, ticket *store.Ticket, fixture *ticketFixture, relPath string, mtimeNS int64) {
 	t.Helper()
 
-	if summary.ID != fixture.ID {
-		t.Fatalf("summary id = %s, want %s", summary.ID, fixture.ID)
+	if ticket.ID != fixture.ID {
+		t.Fatalf("ticket id = %s, want %s", ticket.ID, fixture.ID)
 	}
 
 	parsedID, err := uuidFromString(fixture.ID)
@@ -256,116 +255,85 @@ func assertSummaryMatchesFixture(t *testing.T, summary *store.Summary, fixture *
 		t.Fatalf("short id: %v", err)
 	}
 
-	if summary.ShortID != shortID {
-		t.Fatalf("short id = %s, want %s", summary.ShortID, shortID)
+	if ticket.ShortID != shortID {
+		t.Fatalf("short id = %s, want %s", ticket.ShortID, shortID)
 	}
 
-	if summary.Path != relPath {
-		t.Fatalf("path = %s, want %s", summary.Path, relPath)
+	if ticket.Path != relPath {
+		t.Fatalf("path = %s, want %s", ticket.Path, relPath)
 	}
 
-	if summary.MtimeNS != mtimeNS {
-		t.Fatalf("mtime_ns = %d, want %d", summary.MtimeNS, mtimeNS)
+	if ticket.MtimeNS != mtimeNS {
+		t.Fatalf("mtime_ns = %d, want %d", ticket.MtimeNS, mtimeNS)
 	}
 
-	if summary.Status != fixture.Status {
-		t.Fatalf("status = %s, want %s", summary.Status, fixture.Status)
+	if ticket.Status != fixture.Status {
+		t.Fatalf("status = %s, want %s", ticket.Status, fixture.Status)
 	}
 
-	if summary.Type != fixture.Type {
-		t.Fatalf("type = %s, want %s", summary.Type, fixture.Type)
+	if ticket.Type != fixture.Type {
+		t.Fatalf("type = %s, want %s", ticket.Type, fixture.Type)
 	}
 
-	if summary.Priority != int64(fixture.Priority) {
-		t.Fatalf("priority = %d, want %d", summary.Priority, fixture.Priority)
+	if ticket.Priority != int64(fixture.Priority) {
+		t.Fatalf("priority = %d, want %d", ticket.Priority, fixture.Priority)
 	}
 
-	if summary.Assignee != fixture.Assignee {
-		t.Fatalf("assignee = %s, want %s", summary.Assignee, fixture.Assignee)
+	if ticket.Assignee != fixture.Assignee {
+		t.Fatalf("assignee = %s, want %s", ticket.Assignee, fixture.Assignee)
 	}
 
-	if summary.Parent != fixture.Parent {
-		t.Fatalf("parent = %s, want %s", summary.Parent, fixture.Parent)
+	if ticket.Parent != fixture.Parent {
+		t.Fatalf("parent = %s, want %s", ticket.Parent, fixture.Parent)
 	}
 
-	if summary.ExternalRef != fixture.ExternalRef {
-		t.Fatalf("external_ref = %s, want %s", summary.ExternalRef, fixture.ExternalRef)
+	if ticket.ExternalRef != fixture.ExternalRef {
+		t.Fatalf("external_ref = %s, want %s", ticket.ExternalRef, fixture.ExternalRef)
 	}
 
-	if !summary.CreatedAt.Equal(fixture.CreatedAt.UTC()) {
-		t.Fatalf("created_at = %v, want %v", summary.CreatedAt, fixture.CreatedAt.UTC())
+	if !ticket.CreatedAt.Equal(fixture.CreatedAt.UTC()) {
+		t.Fatalf("created_at = %v, want %v", ticket.CreatedAt, fixture.CreatedAt.UTC())
 	}
 
 	if fixture.ClosedAt == nil {
-		if summary.ClosedAt != nil {
-			t.Fatalf("closed_at = %v, want nil", summary.ClosedAt)
+		if ticket.ClosedAt != nil {
+			t.Fatalf("closed_at = %v, want nil", ticket.ClosedAt)
 		}
 	} else {
-		if summary.ClosedAt == nil || !summary.ClosedAt.Equal(fixture.ClosedAt.UTC()) {
-			t.Fatalf("closed_at = %v, want %v", summary.ClosedAt, fixture.ClosedAt.UTC())
+		if ticket.ClosedAt == nil || !ticket.ClosedAt.Equal(fixture.ClosedAt.UTC()) {
+			t.Fatalf("closed_at = %v, want %v", ticket.ClosedAt, fixture.ClosedAt.UTC())
 		}
 	}
 
-	if summary.Title != fixture.Title {
-		t.Fatalf("title = %s, want %s", summary.Title, fixture.Title)
+	if ticket.Title != fixture.Title {
+		t.Fatalf("title = %s, want %s", ticket.Title, fixture.Title)
 	}
 
 	expectedBlocked := append([]string(nil), fixture.BlockedBy...)
 	slices.Sort(expectedBlocked)
 
-	if len(summary.BlockedBy) != len(expectedBlocked) {
-		t.Fatalf("blocked_by = %v, want %v", summary.BlockedBy, expectedBlocked)
+	if len(ticket.BlockedBy) != len(expectedBlocked) {
+		t.Fatalf("blocked_by = %v, want %v", ticket.BlockedBy, expectedBlocked)
 	}
 
 	for i, blocker := range expectedBlocked {
-		if summary.BlockedBy[i] != blocker {
-			t.Fatalf("blocked_by[%d] = %s, want %s", i, summary.BlockedBy[i], blocker)
+		if ticket.BlockedBy[i] != blocker {
+			t.Fatalf("blocked_by[%d] = %s, want %s", i, ticket.BlockedBy[i], blocker)
 		}
 	}
 }
 
-func renderTicketFromFrontmatter(t *testing.T, fm map[string]any, content string) string {
+func renderTicketFromFrontmatter(t *testing.T, fm store.TicketFrontmatter, content string) string {
 	t.Helper()
 
-	keys := make([]string, 0, len(fm))
-	for key := range fm {
-		keys = append(keys, key)
-	}
-
-	if _, ok := fm["id"]; !ok {
-		t.Fatal("frontmatter missing id")
-	}
-
-	if _, ok := fm["schema_version"]; !ok {
-		t.Fatal("frontmatter missing schema_version")
-	}
-
-	slices.Sort(keys)
-
-	ordered := make([]string, 0, len(keys))
-	ordered = append(ordered, "id", "schema_version")
-
-	for _, key := range keys {
-		if key == "id" || key == "schema_version" {
-			continue
-		}
-
-		ordered = append(ordered, key)
+	frontmatter, err := fm.MarshalYAML()
+	if err != nil {
+		t.Fatalf("marshal frontmatter: %v", err)
 	}
 
 	var builder strings.Builder
-	builder.WriteString("---\n")
-
-	for _, key := range ordered {
-		value, ok := fm[key]
-		if !ok {
-			t.Fatalf("frontmatter missing key %s", key)
-		}
-
-		writeFrontmatterValue(t, &builder, key, value)
-	}
-
-	builder.WriteString("---\n\n")
+	builder.WriteString(frontmatter)
+	builder.WriteString("\n")
 	builder.WriteString(content)
 
 	if !strings.HasSuffix(content, "\n") {
@@ -375,55 +343,12 @@ func renderTicketFromFrontmatter(t *testing.T, fm map[string]any, content string
 	return builder.String()
 }
 
-func writeFrontmatterValue(t *testing.T, builder *strings.Builder, key string, value any) {
-	t.Helper()
-
-	builder.WriteString(key)
-	builder.WriteString(": ")
-
-	switch typed := value.(type) {
-	case string:
-		builder.WriteString(typed)
-		builder.WriteString("\n")
-	case bool:
-		if typed {
-			builder.WriteString("true")
-		} else {
-			builder.WriteString("false")
-		}
-
-		builder.WriteString("\n")
-	case int:
-		builder.WriteString(strconv.Itoa(typed))
-		builder.WriteString("\n")
-	case int64:
-		builder.WriteString(strconv.FormatInt(typed, 10))
-		builder.WriteString("\n")
-	case []string:
-		if len(typed) == 0 {
-			builder.WriteString("[]\n")
-
-			return
-		}
-
-		builder.WriteString("\n")
-
-		for _, item := range typed {
-			builder.WriteString("  - ")
-			builder.WriteString(item)
-			builder.WriteString("\n")
-		}
-	default:
-		t.Fatalf("unsupported frontmatter value for %s: %T", key, value)
-	}
-}
-
 type walRecord struct {
-	Op          string         `json:"op"`
-	ID          string         `json:"id"`
-	Path        string         `json:"path"`
-	Frontmatter map[string]any `json:"frontmatter,omitempty"`
-	Content     string         `json:"content,omitempty"`
+	Op          string `json:"op"`
+	ID          string `json:"id"`
+	Path        string `json:"path"`
+	Frontmatter any    `json:"frontmatter,omitempty"`
+	Content     string `json:"content,omitempty"`
 }
 
 const (
@@ -564,35 +489,92 @@ func encodeWalFooter(body []byte) []byte {
 	return buf
 }
 
-func walFrontmatterFromTicket(ticket *ticketFixture) map[string]any {
-	fm := map[string]any{
-		"id":             ticket.ID,
-		"schema_version": 1,
-		"status":         ticket.Status,
-		"type":           ticket.Type,
-		"priority":       ticket.Priority,
-		"created":        ticket.CreatedAt.UTC().Format(time.RFC3339),
+func walFrontmatterFromTicket(ticket *ticketFixture) store.TicketFrontmatter {
+	fm := store.TicketFrontmatter{
+		"id":             scalarString(ticket.ID),
+		"schema_version": scalarInt(1),
+		"status":         scalarString(ticket.Status),
+		"type":           scalarString(ticket.Type),
+		"priority":       scalarInt(int64(ticket.Priority)),
+		"created":        scalarString(ticket.CreatedAt.UTC().Format(time.RFC3339)),
 	}
 
 	if ticket.ClosedAt != nil {
-		fm["closed"] = ticket.ClosedAt.UTC().Format(time.RFC3339)
+		fm["closed"] = scalarString(ticket.ClosedAt.UTC().Format(time.RFC3339))
 	}
 
 	if len(ticket.BlockedBy) > 0 {
-		fm["blocked-by"] = ticket.BlockedBy
+		fm["blocked-by"] = store.Value{Kind: store.ValueList, List: append([]string(nil), ticket.BlockedBy...)}
 	}
 
 	if ticket.Assignee != "" {
-		fm["assignee"] = ticket.Assignee
+		fm["assignee"] = scalarString(ticket.Assignee)
 	}
 
 	if ticket.Parent != "" {
-		fm["parent"] = ticket.Parent
+		fm["parent"] = scalarString(ticket.Parent)
 	}
 
 	if ticket.ExternalRef != "" {
-		fm["external-ref"] = ticket.ExternalRef
+		fm["external-ref"] = scalarString(ticket.ExternalRef)
 	}
 
 	return fm
+}
+
+func frontmatterToAny(t *testing.T, fm store.TicketFrontmatter) map[string]any {
+	t.Helper()
+
+	out := make(map[string]any, len(fm))
+	for key, value := range fm {
+		switch value.Kind {
+		case store.ValueScalar:
+			switch value.Scalar.Kind {
+			case store.ScalarString:
+				out[key] = value.Scalar.String
+			case store.ScalarInt:
+				out[key] = value.Scalar.Int
+			case store.ScalarBool:
+				out[key] = value.Scalar.Bool
+			default:
+				t.Fatalf("unsupported scalar kind for %s: %v", key, value.Scalar.Kind)
+			}
+		case store.ValueList:
+			out[key] = append([]string(nil), value.List...)
+		case store.ValueObject:
+			obj := make(map[string]any, len(value.Object))
+			for objKey, scalar := range value.Object {
+				switch scalar.Kind {
+				case store.ScalarString:
+					obj[objKey] = scalar.String
+				case store.ScalarInt:
+					obj[objKey] = scalar.Int
+				case store.ScalarBool:
+					obj[objKey] = scalar.Bool
+				default:
+					t.Fatalf("unsupported object scalar kind for %s.%s: %v", key, objKey, scalar.Kind)
+				}
+			}
+
+			out[key] = obj
+		default:
+			t.Fatalf("unsupported value kind for %s: %v", key, value.Kind)
+		}
+	}
+
+	return out
+}
+
+func scalarString(value string) store.Value {
+	return store.Value{
+		Kind:   store.ValueScalar,
+		Scalar: store.Scalar{Kind: store.ScalarString, String: value},
+	}
+}
+
+func scalarInt(value int64) store.Value {
+	return store.Value{
+		Kind:   store.ValueScalar,
+		Scalar: store.Scalar{Kind: store.ScalarInt, Int: value},
+	}
 }

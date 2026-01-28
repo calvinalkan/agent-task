@@ -23,7 +23,7 @@ func Test_Open_Replays_WAL_When_Committed(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -90,7 +90,7 @@ func Test_Open_Replays_WAL_When_Committed(t *testing.T) {
 		t.Fatalf("ticket missing at %s: %v", absPath, err)
 	}
 
-	assertSummaryMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
+	assertTicketMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
 
 	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# WAL Ticket\nBody\n")
 
@@ -129,7 +129,7 @@ func Test_Open_Replays_WAL_Put_And_Delete_When_Committed(t *testing.T) {
 		Title:     "To Delete",
 	})
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -196,7 +196,7 @@ func Test_Open_Replays_WAL_Put_And_Delete_When_Committed(t *testing.T) {
 		t.Fatalf("stat put: %v", err)
 	}
 
-	assertSummaryMatchesFixture(t, &rows[0], putFixture, putPath, fileInfo.ModTime().UnixNano())
+	assertTicketMatchesFixture(t, &rows[0], putFixture, putPath, fileInfo.ModTime().UnixNano())
 
 	info, err := os.Stat(walPath)
 	if err != nil {
@@ -249,7 +249,7 @@ func Test_Open_Truncates_WAL_And_Rebuilds_When_Uncommitted(t *testing.T) {
 		Title:     "Original",
 	})
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -311,7 +311,7 @@ func Test_Open_Truncates_WAL_And_Rebuilds_When_Uncommitted(t *testing.T) {
 		t.Fatalf("rows = %+v, want 1", rows)
 	}
 
-	assertSummaryMatchesFixture(t, &rows[0], &ticketFixture{
+	assertTicketMatchesFixture(t, &rows[0], &ticketFixture{
 		ID:        id.String(),
 		Status:    "open",
 		Type:      "task",
@@ -349,7 +349,7 @@ func Test_Open_Returns_Error_When_WAL_Path_Invalid(t *testing.T) {
 				t.Fatalf("mkdir ticket dir: %v", err)
 			}
 
-			_, err = store.Rebuild(t.Context(), ticketDir)
+			_, err = store.Reindex(t.Context(), ticketDir)
 			if err != nil {
 				t.Fatalf("rebuild: %v", err)
 			}
@@ -406,7 +406,7 @@ func Test_Open_Returns_Error_When_WAL_Path_Mismatched(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -461,7 +461,7 @@ func Test_Open_Returns_Error_When_WAL_Is_Corrupt(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -610,7 +610,7 @@ func Test_Open_Replays_WAL_And_Rebuilds_When_Schema_Mismatch(t *testing.T) {
 		t.Fatalf("stat ticket: %v", err)
 	}
 
-	assertSummaryMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
+	assertTicketMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
 
 	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# Mismatch\nBody\n")
 
@@ -632,7 +632,7 @@ func Test_Open_Replays_WAL_Appends_Newline_When_Content_Lacks_Trailing(t *testin
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -689,7 +689,7 @@ func Test_Open_Replays_WAL_Appends_Newline_When_Content_Lacks_Trailing(t *testin
 		t.Fatalf("stat ticket: %v", err)
 	}
 
-	assertSummaryMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
+	assertTicketMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
 
 	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# No Newline\nBody")
 
@@ -711,7 +711,7 @@ func Test_Open_Replays_WAL_Delete_When_File_Missing(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -798,7 +798,7 @@ func Test_Open_Truncates_WAL_When_Footer_Invalid(t *testing.T) {
 		Title:     "Original",
 	})
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -882,7 +882,7 @@ func Test_Open_Truncates_WAL_When_Footer_Invalid(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
 
-	assertSummaryMatchesFixture(t, &rows[0], &ticketFixture{
+	assertTicketMatchesFixture(t, &rows[0], &ticketFixture{
 		ID:        id.String(),
 		Status:    "open",
 		Type:      "task",
@@ -904,7 +904,7 @@ func Test_Open_Returns_Error_When_WAL_JSON_Invalid(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -953,7 +953,7 @@ func Test_Open_Returns_Error_When_WAL_Ops_Are_Invalid(t *testing.T) {
 		Title:     "Bad WAL",
 	}
 
-	baseFrontmatter := walFrontmatterFromTicket(fixture)
+	baseFrontmatter := frontmatterToAny(t, walFrontmatterFromTicket(fixture))
 	content := "# Bad WAL\nBody\n"
 
 	cloneFrontmatter := func() map[string]any {
@@ -1083,7 +1083,7 @@ func Test_Open_Returns_Error_When_WAL_Ops_Are_Invalid(t *testing.T) {
 				t.Fatalf("mkdir ticket dir: %v", err)
 			}
 
-			_, err = store.Rebuild(t.Context(), ticketDir)
+			_, err = store.Reindex(t.Context(), ticketDir)
 			if err != nil {
 				t.Fatalf("rebuild: %v", err)
 			}
@@ -1129,25 +1129,23 @@ func Test_Open_Returns_Error_When_WAL_Index_Update_Fails(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Rebuild(t.Context(), ticketDir)
+	_, err = store.Reindex(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 
 	db := openIndex(t, ticketDir)
 
-	_, err = db.Exec("DROP TABLE tickets")
+	_, err = db.Exec(`
+		CREATE TRIGGER fail_insert
+		BEFORE INSERT ON tickets
+		BEGIN
+			SELECT RAISE(ABORT, 'fail insert');
+		END;`)
 	if err != nil {
 		_ = db.Close()
 
-		t.Fatalf("drop tickets: %v", err)
-	}
-
-	_, err = db.Exec("DROP TABLE ticket_blockers")
-	if err != nil {
-		_ = db.Close()
-
-		t.Fatalf("drop blockers: %v", err)
+		t.Fatalf("create trigger: %v", err)
 	}
 
 	err = db.Close()
@@ -1282,7 +1280,7 @@ func Test_Query_Replays_WAL_When_Committed(t *testing.T) {
 		t.Fatalf("stat ticket: %v", err)
 	}
 
-	assertSummaryMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
+	assertTicketMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
 
 	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# Query WAL\nBody\n")
 

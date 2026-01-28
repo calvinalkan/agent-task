@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// Summary is the SQLite-backed view returned by Query.
+// Ticket is the SQLite-backed view returned by Query.
 // It mirrors the derived index and never reads the filesystem.
-type Summary struct {
+type Ticket struct {
 	ID          string     // ID is the UUIDv7 stored in frontmatter.
 	ShortID     string     // ShortID is the 12-char Crockford base32 identifier.
 	Path        string     // Path is the canonical relative path to the ticket.
@@ -29,7 +29,8 @@ type Summary struct {
 }
 
 // QueryOptions defines optional SQLite filters for Query.
-// Zero values mean "no filter"; Priority uses 0 to mean "any".
+// Zero values mean "no filter" (Priority uses 0 to mean "any").
+// Results are ordered by ID, with Limit/Offset applied after filters.
 type QueryOptions struct {
 	Status        string // Status filters by exact status when non-empty.
 	Type          string // Type filters by exact ticket type when non-empty.
@@ -46,12 +47,12 @@ type QueryOptions struct {
 // Query acquires a shared WAL lock and replays any committed WAL entries before
 // returning results. It may return [ErrWALCorrupt], [ErrWALReplay], or
 // [ErrIndexUpdate] if recovery fails.
-func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Summary, error) {
+func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Ticket, error) {
 	if ctx == nil {
 		return nil, errors.New("query: context is nil")
 	}
 
-	if s == nil || s.sql == nil {
+	if s == nil || s.sql == nil || s.wal == nil {
 		return nil, errors.New("query: store is not open")
 	}
 
@@ -64,38 +65,77 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Summary, error
 		return nil, errors.New("query: limit/offset must be non-negative")
 	}
 
+	// Stage: take a shared lock so we never read SQLite while a commit is mid-flight.
 	readLock, err := s.locker.RLock(s.walPath)
 	if err != nil {
 		return nil, fmt.Errorf("query: lock wal: %w", err)
 	}
 
-	walHasEntries, err := walHasData(s.wal)
-	if err != nil {
-		_ = readLock.Close()
+	var walHasEntries bool
 
-		return nil, fmt.Errorf("query: %w", err)
-	}
+	// If the WAL has data, we need to recover under an exclusive lock. This loop:
+	//  1) checks the WAL under a shared lock,
+	//  2) releases the shared lock so we can upgrade to exclusive,
+	//  3) re-checks after the upgrade to avoid duplicate recoveries, and
+	//  4) reacquires the shared lock before querying to avoid mid-commit reads.
+	// We loop to handle the tiny window where another writer/recovery happens
+	// between releasing the exclusive lock and reacquiring the shared one.
+	for {
+		info, statErr := s.wal.Stat()
+		if statErr != nil {
+			_ = readLock.Close()
 
-	if walHasEntries {
-		_ = readLock.Close()
+			return nil, fmt.Errorf("query: wal stat: %w", statErr)
+		}
+
+		walHasEntries = info.Size() > 0
+
+		if !walHasEntries {
+			break
+		}
+
+		closeErr := readLock.Close()
+		if closeErr != nil {
+			return nil, fmt.Errorf("query: unlock wal: %w", closeErr)
+		}
+
 		readLock = nil
 
+		// Stage: upgrade to exclusive lock for recovery.
 		writeLock, lockErr := s.locker.Lock(s.walPath)
 		if lockErr != nil {
 			return nil, fmt.Errorf("query: lock wal: %w", lockErr)
 		}
 
-		recoverErr := s.recoverWal(ctx, false)
-
-		closeErr := writeLock.Close()
-		if closeErr != nil && recoverErr == nil {
-			recoverErr = fmt.Errorf("query: unlock wal: %w", closeErr)
-		}
-
+		recovery, recoverErr := s.recoverWalLocked(ctx)
 		if recoverErr != nil {
+			_ = writeLock.Close()
+
 			return nil, recoverErr
 		}
 
+		if recovery.state == walCommitted {
+			err = s.updateIndexFromOps(ctx, recovery.ops)
+			if err != nil {
+				_ = writeLock.Close()
+
+				return nil, err
+			}
+
+			err = truncateWal(s.wal)
+			if err != nil {
+				_ = writeLock.Close()
+
+				return nil, fmt.Errorf("query: truncate wal: %w", err)
+			}
+		}
+
+		closeErr = writeLock.Close()
+		if closeErr != nil {
+			return nil, fmt.Errorf("query: unlock wal: %w", closeErr)
+		}
+
+		// Stage: reacquire shared lock to guard against concurrent commits while querying.
 		readLock, err = s.locker.RLock(s.walPath)
 		if err != nil {
 			return nil, fmt.Errorf("query: lock wal: %w", err)
@@ -173,13 +213,13 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Summary, error
 
 	defer func() { _ = rows.Close() }()
 
-	summaries := make([]Summary, 0)
+	tickets := make([]Ticket, 0)
 	ids := make([]string, 0)
 	indexByID := make(map[string]int)
 
 	for rows.Next() {
 		var (
-			summary   Summary
+			ticket    Ticket
 			assignee  sql.NullString
 			parent    sql.NullString
 			external  sql.NullString
@@ -188,34 +228,34 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Summary, error
 		)
 
 		scanErr := rows.Scan(
-			&summary.ID,
-			&summary.ShortID,
-			&summary.Path,
-			&summary.MtimeNS,
-			&summary.Status,
-			&summary.Type,
-			&summary.Priority,
+			&ticket.ID,
+			&ticket.ShortID,
+			&ticket.Path,
+			&ticket.MtimeNS,
+			&ticket.Status,
+			&ticket.Type,
+			&ticket.Priority,
 			&assignee,
 			&parent,
 			&createdAt,
 			&closedAt,
 			&external,
-			&summary.Title,
+			&ticket.Title,
 		)
 		if scanErr != nil {
 			return nil, fmt.Errorf("query: scan: %w", scanErr)
 		}
 
-		summary.Assignee = nullStringValue(assignee)
-		summary.Parent = nullStringValue(parent)
-		summary.ExternalRef = nullStringValue(external)
-		summary.CreatedAt = time.Unix(createdAt, 0).UTC()
-		summary.ClosedAt = nullTimePtr(closedAt)
-		summary.BlockedBy = []string{}
+		ticket.Assignee = nullStringValue(assignee)
+		ticket.Parent = nullStringValue(parent)
+		ticket.ExternalRef = nullStringValue(external)
+		ticket.CreatedAt = time.Unix(createdAt, 0).UTC()
+		ticket.ClosedAt = nullTimePtr(closedAt)
+		ticket.BlockedBy = []string{}
 
-		indexByID[summary.ID] = len(summaries)
-		ids = append(ids, summary.ID)
-		summaries = append(summaries, summary)
+		indexByID[ticket.ID] = len(tickets)
+		ids = append(ids, ticket.ID)
+		tickets = append(tickets, ticket)
 	}
 
 	err = rows.Err()
@@ -224,7 +264,7 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Summary, error
 	}
 
 	if len(ids) == 0 {
-		return summaries, nil
+		return tickets, nil
 	}
 
 	blockers, err := queryBlockers(ctx, s.sql, ids)
@@ -238,10 +278,10 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Summary, error
 			continue
 		}
 
-		summaries[idx].BlockedBy = append(summaries[idx].BlockedBy, blocker.blockerID)
+		tickets[idx].BlockedBy = append(tickets[idx].BlockedBy, blocker.blockerID)
 	}
 
-	return summaries, nil
+	return tickets, nil
 }
 
 type blockerRow struct {
