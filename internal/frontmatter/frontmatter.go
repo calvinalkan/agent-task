@@ -1,4 +1,31 @@
-package store
+// Package frontmatter parses and serializes a restricted YAML subset for
+// markdown frontmatter blocks.
+//
+// The supported grammar is intentionally minimal to keep parsing deterministic
+// and avoid the complexity of full YAML. Only the following constructs are
+// allowed:
+//
+//	---
+//	id: ABC-123
+//	schema_version: 1
+//	enabled: true
+//	tags:
+//	  - bug
+//	  - urgent
+//	inline_list: [a, b, c]
+//	metadata:
+//	  author: alice
+//	  priority: 2
+//	---
+//
+// Scalar values may be unquoted strings, integers, or booleans (true/false).
+// Lists contain only strings. Objects (nested maps) contain only scalar values.
+// Quoted strings using single or double quotes are supported for values
+// containing special characters.
+//
+// Features explicitly not supported: multi-line strings, anchors, aliases,
+// tags, flow mappings, null values, floats, and nested lists/objects.
+package frontmatter
 
 import (
 	"bufio"
@@ -134,11 +161,55 @@ func (v *Value) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// TicketFrontmatter maps top-level keys to validated values.
-type TicketFrontmatter map[string]Value
+// Frontmatter maps top-level keys to validated values.
+type Frontmatter map[string]Value
+
+// GetString returns the string value for key.
+// Returns ("", false) if key is missing or not a string scalar.
+func (fm Frontmatter) GetString(key string) (string, bool) {
+	v, ok := fm[key]
+	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarString {
+		return "", false
+	}
+
+	return v.Scalar.String, true
+}
+
+// GetInt returns the int64 value for key.
+// Returns (0, false) if key is missing or not an int scalar.
+func (fm Frontmatter) GetInt(key string) (int64, bool) {
+	v, ok := fm[key]
+	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarInt {
+		return 0, false
+	}
+
+	return v.Scalar.Int, true
+}
+
+// GetBool returns the bool value for key.
+// Returns (false, false) if key is missing or not a bool scalar.
+func (fm Frontmatter) GetBool(key string) (bool, bool) {
+	v, ok := fm[key]
+	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarBool {
+		return false, false
+	}
+
+	return v.Scalar.Bool, true
+}
+
+// GetList returns the string slice for key.
+// Returns (nil, false) if key is missing or not a list.
+func (fm Frontmatter) GetList(key string) ([]string, bool) {
+	v, ok := fm[key]
+	if !ok || v.Kind != ValueList {
+		return nil, false
+	}
+
+	return v.List, true
+}
 
 // MarshalJSON renders the frontmatter map as a JSON object.
-func (fm TicketFrontmatter) MarshalJSON() ([]byte, error) {
+func (fm Frontmatter) MarshalJSON() ([]byte, error) {
 	obj := make(map[string]any, len(fm))
 	for key, value := range fm {
 		switch value.Kind {
@@ -186,7 +257,8 @@ func (fm TicketFrontmatter) MarshalJSON() ([]byte, error) {
 
 // MarshalOptions configures frontmatter serialization.
 type MarshalOptions struct {
-	IncludeDelimiters bool // IncludeDelimiters writes --- fence lines before and after.
+	IncludeDelimiters bool     // IncludeDelimiters writes --- fence lines before and after.
+	KeyOrder          []string // KeyOrder specifies the output key order; keys not listed are omitted.
 }
 
 // MarshalOption mutates MarshalOptions.
@@ -200,10 +272,20 @@ func WithYAMLDelimiters(include bool) MarshalOption {
 	}
 }
 
+// WithKeyOrder specifies the exact key order for YAML output.
+// Keys not in this list are omitted from output.
+// If nil (default), keys are sorted alphabetically with id and schema_version first.
+func WithKeyOrder(keys []string) MarshalOption {
+	return func(opts *MarshalOptions) {
+		opts.KeyOrder = keys
+	}
+}
+
 // MarshalYAML serializes frontmatter in a deterministic YAML subset.
-// It sorts keys alphabetically, always writes "id" then "schema_version" first,
-// and returns an error if either is missing.
-func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
+// By default, it sorts keys alphabetically with "id" and "schema_version" first.
+// Use WithKeyOrder to specify a custom key order.
+// Returns an error if id or schema_version is missing.
+func (fm Frontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 	options := MarshalOptions{IncludeDelimiters: true}
 
 	for _, opt := range opts {
@@ -226,22 +308,27 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 		return "", errors.New("missing schema_version")
 	}
 
-	keys := make([]string, 0, len(fm))
-	for key := range fm {
-		keys = append(keys, key)
-	}
-
-	slices.Sort(keys)
-
-	ordered := make([]string, 0, len(keys))
-	ordered = append(ordered, "id", "schema_version")
-
-	for _, key := range keys {
-		if key == "id" || key == "schema_version" {
-			continue
+	var ordered []string
+	if options.KeyOrder != nil {
+		ordered = options.KeyOrder
+	} else {
+		keys := make([]string, 0, len(fm))
+		for key := range fm {
+			keys = append(keys, key)
 		}
 
-		ordered = append(ordered, key)
+		slices.Sort(keys)
+
+		ordered = make([]string, 0, len(keys))
+		ordered = append(ordered, "id", "schema_version")
+
+		for _, key := range keys {
+			if key == "id" || key == "schema_version" {
+				continue
+			}
+
+			ordered = append(ordered, key)
+		}
 	}
 
 	var builder strings.Builder
@@ -256,10 +343,12 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 		}
 
 		builder.WriteString(key)
-		builder.WriteString(": ")
+		builder.WriteString(":")
 
 		switch value.Kind {
 		case ValueScalar:
+			builder.WriteString(" ")
+
 			switch value.Scalar.Kind {
 			case ScalarString:
 				builder.WriteString(value.Scalar.String)
@@ -278,7 +367,7 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 			builder.WriteString("\n")
 		case ValueList:
 			if len(value.List) == 0 {
-				builder.WriteString("[]\n")
+				builder.WriteString(" []\n")
 
 				break
 			}
@@ -415,7 +504,7 @@ func WithTrimLeadingBlankTail(trim bool) ParseOption {
 //	}
 //	_ = fm["status"]
 //	_ = tail // "# Title\nBody\n"
-func ParseFrontmatter(src []byte, opts ...ParseOption) (TicketFrontmatter, []byte, error) {
+func ParseFrontmatter(src []byte, opts ...ParseOption) (Frontmatter, []byte, error) {
 	options := applyParseOptions(opts)
 
 	source := sliceLineSource(src)
@@ -472,7 +561,7 @@ func ParseFrontmatter(src []byte, opts ...ParseOption) (TicketFrontmatter, []byt
 //	body, _ := io.ReadAll(tail)
 //	_ = fm["status"]
 //	_ = body
-func ParseFrontmatterReader(r io.Reader, opts ...ParseOption) (TicketFrontmatter, io.Reader, error) {
+func ParseFrontmatterReader(r io.Reader, opts ...ParseOption) (Frontmatter, io.Reader, error) {
 	options := applyParseOptions(opts)
 
 	var br *bufio.Reader
@@ -540,8 +629,8 @@ func newFrontmatterParser(source lineSource, stopAtDelimiter bool, lineLimit int
 	return &frontmatterParser{source: source, stopAtDelimiter: stopAtDelimiter, lineLimit: lineLimit}
 }
 
-func (p *frontmatterParser) parse() (TicketFrontmatter, bool, error) {
-	out := make(TicketFrontmatter)
+func (p *frontmatterParser) parse() (Frontmatter, bool, error) {
+	out := make(Frontmatter)
 
 	for {
 		tok, ok, err := p.source.next()

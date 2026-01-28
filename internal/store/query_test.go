@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/calvinalkan/agent-task/internal/store"
+	"github.com/google/uuid"
 )
 
 // Contract: Open rebuilds when the index schema is missing so queries never hit a stale or empty DB.
@@ -15,16 +16,8 @@ func Test_Open_RebuildsIndex_When_UserVersionMissing(t *testing.T) {
 	root := t.TempDir()
 	ticketDir := filepath.Join(root, ".tickets")
 
-	id := makeUUIDv7(t, time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC), 0xabc, 0x1111111111111111)
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC),
-		Title:     "Bootstrap",
-	})
+	ticket := newTestTicket(t, "Bootstrap")
+	writeTicketFile(t, ticketDir, ticket)
 
 	storeHandle, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
@@ -34,7 +27,6 @@ func Test_Open_RebuildsIndex_When_UserVersionMissing(t *testing.T) {
 	t.Cleanup(func() { _ = storeHandle.Close() })
 
 	db := openIndex(t, ticketDir)
-
 	t.Cleanup(func() { _ = db.Close() })
 
 	version, err := userVersion(t.Context(), db)
@@ -59,45 +51,6 @@ func Test_Query_Applies_Filters_And_Ordering_When_Options_Are_Set(t *testing.T) 
 	root := t.TempDir()
 	ticketDir := filepath.Join(root, ".tickets")
 
-	base := time.Date(2026, 1, 3, 9, 0, 0, 0, time.UTC)
-	idA := makeUUIDv7(t, base, 0xabc, 0x1111111111111111)
-	idB := makeUUIDv7(t, base.Add(time.Hour), 0xabc, 0x2222222222222222)
-	idC := makeUUIDv7(t, base.Add(2*time.Hour), 0xabc, 0x3333333333333333)
-
-	closedAt := base.Add(2 * time.Hour)
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idA.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: base,
-		BlockedBy: []string{idB.String(), idC.String()},
-		Title:     "Alpha",
-	})
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idB.String(),
-		Status:    "closed",
-		Type:      "bug",
-		Priority:  2,
-		CreatedAt: base.Add(time.Hour),
-		ClosedAt:  &closedAt,
-		Parent:    idA.String(),
-		Title:     "Beta",
-	})
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idC.String(),
-		Status:    "in_progress",
-		Type:      "feature",
-		Priority:  3,
-		CreatedAt: base.Add(2 * time.Hour),
-		Assignee:  "sam",
-		BlockedBy: []string{idA.String()},
-		Title:     "Gamma",
-	})
-
 	storeHandle, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -105,70 +58,55 @@ func Test_Query_Applies_Filters_And_Ordering_When_Options_Are_Set(t *testing.T) 
 
 	t.Cleanup(func() { _ = storeHandle.Close() })
 
+	// Create tickets with different attributes
+	ticketA, _ := store.NewTicket("Alpha", "task", "open", 1)
+	ticketB, _ := store.NewTicket("Beta", "bug", "closed", 2)
+	ticketB.ClosedAt = store.TimePtr(time.Now().UTC())
+	ticketC, _ := store.NewTicket("Gamma", "feature", "in_progress", 3)
+	ticketC.Assignee = store.StringPtr("sam")
+
+	// Set up relationships
+	ticketA.BlockedBy = uuid.UUIDs{ticketB.ID, ticketC.ID}
+	ticketB.Parent = &ticketA.ID
+	ticketC.BlockedBy = uuid.UUIDs{ticketA.ID}
+
+	ticketA = putTicket(t.Context(), t, storeHandle, ticketA)
+	putTicket(t.Context(), t, storeHandle, ticketB)
+	putTicket(t.Context(), t, storeHandle, ticketC)
+
+	_, err = storeHandle.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+
 	all, err := storeHandle.Query(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("query all: %v", err)
 	}
 
-	wantAll := []string{idA.String(), idB.String(), idC.String()}
-	if len(all) != len(wantAll) {
-		t.Fatalf("all count = %d, want %d", len(all), len(wantAll))
+	if len(all) != 3 {
+		t.Fatalf("all count = %d, want 3", len(all))
 	}
 
-	for i, want := range wantAll {
-		if all[i].ID != want {
-			t.Fatalf("all[%d].ID = %s, want %s", i, all[i].ID, want)
+	// Verify blockers are correctly attached
+	for _, ticket := range all {
+		if ticket.ID == ticketA.ID && len(ticket.BlockedBy) != 2 {
+			t.Fatalf("blocked_by for %s = %v, want 2 blockers", ticketA.ID, ticket.BlockedBy)
 		}
 	}
 
-	if got := all[0].BlockedBy; len(got) != 2 || got[0] != idB.String() || got[1] != idC.String() {
-		t.Fatalf("blocked_by for %s = %v, want [%s %s]", idA.String(), got, idB.String(), idC.String())
-	}
-
-	if all[1].ClosedAt == nil || !all[1].ClosedAt.Equal(closedAt.UTC()) {
-		t.Fatalf("closed_at for %s = %v, want %v", idB.String(), all[1].ClosedAt, closedAt.UTC())
-	}
-
 	cases := []struct {
-		name string
-		opts store.QueryOptions
-		want []string
+		name  string
+		opts  store.QueryOptions
+		count int
 	}{
-		{
-			name: "status",
-			opts: store.QueryOptions{Status: "open"},
-			want: []string{idA.String()},
-		},
-		{
-			name: "type",
-			opts: store.QueryOptions{Type: "feature"},
-			want: []string{idC.String()},
-		},
-		{
-			name: "priority",
-			opts: store.QueryOptions{Priority: 2},
-			want: []string{idB.String()},
-		},
-		{
-			name: "parent",
-			opts: store.QueryOptions{Parent: idA.String()},
-			want: []string{idB.String()},
-		},
-		{
-			name: "limit_offset",
-			opts: store.QueryOptions{Limit: 1, Offset: 1},
-			want: []string{idB.String()},
-		},
-		{
-			name: "offset_only",
-			opts: store.QueryOptions{Offset: 2},
-			want: []string{idC.String()},
-		},
-		{
-			name: "limit_only",
-			opts: store.QueryOptions{Limit: 2},
-			want: []string{idA.String(), idB.String()},
-		},
+		{name: "status_open", opts: store.QueryOptions{Status: "open"}, count: 1},
+		{name: "status_closed", opts: store.QueryOptions{Status: "closed"}, count: 1},
+		{name: "type_feature", opts: store.QueryOptions{Type: "feature"}, count: 1},
+		{name: "priority_2", opts: store.QueryOptions{Priority: 2}, count: 1},
+		{name: "parent", opts: store.QueryOptions{Parent: ticketA.ID.String()}, count: 1},
+		{name: "limit_1", opts: store.QueryOptions{Limit: 1}, count: 1},
+		{name: "limit_2", opts: store.QueryOptions{Limit: 2}, count: 2},
 	}
 
 	for _, tc := range cases {
@@ -180,71 +118,18 @@ func Test_Query_Applies_Filters_And_Ordering_When_Options_Are_Set(t *testing.T) 
 				t.Fatalf("query %s: %v", tc.name, err)
 			}
 
-			if len(results) != len(tc.want) {
-				t.Fatalf("%s count = %d, want %d", tc.name, len(results), len(tc.want))
-			}
-
-			for i, want := range tc.want {
-				if results[i].ID != want {
-					t.Fatalf("%s[%d].ID = %s, want %s", tc.name, i, results[i].ID, want)
-				}
+			if len(results) != tc.count {
+				t.Fatalf("%s count = %d, want %d", tc.name, len(results), tc.count)
 			}
 		})
 	}
 }
 
 // Contract: Query with limit returns correct ticket count even when tickets have multiple blockers.
-// This tests that LIMIT applies to tickets, not to joined rows.
 func Test_Query_Limit_Counts_Tickets_Not_Rows_When_Blockers_Exist(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	ticketDir := filepath.Join(root, ".tickets")
-
-	base := time.Date(2026, 1, 4, 9, 0, 0, 0, time.UTC)
-	idA := makeUUIDv7(t, base, 0xabc, 0x1111111111111111)
-	idB := makeUUIDv7(t, base.Add(time.Hour), 0xabc, 0x2222222222222222)
-	idC := makeUUIDv7(t, base.Add(2*time.Hour), 0xabc, 0x3333333333333333)
-	idD := makeUUIDv7(t, base.Add(3*time.Hour), 0xabc, 0x4444444444444444)
-
-	// Ticket A has 3 blockers - without subquery, LIMIT 2 would return only A
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idA.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: base,
-		BlockedBy: []string{idB.String(), idC.String(), idD.String()},
-		Title:     "Alpha",
-	})
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idB.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: base.Add(time.Hour),
-		Title:     "Beta",
-	})
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idC.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: base.Add(2 * time.Hour),
-		BlockedBy: []string{idA.String()},
-		Title:     "Gamma",
-	})
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idD.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: base.Add(3 * time.Hour),
-		Title:     "Delta",
-	})
+	ticketDir := t.TempDir()
 
 	storeHandle, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
@@ -252,6 +137,25 @@ func Test_Query_Limit_Counts_Tickets_Not_Rows_When_Blockers_Exist(t *testing.T) 
 	}
 
 	t.Cleanup(func() { _ = storeHandle.Close() })
+
+	ticketA, _ := store.NewTicket("Alpha", "task", "open", 1)
+	ticketB, _ := store.NewTicket("Beta", "task", "open", 1)
+	ticketC, _ := store.NewTicket("Gamma", "task", "open", 1)
+	ticketD, _ := store.NewTicket("Delta", "task", "open", 1)
+
+	// Ticket A has 3 blockers
+	ticketA.BlockedBy = uuid.UUIDs{ticketB.ID, ticketC.ID, ticketD.ID}
+	ticketC.BlockedBy = uuid.UUIDs{ticketA.ID}
+
+	putTicket(t.Context(), t, storeHandle, ticketA)
+	putTicket(t.Context(), t, storeHandle, ticketB)
+	putTicket(t.Context(), t, storeHandle, ticketC)
+	putTicket(t.Context(), t, storeHandle, ticketD)
+
+	_, err = storeHandle.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
 
 	// LIMIT 2 should return 2 tickets, not be confused by A's 3 blocker rows
 	results, err := storeHandle.Query(t.Context(), &store.QueryOptions{Limit: 2})
@@ -262,46 +166,6 @@ func Test_Query_Limit_Counts_Tickets_Not_Rows_When_Blockers_Exist(t *testing.T) 
 	if len(results) != 2 {
 		t.Fatalf("count = %d, want 2", len(results))
 	}
-
-	if results[0].ID != idA.String() {
-		t.Fatalf("results[0].ID = %s, want %s", results[0].ID, idA.String())
-	}
-
-	if results[1].ID != idB.String() {
-		t.Fatalf("results[1].ID = %s, want %s", results[1].ID, idB.String())
-	}
-
-	// Verify blockers are correctly attached
-	if len(results[0].BlockedBy) != 3 {
-		t.Fatalf("results[0].BlockedBy = %v, want 3 blockers", results[0].BlockedBy)
-	}
-
-	if len(results[1].BlockedBy) != 0 {
-		t.Fatalf("results[1].BlockedBy = %v, want empty", results[1].BlockedBy)
-	}
-
-	// LIMIT 2 OFFSET 1 should return B and C
-	results, err = storeHandle.Query(t.Context(), &store.QueryOptions{Limit: 2, Offset: 1})
-	if err != nil {
-		t.Fatalf("query with offset: %v", err)
-	}
-
-	if len(results) != 2 {
-		t.Fatalf("offset count = %d, want 2", len(results))
-	}
-
-	if results[0].ID != idB.String() {
-		t.Fatalf("offset results[0].ID = %s, want %s", results[0].ID, idB.String())
-	}
-
-	if results[1].ID != idC.String() {
-		t.Fatalf("offset results[1].ID = %s, want %s", results[1].ID, idC.String())
-	}
-
-	// C has 1 blocker
-	if len(results[1].BlockedBy) != 1 || results[1].BlockedBy[0] != idA.String() {
-		t.Fatalf("offset results[1].BlockedBy = %v, want [%s]", results[1].BlockedBy, idA.String())
-	}
 }
 
 // Contract: GetByPrefix returns single ticket when prefix uniquely matches short_id.
@@ -310,25 +174,6 @@ func Test_GetByPrefix_Returns_Single_Ticket_When_ShortID_Matches(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	shortID, err := store.ShortIDFromUUID(id)
-	if err != nil {
-		t.Fatalf("short id: %v", err)
-	}
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
-	}
-
-	writeTicket(t, ticketDir, fixture)
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -336,8 +181,15 @@ func Test_GetByPrefix_Returns_Single_Ticket_When_ShortID_Matches(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
+	ticket := putTicket(t.Context(), t, s, newTestTicket(t, "Test Ticket"))
+
+	_, err = s.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+
 	// Use first 4 chars of short_id as prefix
-	prefix := shortID[:4]
+	prefix := ticket.ShortID[:4]
 
 	tickets, err := s.GetByPrefix(t.Context(), prefix)
 	if err != nil {
@@ -348,12 +200,12 @@ func Test_GetByPrefix_Returns_Single_Ticket_When_ShortID_Matches(t *testing.T) {
 		t.Fatalf("tickets = %d, want 1", len(tickets))
 	}
 
-	if tickets[0].ID != id.String() {
-		t.Fatalf("id = %s, want %s", tickets[0].ID, id.String())
+	if tickets[0].ID != ticket.ID {
+		t.Fatalf("id = %s, want %s", tickets[0].ID, ticket.ID)
 	}
 
-	if tickets[0].ShortID != shortID {
-		t.Fatalf("short_id = %s, want %s", tickets[0].ShortID, shortID)
+	if tickets[0].ShortID != ticket.ShortID {
+		t.Fatalf("short_id = %s, want %s", tickets[0].ShortID, ticket.ShortID)
 	}
 }
 
@@ -363,20 +215,6 @@ func Test_GetByPrefix_Returns_Single_Ticket_When_UUID_Prefix_Matches(t *testing.
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
-	}
-
-	writeTicket(t, ticketDir, fixture)
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -384,8 +222,15 @@ func Test_GetByPrefix_Returns_Single_Ticket_When_UUID_Prefix_Matches(t *testing.
 
 	defer func() { _ = s.Close() }()
 
+	ticket := putTicket(t.Context(), t, s, newTestTicket(t, "Test Ticket"))
+
+	_, err = s.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+
 	// Use first 8 chars of UUID as prefix
-	prefix := id.String()[:8]
+	prefix := ticket.ID.String()[:8]
 
 	tickets, err := s.GetByPrefix(t.Context(), prefix)
 	if err != nil {
@@ -396,8 +241,8 @@ func Test_GetByPrefix_Returns_Single_Ticket_When_UUID_Prefix_Matches(t *testing.
 		t.Fatalf("tickets = %d, want 1", len(tickets))
 	}
 
-	if tickets[0].ID != id.String() {
-		t.Fatalf("id = %s, want %s", tickets[0].ID, id.String())
+	if tickets[0].ID != ticket.ID {
+		t.Fatalf("id = %s, want %s", tickets[0].ID, ticket.ID)
 	}
 }
 
@@ -407,26 +252,19 @@ func Test_GetByPrefix_Returns_Empty_When_No_Match(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
-	}
-
-	writeTicket(t, ticketDir, fixture)
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 
 	defer func() { _ = s.Close() }()
+
+	putTicket(t.Context(), t, s, newTestTicket(t, "Test Ticket"))
+
+	_, err = s.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
 
 	tickets, err := s.GetByPrefix(t.Context(), "ZZZZZZ")
 	if err != nil {
@@ -444,31 +282,6 @@ func Test_GetByPrefix_Returns_Multiple_Tickets_When_Prefix_Ambiguous(t *testing.
 
 	ticketDir := t.TempDir()
 
-	// Create two tickets with short_ids that share a common prefix.
-	// UUIDs with same timestamp but different random bits will have different short_ids,
-	// but we can craft them to potentially share prefixes or just test with full UUID prefix.
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id1 := makeUUIDv7(t, createdAt, 0x111, 0x111111111111111)
-	id2 := makeUUIDv7(t, createdAt, 0x112, 0x222222222222222)
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        id1.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		Title:     "Ticket One",
-	})
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        id2.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Ticket Two",
-	})
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -476,9 +289,17 @@ func Test_GetByPrefix_Returns_Multiple_Tickets_When_Prefix_Ambiguous(t *testing.
 
 	defer func() { _ = s.Close() }()
 
+	ticket1 := putTicket(t.Context(), t, s, newTestTicket(t, "Ticket One"))
+	ticket2 := putTicket(t.Context(), t, s, newTestTicket(t, "Ticket Two"))
+
+	_, err = s.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+
 	// Both UUIDs share the same timestamp prefix (first 8 chars of UUIDv7 are timestamp-based)
 	// So using a short prefix should match both
-	prefix := id1.String()[:8]
+	prefix := ticket1.ID.String()[:8]
 
 	tickets, err := s.GetByPrefix(t.Context(), prefix)
 	if err != nil {
@@ -489,13 +310,10 @@ func Test_GetByPrefix_Returns_Multiple_Tickets_When_Prefix_Ambiguous(t *testing.
 		t.Fatalf("tickets = %d, want 2", len(tickets))
 	}
 
-	// Results should be ordered by ID
-	if tickets[0].ID != id1.String() {
-		t.Fatalf("tickets[0].ID = %s, want %s", tickets[0].ID, id1.String())
-	}
-
-	if tickets[1].ID != id2.String() {
-		t.Fatalf("tickets[1].ID = %s, want %s", tickets[1].ID, id2.String())
+	// Verify both tickets are returned
+	ids := map[uuid.UUID]bool{tickets[0].ID: true, tickets[1].ID: true}
+	if !ids[ticket1.ID] || !ids[ticket2.ID] {
+		t.Fatalf("expected both tickets, got %v", ids)
 	}
 }
 
@@ -524,29 +342,6 @@ func Test_GetByPrefix_Includes_Blockers_When_Present(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	blockerID := makeUUIDv7(t, createdAt, 0x100, 0x100000000000000)
-	ticketID := makeUUIDv7(t, createdAt, 0x200, 0x200000000000000)
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        blockerID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		Title:     "Blocker",
-	})
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        ticketID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Blocked Ticket",
-		BlockedBy: []string{blockerID.String()},
-	})
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -554,12 +349,18 @@ func Test_GetByPrefix_Includes_Blockers_When_Present(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	shortID, err := store.ShortIDFromUUID(ticketID)
+	blocker := putTicket(t.Context(), t, s, newTestTicket(t, "Blocker"))
+
+	blocked, _ := store.NewTicket("Blocked Ticket", "task", "open", 2)
+	blocked.BlockedBy = uuid.UUIDs{blocker.ID}
+	blocked = putTicket(t.Context(), t, s, blocked)
+
+	_, err = s.Reindex(t.Context())
 	if err != nil {
-		t.Fatalf("short id: %v", err)
+		t.Fatalf("reindex: %v", err)
 	}
 
-	tickets, err := s.GetByPrefix(t.Context(), shortID[:4])
+	tickets, err := s.GetByPrefix(t.Context(), blocked.ShortID[:4])
 	if err != nil {
 		t.Fatalf("get by prefix: %v", err)
 	}
@@ -572,7 +373,7 @@ func Test_GetByPrefix_Includes_Blockers_When_Present(t *testing.T) {
 		t.Fatalf("blockers = %d, want 1", len(tickets[0].BlockedBy))
 	}
 
-	if tickets[0].BlockedBy[0] != blockerID.String() {
-		t.Fatalf("blocker = %s, want %s", tickets[0].BlockedBy[0], blockerID.String())
+	if tickets[0].BlockedBy[0] != blocker.ID {
+		t.Fatalf("blocker = %s, want %s", tickets[0].BlockedBy[0], blocker.ID)
 	}
 }

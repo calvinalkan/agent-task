@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/calvinalkan/fileproc"
-	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3" // sqlite3 driver
 
 	"github.com/calvinalkan/agent-task/pkg/fs"
@@ -180,56 +178,6 @@ func (s *Store) Close() error {
 	return errors.Join(errs...)
 }
 
-// Get reads a ticket directly from the filesystem for fresh data.
-// It bypasses SQLite and always returns the current file contents.
-//
-// Get is strict: it only reads from the canonical path derived from the ID.
-// It returns an error if the file does not exist or contains a different ID.
-//
-// Get acquires a shared WAL lock and replays any committed WAL entries before
-// reading. It may return [ErrWALCorrupt] or [ErrWALReplay] if recovery fails.
-func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
-	if ctx == nil {
-		return nil, errors.New("get: context is nil")
-	}
-
-	if s == nil || s.sql == nil || s.wal == nil {
-		return nil, errors.New("get: store is not open")
-	}
-
-	if id == "" {
-		return nil, errors.New("get: id is empty")
-	}
-
-	parsed, err := uuid.Parse(id)
-	if err != nil {
-		return nil, fmt.Errorf("get: %w", err)
-	}
-
-	// PathFromID validates UUIDv7 and derives the canonical path.
-	relPath, err := PathFromID(parsed)
-	if err != nil {
-		return nil, fmt.Errorf("get: %w", err)
-	}
-
-	lockCtx, cancel := context.WithTimeout(ctx, s.lockTimeout)
-	defer cancel()
-
-	readLock, err := s.acquireReadLock(ctx, lockCtx)
-	if err != nil {
-		return nil, fmt.Errorf("get: %w", err)
-	}
-
-	defer func() { _ = readLock.Close() }()
-
-	ticket, err := s.readTicketFile(id, relPath)
-	if err != nil {
-		return nil, err
-	}
-
-	return ticket, nil
-}
-
 // walSize returns the current WAL file size without acquiring a lock.
 // It reads directly from the file descriptor.
 func (s *Store) walSize() (int64, error) {
@@ -289,48 +237,4 @@ func (s *Store) acquireReadLock(ctx, lockCtx context.Context) (*fs.Lock, error) 
 			return nil, fmt.Errorf("lock wal: %w", err)
 		}
 	}
-}
-
-// readTicketFile reads and parses a ticket from its canonical path.
-func (s *Store) readTicketFile(expectedID, relPath string) (*Ticket, error) {
-	absPath := filepath.Join(s.dir, relPath)
-
-	file, err := s.fs.Open(absPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("get %s: not found", expectedID)
-		}
-
-		return nil, fmt.Errorf("get: open %s: %w", relPath, err)
-	}
-
-	defer func() { _ = file.Close() }()
-
-	info, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("get: stat %s: %w", relPath, err)
-	}
-
-	// Reject non-regular files (symlinks, devices, etc.) per spec.
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("get %s: not found", expectedID)
-	}
-
-	fm, tail, err := ParseFrontmatterReader(file, WithLineLimit(rebuildFrontmatterLineLimit))
-	if err != nil {
-		return nil, fmt.Errorf("get: parse %s: %w", relPath, err)
-	}
-
-	stat := fileproc.Stat{
-		Size:    info.Size(),
-		ModTime: info.ModTime().UnixNano(),
-		Mode:    uint32(info.Mode()),
-	}
-
-	ticket, _, err := ticketFromFrontmatter(relPath, absPath, s.dir, stat, fm, tail)
-	if err != nil {
-		return nil, fmt.Errorf("get: %w", err)
-	}
-
-	return &ticket, nil
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/calvinalkan/agent-task/internal/store"
+	"github.com/google/uuid"
 )
 
 // TestTx_Put_And_Commit_Creates_Ticket verifies the core create flow:
@@ -29,30 +30,16 @@ func Test_Tx_Creates_Ticket_When_Put_And_Commit(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
+	ticket := newTestTicket(t, "Test Ticket")
 
-	ticket, err := tx.Put(t.Context(), &store.Ticket{
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
-	})
+	result, err := tx.Put(ticket)
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
-	// ID and ShortID should be generated.
-	if ticket.ID == "" {
-		t.Fatal("expected generated ID")
-	}
-
-	if ticket.ShortID == "" {
-		t.Fatal("expected generated ShortID")
-	}
-
-	if ticket.Path == "" {
-		t.Fatal("expected generated Path")
+	// Verify IDs match
+	if result.ID != ticket.ID {
+		t.Fatalf("id mismatch: got %s, want %s", result.ID, ticket.ID)
 	}
 
 	err = tx.Commit(t.Context())
@@ -74,7 +61,7 @@ func Test_Tx_Creates_Ticket_When_Put_And_Commit(t *testing.T) {
 
 	// Verify file content contains expected frontmatter.
 	content := readFileString(t, absPath)
-	if !strings.Contains(content, "id: "+ticket.ID) {
+	if !strings.Contains(content, "id: "+ticket.ID.String()) {
 		t.Fatalf("file missing id, content:\n%s", content)
 	}
 
@@ -82,7 +69,7 @@ func Test_Tx_Creates_Ticket_When_Put_And_Commit(t *testing.T) {
 		t.Fatalf("file missing status, content:\n%s", content)
 	}
 
-	if !strings.Contains(content, "# Test Ticket") {
+	if !strings.Contains(content, "title: Test Ticket") {
 		t.Fatalf("file missing title, content:\n%s", content)
 	}
 
@@ -124,8 +111,6 @@ func Test_Tx_Updates_Ticket_When_Put_With_Existing_ID(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -133,45 +118,21 @@ func Test_Tx_Updates_Ticket_When_Put_With_Existing_ID(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	// Create initial ticket.
-	tx1, err := s.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
+	// Create initial ticket
+	ticket := newTestTicket(t, "Original Title")
+	ticket = putTicket(t.Context(), t, s, ticket)
 
-	ticket, err := tx1.Put(t.Context(), &store.Ticket{
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Original Title",
-	})
-	if err != nil {
-		t.Fatalf("put: %v", err)
-	}
-
-	err = tx1.Commit(t.Context())
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	// Update ticket with new title and priority.
+	// Update ticket with new title and status
 	tx2, err := s.Begin(t.Context())
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 
-	closedAt := time.Date(2026, 1, 28, 16, 0, 0, 0, time.UTC)
+	ticket.Title = "Updated Title"
+	ticket.Status = "closed"
+	ticket.ClosedAt = store.TimePtr(time.Now().UTC())
 
-	_, err = tx2.Put(t.Context(), &store.Ticket{
-		ID:        ticket.ID, // same ID
-		Status:    "closed",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		ClosedAt:  &closedAt,
-		Title:     "Updated Title",
-	})
+	_, err = tx2.Put(ticket)
 	if err != nil {
 		t.Fatalf("put update: %v", err)
 	}
@@ -189,7 +150,7 @@ func Test_Tx_Updates_Ticket_When_Put_With_Existing_ID(t *testing.T) {
 		t.Fatalf("file not updated, content:\n%s", content)
 	}
 
-	if !strings.Contains(content, "# Updated Title") {
+	if !strings.Contains(content, "title: Updated Title") {
 		t.Fatalf("title not updated, content:\n%s", content)
 	}
 
@@ -219,8 +180,6 @@ func Test_Tx_Removes_Ticket_When_Delete_And_Commit(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -229,26 +188,7 @@ func Test_Tx_Removes_Ticket_When_Delete_And_Commit(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	// Create ticket.
-	tx1, err := s.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-
-	ticket, err := tx1.Put(t.Context(), &store.Ticket{
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "To Be Deleted",
-	})
-	if err != nil {
-		t.Fatalf("put: %v", err)
-	}
-
-	err = tx1.Commit(t.Context())
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
+	ticket := putTicket(t.Context(), t, s, newTestTicket(t, "To Be Deleted"))
 
 	absPath := filepath.Join(ticketDir, ticket.Path)
 
@@ -264,7 +204,7 @@ func Test_Tx_Removes_Ticket_When_Delete_And_Commit(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	err = tx2.Delete(t.Context(), ticket.ID)
+	err = tx2.Delete(ticket.ID)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -310,15 +250,7 @@ func Test_Tx_Discards_Changes_When_Rollback(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-
-	ticket, err := tx.Put(t.Context(), &store.Ticket{
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Should Not Exist",
-	})
+	ticket, err := tx.Put(newTestTicket(t, "Should Not Exist"))
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -426,20 +358,12 @@ func Test_Tx_Returns_Error_When_Operations_After_Commit(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-
-	_, err = tx.Put(t.Context(), &store.Ticket{
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "After Commit",
-	})
+	_, err = tx.Put(newTestTicket(t, "After Commit"))
 	if err == nil || !strings.Contains(err.Error(), "transaction closed") {
 		t.Fatalf("put after commit: got %v, want 'transaction closed'", err)
 	}
 
-	err = tx.Delete(t.Context(), "01234567-89ab-7def-8123-456789abcdef")
+	err = tx.Delete(uuid.MustParse("01234567-89ab-7def-8123-456789abcdef"))
 	if err == nil || !strings.Contains(err.Error(), "transaction closed") {
 		t.Fatalf("delete after commit: got %v, want 'transaction closed'", err)
 	}
@@ -474,20 +398,12 @@ func Test_Tx_Returns_Error_When_Operations_After_Rollback(t *testing.T) {
 		t.Fatalf("rollback: %v", err)
 	}
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-
-	_, err = tx.Put(t.Context(), &store.Ticket{
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "After Rollback",
-	})
+	_, err = tx.Put(newTestTicket(t, "After Rollback"))
 	if err == nil || !strings.Contains(err.Error(), "transaction closed") {
 		t.Fatalf("put after rollback: got %v, want 'transaction closed'", err)
 	}
 
-	err = tx.Delete(t.Context(), "01234567-89ab-7def-8123-456789abcdef")
+	err = tx.Delete(uuid.MustParse("01234567-89ab-7def-8123-456789abcdef"))
 	if err == nil || !strings.Contains(err.Error(), "transaction closed") {
 		t.Fatalf("delete after rollback: got %v, want 'transaction closed'", err)
 	}
@@ -512,62 +428,34 @@ func Test_Tx_Returns_Error_When_Put_Missing_Required_Fields(t *testing.T) {
 
 	t.Cleanup(func() { _ = s.Close() })
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-
 	tests := []struct {
 		name   string
-		ticket store.Ticket
+		modify func(*store.Ticket)
 		errMsg string
 	}{
 		{
-			name: "missing status",
-			ticket: store.Ticket{
-				Type:      "task",
-				Priority:  2,
-				CreatedAt: createdAt,
-				Title:     "Test",
-			},
+			name:   "missing status",
+			modify: func(ticket *store.Ticket) { ticket.Status = "" },
 			errMsg: "status",
 		},
 		{
-			name: "missing type",
-			ticket: store.Ticket{
-				Status:    "open",
-				Priority:  2,
-				CreatedAt: createdAt,
-				Title:     "Test",
-			},
+			name:   "missing type",
+			modify: func(ticket *store.Ticket) { ticket.Type = "" },
 			errMsg: "type",
 		},
 		{
-			name: "invalid priority",
-			ticket: store.Ticket{
-				Status:    "open",
-				Type:      "task",
-				Priority:  0,
-				CreatedAt: createdAt,
-				Title:     "Test",
-			},
+			name:   "invalid priority",
+			modify: func(ticket *store.Ticket) { ticket.Priority = 0 },
 			errMsg: "priority",
 		},
 		{
-			name: "missing created_at",
-			ticket: store.Ticket{
-				Status:   "open",
-				Type:     "task",
-				Priority: 2,
-				Title:    "Test",
-			},
+			name:   "missing created_at",
+			modify: func(ticket *store.Ticket) { ticket.CreatedAt = time.Time{} },
 			errMsg: "created_at",
 		},
 		{
-			name: "missing title",
-			ticket: store.Ticket{
-				Status:    "open",
-				Type:      "task",
-				Priority:  2,
-				CreatedAt: createdAt,
-			},
+			name:   "missing title",
+			modify: func(ticket *store.Ticket) { ticket.Title = "" },
 			errMsg: "title",
 		},
 	}
@@ -583,7 +471,10 @@ func Test_Tx_Returns_Error_When_Put_Missing_Required_Fields(t *testing.T) {
 
 			defer func() { _ = tx.Rollback() }()
 
-			_, err = tx.Put(t.Context(), &tt.ticket)
+			ticket := newTestTicket(t, "Test")
+			tt.modify(ticket)
+
+			_, err = tx.Put(ticket)
 			if err == nil {
 				t.Fatalf("expected error for %s", tt.name)
 			}
@@ -609,48 +500,29 @@ func Test_Tx_Returns_Error_When_Delete_With_Invalid_ID(t *testing.T) {
 
 	t.Cleanup(func() { _ = s.Close() })
 
-	tests := []struct {
-		name   string
-		id     string
-		errMsg string
-	}{
-		{
-			name:   "empty id",
-			id:     "",
-			errMsg: "empty",
-		},
-		{
-			name:   "invalid uuid",
-			id:     "not-a-uuid",
-			errMsg: "invalid",
-		},
-		{
-			name:   "uuid v4 instead of v7",
-			id:     "550e8400-e29b-41d4-a716-446655440000",
-			errMsg: "version",
-		},
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	defer func() { _ = tx.Rollback() }()
 
-			tx, err := s.Begin(t.Context())
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
+	// uuid.Nil should fail validation
+	err = tx.Delete(uuid.Nil)
+	if err == nil {
+		t.Fatal("expected error for nil UUID")
+	}
+	if !strings.Contains(err.Error(), "not UUIDv7") {
+		t.Fatalf("error = %v, want contains 'not UUIDv7'", err)
+	}
 
-			defer func() { _ = tx.Rollback() }()
-
-			err = tx.Delete(t.Context(), tt.id)
-			if err == nil {
-				t.Fatalf("expected error for %s", tt.name)
-			}
-
-			if !strings.Contains(err.Error(), tt.errMsg) {
-				t.Fatalf("error = %v, want contains %q", err, tt.errMsg)
-			}
-		})
+	// UUIDv4 should fail validation
+	err = tx.Delete(uuid.MustParse("550e8400-e29b-41d4-a716-446655440000"))
+	if err == nil {
+		t.Fatal("expected error for UUIDv4")
+	}
+	if !strings.Contains(err.Error(), "not UUIDv7") {
+		t.Fatalf("error = %v, want contains 'not UUIDv7'", err)
 	}
 }
 
@@ -661,8 +533,8 @@ func Test_Tx_Succeeds_When_Delete_Nonexistent_Ticket(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
+	// Create a ticket to get a valid ID, but don't actually put it
+	nonexistent := newTestTicket(t, "Nonexistent")
 
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
@@ -676,7 +548,7 @@ func Test_Tx_Succeeds_When_Delete_Nonexistent_Ticket(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	err = tx.Delete(t.Context(), id.String())
+	err = tx.Delete(nonexistent.ID)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -694,9 +566,6 @@ func Test_Tx_Applies_Last_Put_When_Multiple_Puts_Same_ID(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -704,34 +573,30 @@ func Test_Tx_Applies_Last_Put_When_Multiple_Puts_Same_ID(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
+	// Create ticket to get a valid ID
+	first := newTestTicket(t, "First Title")
+
 	tx, err := s.Begin(t.Context())
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 
-	// First put.
-	_, err = tx.Put(t.Context(), &store.Ticket{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		Title:     "First Title",
-	})
+	// First put
+	_, err = tx.Put(first)
 	if err != nil {
 		t.Fatalf("first put: %v", err)
 	}
 
-	// Second put with same ID - uses different values but still "open" status
-	// to avoid needing ClosedAt (which is required when status is "closed").
-	_, err = tx.Put(t.Context(), &store.Ticket{
-		ID:        id.String(),
-		Status:    "in_progress",
-		Type:      "bug",
-		Priority:  3,
-		CreatedAt: createdAt,
-		Title:     "Second Title",
-	})
+	// Second put with same ID - different values
+	second := newTestTicket(t, "Second Title")
+	second.ID = first.ID
+	second.ShortID = first.ShortID
+	second.Path = first.Path
+	second.Status = "in_progress"
+	second.Type = "bug"
+	second.Priority = 3
+
+	_, err = tx.Put(second)
 	if err != nil {
 		t.Fatalf("second put: %v", err)
 	}
@@ -771,9 +636,6 @@ func Test_Tx_Removes_Ticket_When_Put_Then_Delete_Same_ID(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -786,20 +648,15 @@ func Test_Tx_Removes_Ticket_When_Put_Then_Delete_Same_ID(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	// Put then delete.
-	ticket, err := tx.Put(t.Context(), &store.Ticket{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Will Be Deleted",
-	})
+	// Put then delete
+	toDelete := newTestTicket(t, "Will Be Deleted")
+
+	ticket, err := tx.Put(toDelete)
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
-	err = tx.Delete(t.Context(), id.String())
+	err = tx.Delete(ticket.ID)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -835,11 +692,6 @@ func Test_Tx_Writes_Optional_Fields_When_Put_With_All_Fields(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-	closedAt := time.Date(2026, 1, 28, 16, 0, 0, 0, time.UTC)
-	parentID := makeUUIDv7(t, createdAt, 0x111, 0x222333444555666)
-	blockerID := makeUUIDv7(t, createdAt, 0x777, 0x888999AAABBBCCC)
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -847,23 +699,24 @@ func Test_Tx_Writes_Optional_Fields_When_Put_With_All_Fields(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
+	// Create tickets to use as parent and blocker
+	parent := newTestTicket(t, "Parent")
+	blocker := newTestTicket(t, "Blocker")
+
 	tx, err := s.Begin(t.Context())
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 
-	ticket, err := tx.Put(t.Context(), &store.Ticket{
-		Status:      "closed",
-		Type:        "bug",
-		Priority:    1,
-		CreatedAt:   createdAt,
-		ClosedAt:    &closedAt,
-		Title:       "Bug Fix",
-		Assignee:    "alice",
-		Parent:      parentID.String(),
-		ExternalRef: "GH-42",
-		BlockedBy:   []string{blockerID.String()},
-	})
+	closedAt := time.Now().UTC()
+	ticket, _ := store.NewTicket("Bug Fix", "bug", "closed", 1)
+	ticket.ClosedAt = &closedAt
+	ticket.Assignee = store.StringPtr("alice")
+	ticket.Parent = &parent.ID
+	ticket.ExternalRef = store.StringPtr("GH-42")
+	ticket.BlockedBy = uuid.UUIDs{blocker.ID}
+
+	ticket, err = tx.Put(ticket)
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -881,7 +734,7 @@ func Test_Tx_Writes_Optional_Fields_When_Put_With_All_Fields(t *testing.T) {
 		t.Fatalf("file missing assignee, content:\n%s", content)
 	}
 
-	if !strings.Contains(content, "parent: "+parentID.String()) {
+	if !strings.Contains(content, "parent: "+parent.ID.String()) {
 		t.Fatalf("file missing parent, content:\n%s", content)
 	}
 
@@ -893,7 +746,7 @@ func Test_Tx_Writes_Optional_Fields_When_Put_With_All_Fields(t *testing.T) {
 		t.Fatalf("file missing blocked-by, content:\n%s", content)
 	}
 
-	if !strings.Contains(content, blockerID.String()) {
+	if !strings.Contains(content, blocker.ID.String()) {
 		t.Fatalf("file missing blocker id, content:\n%s", content)
 	}
 
@@ -907,20 +760,20 @@ func Test_Tx_Writes_Optional_Fields_When_Put_With_All_Fields(t *testing.T) {
 		t.Fatalf("expected 1 ticket, got %d", len(results))
 	}
 
-	if results[0].Assignee != "alice" {
-		t.Fatalf("assignee = %s, want alice", results[0].Assignee)
+	if !ptrEquals(results[0].Assignee, "alice") {
+		t.Fatalf("assignee = %s, want alice", ptrVal(results[0].Assignee))
 	}
 
-	if results[0].Parent != parentID.String() {
-		t.Fatalf("parent = %s, want %s", results[0].Parent, parentID.String())
+	if results[0].Parent == nil || *results[0].Parent != parent.ID {
+		t.Fatalf("parent = %v, want %s", results[0].Parent, parent.ID)
 	}
 
-	if results[0].ExternalRef != "GH-42" {
-		t.Fatalf("external_ref = %s, want GH-42", results[0].ExternalRef)
+	if !ptrEquals(results[0].ExternalRef, "GH-42") {
+		t.Fatalf("external_ref = %s, want GH-42", ptrVal(results[0].ExternalRef))
 	}
 
-	if len(results[0].BlockedBy) != 1 || results[0].BlockedBy[0] != blockerID.String() {
-		t.Fatalf("blocked_by = %v, want [%s]", results[0].BlockedBy, blockerID.String())
+	if len(results[0].BlockedBy) != 1 || results[0].BlockedBy[0] != blocker.ID {
+		t.Fatalf("blocked_by = %v, want [%s]", results[0].BlockedBy, blocker.ID)
 	}
 }
 
@@ -936,8 +789,6 @@ func Test_Tx_Persists_Ticket_When_Commit_And_Reopen(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-
 	tx, err := s.Begin(t.Context())
 	if err != nil {
 		_ = s.Close()
@@ -945,13 +796,7 @@ func Test_Tx_Persists_Ticket_When_Commit_And_Reopen(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	ticket, err := tx.Put(t.Context(), &store.Ticket{
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "WAL Test",
-	})
+	ticket, err := tx.Put(newTestTicket(t, "WAL Test"))
 	if err != nil {
 		_ = tx.Rollback()
 		_ = s.Close()
@@ -1007,32 +852,11 @@ func Test_Tx_Recovers_WAL_When_Begin_With_Pending_WAL(t *testing.T) {
 	_ = s.Close()
 
 	// Write a committed WAL manually (simulating crash mid-recovery).
-	createdAt := time.Date(2026, 1, 28, 15, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("path from id: %v", err)
-	}
-
-	fm := walFrontmatterFromTicket(&ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "WAL Recovery Test",
-	})
+	ticket := newTestTicket(t, "WAL Recovery Test")
 
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          id.String(),
-			Path:        relPath,
-			Frontmatter: frontmatterToAny(t, fm),
-			Content:     "# WAL Recovery Test\n",
-		},
+		makeWalPutRecord(ticket),
 	})
 
 	// Reopen and begin a new transaction - should recover the WAL first.
@@ -1064,8 +888,8 @@ func Test_Tx_Recovers_WAL_When_Begin_With_Pending_WAL(t *testing.T) {
 		t.Fatalf("expected 1 ticket after WAL recovery, got %d", len(results))
 	}
 
-	if results[0].ID != id.String() {
-		t.Fatalf("id = %s, want %s", results[0].ID, id.String())
+	if results[0].ID != ticket.ID {
+		t.Fatalf("id = %s, want %s", results[0].ID, ticket.ID)
 	}
 }
 
@@ -1123,7 +947,7 @@ func Test_Tx_Returns_Error_When_Put_On_Nil_Tx(t *testing.T) {
 
 	var tx *store.Tx
 
-	_, err := tx.Put(t.Context(), &store.Ticket{})
+	_, err := tx.Put(&store.Ticket{})
 	if err == nil {
 		t.Fatal("expected error for nil tx")
 	}
@@ -1140,12 +964,121 @@ func Test_Tx_Returns_Error_When_Delete_On_Nil_Tx(t *testing.T) {
 
 	var tx *store.Tx
 
-	err := tx.Delete(t.Context(), "01234567-89ab-7def-8123-456789abcdef")
+	err := tx.Delete(uuid.MustParse("01234567-89ab-7def-8123-456789abcdef"))
 	if err == nil {
 		t.Fatal("expected error for nil tx")
 	}
 
 	if !strings.Contains(err.Error(), "tx is nil") {
 		t.Fatalf("error = %v, want contains 'tx is nil'", err)
+	}
+}
+
+// Test_Tx_Preserves_Body_When_Put_And_Get verifies that body content is preserved through Put and Get.
+func Test_Tx_Preserves_Body_When_Put_And_Get(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	body := "This is the ticket body.\n\nIt has multiple paragraphs."
+	toCreate := newTestTicket(t, "Body Test")
+	toCreate.Body = body
+
+	ticket, err := tx.Put(toCreate)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	err = tx.Commit(t.Context())
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Verify body in file.
+	absPath := filepath.Join(ticketDir, ticket.Path)
+	content := readFileString(t, absPath)
+
+	if !strings.Contains(content, body) {
+		t.Fatalf("file missing body, content:\n%s", content)
+	}
+
+	// Get ticket and verify body.
+	got, err := s.Get(t.Context(), ticket.ID.String())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	if got.Body != body {
+		t.Fatalf("body = %q, want %q", got.Body, body)
+	}
+}
+
+// Test_Tx_Preserves_Body_When_Update_Via_Get_Put verifies that body is preserved when updating via Get → Put.
+func Test_Tx_Preserves_Body_When_Update_Via_Get_Put(t *testing.T) {
+	t.Parallel()
+
+	ticketDir := t.TempDir()
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	// Create ticket with body.
+	body := "Original body content."
+	toCreate := newTestTicket(t, "Original Title")
+	toCreate.Body = body
+
+	ticket := putTicket(t.Context(), t, s, toCreate)
+
+	// Get ticket, modify title, put back.
+	got, err := s.Get(t.Context(), ticket.ID.String())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	got.Title = "Modified Title"
+
+	tx2, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	_, err = tx2.Put(got)
+	if err != nil {
+		t.Fatalf("put update: %v", err)
+	}
+
+	err = tx2.Commit(t.Context())
+	if err != nil {
+		t.Fatalf("commit update: %v", err)
+	}
+
+	// Verify body is preserved.
+	updated, err := s.Get(t.Context(), ticket.ID.String())
+	if err != nil {
+		t.Fatalf("get updated: %v", err)
+	}
+
+	if updated.Title != "Modified Title" {
+		t.Fatalf("title = %q, want %q", updated.Title, "Modified Title")
+	}
+
+	if updated.Body != body {
+		t.Fatalf("body = %q, want %q", updated.Body, body)
 	}
 }

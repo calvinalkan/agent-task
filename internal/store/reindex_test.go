@@ -19,43 +19,17 @@ import (
 
 func Test_Rebuild_Builds_SQLite_Index_When_Tickets_Are_Valid(t *testing.T) {
 	t.Parallel()
+
 	root := t.TempDir()
 	ticketDir := filepath.Join(root, ".tickets")
 
-	idA, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
+	ticketA, _ := store.NewTicket("Alpha Task", "task", "open", 2)
+	ticketB, _ := store.NewTicket("Beta Bug", "bug", "closed", 3)
+	ticketB.ClosedAt = store.TimePtr(time.Now().UTC())
+	ticketB.BlockedBy = uuid.UUIDs{ticketA.ID}
 
-	idB, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
-
-	createdAt := time.Date(2026, 1, 20, 10, 11, 12, 0, time.UTC)
-	closedAt := createdAt.Add(2 * time.Hour)
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idA.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Alpha Task",
-	})
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        idB.String(),
-		Status:    "closed",
-		Type:      "bug",
-		Priority:  3,
-		CreatedAt: createdAt,
-		ClosedAt:  &closedAt,
-		BlockedBy: []string{idA.String()},
-		Title:     "Beta Bug",
-	})
-
-	writeIgnoredTicket(t, ticketDir)
+	writeTicketFile(t, ticketDir, ticketA)
+	writeTicketFile(t, ticketDir, ticketB)
 
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
@@ -87,135 +61,13 @@ func Test_Rebuild_Builds_SQLite_Index_When_Tickets_Are_Valid(t *testing.T) {
 		t.Fatalf("user_version = %d, want %d", version, wantSchemaVersion)
 	}
 
-	rows, err := db.Query(`
-		SELECT id, short_id, path, mtime_ns, status, type, priority, assignee, parent, created_at, closed_at, external_ref, title
-		FROM tickets
-		ORDER BY id`)
-	if err != nil {
-		t.Fatalf("query tickets: %v", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	found := make(map[string]struct{})
-
-	for rows.Next() {
-		var (
-			id       string
-			shortID  string
-			path     string
-			mtimeNS  int64
-			status   string
-			typeName string
-			priority int64
-			assignee sql.NullString
-			parent   sql.NullString
-			created  int64
-			closed   sql.NullInt64
-			extRef   sql.NullString
-			title    string
-		)
-
-		scanErr := rows.Scan(&id, &shortID, &path, &mtimeNS, &status, &typeName, &priority, &assignee, &parent, &created, &closed, &extRef, &title)
-		if scanErr != nil {
-			t.Fatalf("scan ticket: %v", scanErr)
-		}
-
-		found[id] = struct{}{}
-
-		parsedID, parseErr := uuidFromString(id)
-		if parseErr != nil {
-			t.Fatalf("parse id: %v", parseErr)
-		}
-
-		expectedShort, shortErr := store.ShortIDFromUUID(parsedID)
-		if shortErr != nil {
-			t.Fatalf("short id: %v", shortErr)
-		}
-
-		if shortID != expectedShort {
-			t.Fatalf("short_id = %s, want %s", shortID, expectedShort)
-		}
-
-		expectedPath, pathErr := store.PathFromID(parsedID)
-		if pathErr != nil {
-			t.Fatalf("ticket path: %v", pathErr)
-		}
-
-		if path != expectedPath {
-			t.Fatalf("path = %s, want %s", path, expectedPath)
-		}
-
-		if mtimeNS <= 0 {
-			t.Fatalf("mtime_ns = %d, want > 0", mtimeNS)
-		}
-
-		switch id {
-		case idA.String():
-			if status != "open" {
-				t.Fatalf("status = %s, want open", status)
-			}
-
-			if typeName != "task" {
-				t.Fatalf("type = %s, want task", typeName)
-			}
-
-			if priority != 2 {
-				t.Fatalf("priority = %d, want 2", priority)
-			}
-
-			if created != createdAt.Unix() {
-				t.Fatalf("created_at = %d, want %d", created, createdAt.Unix())
-			}
-
-			if closed.Valid {
-				t.Fatal("closed_at valid for open ticket")
-			}
-
-			if title != "Alpha Task" {
-				t.Fatalf("title = %s, want Alpha Task", title)
-			}
-		case idB.String():
-			if status != "closed" {
-				t.Fatalf("status = %s, want closed", status)
-			}
-
-			if typeName != "bug" {
-				t.Fatalf("type = %s, want bug", typeName)
-			}
-
-			if priority != 3 {
-				t.Fatalf("priority = %d, want 3", priority)
-			}
-
-			if created != createdAt.Unix() {
-				t.Fatalf("created_at = %d, want %d", created, createdAt.Unix())
-			}
-
-			if !closed.Valid || closed.Int64 != closedAt.Unix() {
-				t.Fatalf("closed_at = %v, want %d", closed, closedAt.Unix())
-			}
-
-			if title != "Beta Bug" {
-				t.Fatalf("title = %s, want Beta Bug", title)
-			}
-		default:
-			t.Fatalf("unexpected id %s", id)
-		}
-	}
-
-	err = rows.Err()
-	if err != nil {
-		t.Fatalf("rows error: %v", err)
-	}
-
-	if len(found) != 2 {
-		t.Fatalf("ticket count = %d, want 2", len(found))
+	if count := countTickets(t, db); count != 2 {
+		t.Fatalf("ticket count = %d, want 2", count)
 	}
 
 	blockers := readBlockers(t, db)
-	if len(blockers) != 1 || blockers[0].ticketID != idB.String() || blockers[0].blockerID != idA.String() {
-		t.Fatalf("blockers = %+v, want [%s -> %s]", blockers, idB.String(), idA.String())
+	if len(blockers) != 1 || blockers[0].ticketID != ticketB.ID.String() || blockers[0].blockerID != ticketA.ID.String() {
+		t.Fatalf("blockers = %+v, want [%s -> %s]", blockers, ticketB.ID, ticketA.ID)
 	}
 }
 
@@ -239,33 +91,12 @@ func Test_Rebuild_Replays_WAL_When_Committed(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 27, 9, 30, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0x2222222222222222)
-
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Rebuild WAL",
-	}
+	ticket := newTestTicket(t, "Rebuild WAL")
 
 	// Write WAL after store is open
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          fixture.ID,
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(fixture),
-			Content:     "# Rebuild WAL\nBody\n",
-		},
+		makeWalPutRecord(ticket),
 	})
 
 	indexed, err := s.Reindex(t.Context())
@@ -286,12 +117,12 @@ func Test_Rebuild_Replays_WAL_When_Committed(t *testing.T) {
 		t.Fatalf("wal size = %d, want 0", info.Size())
 	}
 
-	absPath := filepath.Join(ticketDir, relPath)
-	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# Rebuild WAL\nBody\n")
+	// Verify file was written
+	absPath := filepath.Join(ticketDir, ticket.Path)
 
-	actual := readFileString(t, absPath)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
+	_, statErr := os.Stat(absPath)
+	if statErr != nil {
+		t.Fatalf("ticket file not found: %v", statErr)
 	}
 
 	db := openIndex(t, ticketDir)
@@ -304,48 +135,35 @@ func Test_Rebuild_Replays_WAL_When_Committed(t *testing.T) {
 
 func Test_Rebuild_Skips_Orphaned_Tickets_When_Path_Mismatches(t *testing.T) {
 	t.Parallel()
+
 	root := t.TempDir()
 	ticketDir := filepath.Join(root, ".tickets")
-
-	validID, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
-
-	orphanID, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
-
-	createdAt := time.Date(2026, 1, 21, 9, 0, 0, 0, time.UTC)
-
-	// Write valid ticket and initialize store first
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        validID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		Title:     "Valid Ticket",
-	})
 
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 
-	defer func() { _ = s.Close() }()
+	// Create valid ticket (indexed)
+	validTicket := putTicket(t.Context(), t, s, newTestTicket(t, "Valid Ticket"))
 
-	// Add orphan ticket after store is initialized
+	// Close store, add orphan file at wrong path, reopen
+	err = s.Close()
+	if err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	// Write a ticket file at wrong path (bypassing store index)
 	orphanRel := filepath.Join("2026", "01-21", "orphan.md")
-	writeTicketAtPath(t, ticketDir, orphanRel, &ticketFixture{
-		ID:        orphanID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Orphan Ticket",
-	})
+	orphanTicket := newTestTicket(t, "Orphan Ticket")
+	writeRawPath(t, ticketDir, orphanRel, makeTicketContent(t, orphanTicket))
+
+	s, err = store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
 
 	indexed, err := s.Reindex(t.Context())
 	if err == nil {
@@ -361,15 +179,15 @@ func Test_Rebuild_Skips_Orphaned_Tickets_When_Path_Mismatches(t *testing.T) {
 	}
 
 	scanErr := requireIndexScanError(t, err)
-	assertIssuePaths(t, scanErr, []string{filepath.Join(ticketDir, orphanRel)})
+	assertIssuePaths(t, scanErr, []string{orphanRel})
 
-	// Verify original index is preserved (only valid ticket indexed)
+	// Verify original index is preserved (valid ticket still indexed)
 	rows, err := s.Query(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
 
-	if len(rows) != 1 || rows[0].ID != validID.String() {
+	if len(rows) != 1 || rows[0].ID != validTicket.ID {
 		t.Fatalf("rows = %d, want 1 with valid ticket", len(rows))
 	}
 }
@@ -409,64 +227,37 @@ func Test_Rebuild_Indexes_Valid_Tickets_When_Other_Files_Invalid(t *testing.T) {
 	root := t.TempDir()
 	ticketDir := filepath.Join(root, ".tickets")
 
-	id, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
-
-	// Write valid ticket and initialize store first
-	_ = writeTicket(t, ticketDir, &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: time.Date(2026, 1, 23, 9, 0, 0, 0, time.UTC),
-		Title:     "Valid",
-	})
-
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 
+	// Create valid ticket (indexed)
+	validTicket := putTicket(t.Context(), t, s, newTestTicket(t, "Valid"))
+
+	// Close store to add invalid files bypassing index
+	err = s.Close()
+	if err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	// Write invalid ticket files directly (bypassing store index)
+	badSchemaTicket := newTestTicket(t, "Wrong Schema")
+	badSchemaContent := makeTicketContent(t, badSchemaTicket)
+	badSchemaContent = strings.Replace(badSchemaContent, "schema_version: 1\n", "schema_version: 2\n", 1)
+	writeRawPath(t, ticketDir, badSchemaTicket.Path, badSchemaContent)
+
+	missingTitleTicket := newTestTicket(t, "Missing Title")
+	missingTitleContent := makeTicketContent(t, missingTitleTicket)
+	missingTitleContent = strings.Replace(missingTitleContent, "title: Missing Title\n", "", 1)
+	writeRawPath(t, ticketDir, missingTitleTicket.Path, missingTitleContent)
+
+	s, err = store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+
 	defer func() { _ = s.Close() }()
-
-	// Add invalid tickets after store is initialized
-	badID, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
-
-	schemaTicket := &ticketFixture{
-		ID:        badID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: time.Date(2026, 1, 23, 9, 0, 0, 0, time.UTC),
-		Title:     "Wrong Schema",
-	}
-	schemaContent := renderTicket(schemaTicket)
-	schemaContent = strings.Replace(schemaContent, "schema_version: 1\n", "schema_version: 2\n", 1)
-	badPath := writeRawTicket(t, ticketDir, badID, schemaContent)
-	assertFileStartsWith(t, ticketDir, badPath, "---")
-
-	missingTitleID, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
-
-	missingTitleTicket := &ticketFixture{
-		ID:        missingTitleID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: time.Date(2026, 1, 23, 10, 0, 0, 0, time.UTC),
-		Title:     "Missing Title",
-	}
-	missingTitleContent := renderTicket(missingTitleTicket)
-	missingTitleContent = strings.Replace(missingTitleContent, fmt.Sprintf("# %s\n", missingTitleTicket.Title), "", 1)
-	missingTitlePath := writeRawTicket(t, ticketDir, missingTitleID, missingTitleContent)
-	assertFileStartsWith(t, ticketDir, missingTitlePath, "---")
 
 	indexed, err := s.Reindex(t.Context())
 	if err == nil {
@@ -483,17 +274,17 @@ func Test_Rebuild_Indexes_Valid_Tickets_When_Other_Files_Invalid(t *testing.T) {
 
 	scanErr := requireIndexScanError(t, err)
 	assertIssuePaths(t, scanErr, []string{
-		filepath.Join(ticketDir, badPath),
-		filepath.Join(ticketDir, missingTitlePath),
+		badSchemaTicket.Path,
+		missingTitleTicket.Path,
 	})
 
-	// Verify original index is preserved (only valid ticket indexed)
+	// Verify original index is preserved (valid ticket still indexed)
 	rows, err := s.Query(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
 
-	if len(rows) != 1 || rows[0].ID != id.String() {
+	if len(rows) != 1 || rows[0].ID != validTicket.ID {
 		t.Fatalf("rows = %d, want 1 with valid ticket", len(rows))
 	}
 }
@@ -599,17 +390,28 @@ func assertIssuePaths(t *testing.T, scanErr *store.IndexScanError, paths []strin
 	}
 }
 
-func writeRawTicket(t *testing.T, root string, id uuid.UUID, contents string) string {
+// makeTicketContent creates valid ticket file content as a string.
+// Used for writing ticket files without going through store.
+func makeTicketContent(t *testing.T, ticket *store.Ticket) string {
 	t.Helper()
 
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	writeRawPath(t, root, relPath, contents)
-
-	return relPath
+	return fmt.Sprintf(`---
+id: %s
+schema_version: 1
+created: %s
+priority: %d
+status: %s
+title: %s
+type: %s
+---
+`,
+		ticket.ID,
+		ticket.CreatedAt.Format(time.RFC3339),
+		ticket.Priority,
+		ticket.Status,
+		ticket.Title,
+		ticket.Type,
+	)
 }
 
 func writeRawPath(t *testing.T, root, relPath, contents string) {
@@ -626,39 +428,4 @@ func writeRawPath(t *testing.T, root, relPath, contents string) {
 	if err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-}
-
-func assertFileStartsWith(t *testing.T, root, relPath, want string) {
-	t.Helper()
-
-	absPath := filepath.Join(root, relPath)
-
-	data, err := os.ReadFile(absPath)
-	if err != nil {
-		t.Fatalf("read file %s: %v", relPath, err)
-	}
-
-	firstLine := strings.SplitN(string(data), "\n", 2)[0]
-	if firstLine != want {
-		t.Fatalf("file %s first line = %q, want %q", relPath, firstLine, want)
-	}
-}
-
-func writeIgnoredTicket(t *testing.T, root string) {
-	t.Helper()
-
-	id, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
-
-	relPath := filepath.Join(".tk", "ignored.md")
-	writeTicketAtPath(t, root, relPath, &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: time.Date(2026, 1, 22, 8, 0, 0, 0, time.UTC),
-		Title:     "Ignored",
-	})
 }

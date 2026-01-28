@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // currentSchemaVersion is stored in SQLite's user_version pragma.
@@ -95,7 +97,8 @@ func dropAndRecreateSchema(ctx context.Context, tx *sql.Tx) error {
 			created_at INTEGER NOT NULL,
 			closed_at INTEGER,
 			external_ref TEXT,
-			title TEXT NOT NULL
+			title TEXT NOT NULL,
+			body TEXT NOT NULL
 		) WITHOUT ROWID`,
 		`CREATE TABLE ticket_blockers (
 			ticket_id TEXT NOT NULL,
@@ -159,8 +162,9 @@ func prepareTicketInserter(ctx context.Context, tx *sql.Tx) (*ticketInserter, er
 			created_at,
 			closed_at,
 			external_ref,
-			title
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			title,
+			body
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, fmt.Errorf("prepare insert: %w", err)
 	}
@@ -192,14 +196,13 @@ func (ti *ticketInserter) Close() {
 
 // Insert inserts a ticket and its blockers. It clears existing blockers first.
 func (ti *ticketInserter) Insert(ctx context.Context, tx *sql.Tx, entry *Ticket) error {
-	_, err := tx.ExecContext(ctx, "DELETE FROM ticket_blockers WHERE ticket_id = ?", entry.ID)
+	idStr := entry.ID.String()
+
+	_, err := tx.ExecContext(ctx, "DELETE FROM ticket_blockers WHERE ticket_id = ?", idStr)
 	if err != nil {
-		return fmt.Errorf("clear blockers %s: %w", entry.ID, err)
+		return fmt.Errorf("clear blockers %s: %w", idStr, err)
 	}
 
-	assignee := sql.NullString{String: entry.Assignee, Valid: entry.Assignee != ""}
-	parent := sql.NullString{String: entry.Parent, Valid: entry.Parent != ""}
-	external := sql.NullString{String: entry.ExternalRef, Valid: entry.ExternalRef != ""}
 	createdAt := entry.CreatedAt.Unix()
 
 	closedAt := sql.NullInt64{}
@@ -207,30 +210,36 @@ func (ti *ticketInserter) Insert(ctx context.Context, tx *sql.Tx, entry *Ticket)
 		closedAt = sql.NullInt64{Int64: entry.ClosedAt.Unix(), Valid: true}
 	}
 
+	var parentStr sql.NullString
+	if entry.Parent != nil {
+		parentStr = sql.NullString{String: entry.Parent.String(), Valid: true}
+	}
+
 	_, err = ti.insertTicket.ExecContext(
 		ctx,
-		entry.ID,
+		idStr,
 		entry.ShortID,
 		entry.Path,
 		entry.MtimeNS,
 		entry.Status,
 		entry.Type,
 		entry.Priority,
-		assignee,
-		parent,
+		nullFromPtr(entry.Assignee),
+		parentStr,
 		createdAt,
 		closedAt,
-		external,
+		nullFromPtr(entry.ExternalRef),
 		entry.Title,
+		entry.Body,
 	)
 	if err != nil {
-		return fmt.Errorf("insert ticket %s: %w", entry.ID, err)
+		return fmt.Errorf("insert ticket %s: %w", idStr, err)
 	}
 
 	for _, blocker := range entry.BlockedBy {
-		_, err = ti.insertBlocker.ExecContext(ctx, entry.ID, blocker)
+		_, err = ti.insertBlocker.ExecContext(ctx, idStr, blocker.String())
 		if err != nil {
-			return fmt.Errorf("insert blocker %s: %w", entry.ID, err)
+			return fmt.Errorf("insert blocker %s: %w", idStr, err)
 		}
 	}
 
@@ -238,15 +247,17 @@ func (ti *ticketInserter) Insert(ctx context.Context, tx *sql.Tx, entry *Ticket)
 }
 
 // deleteTicket removes a ticket and its blockers from the index.
-func deleteTicket(ctx context.Context, tx *sql.Tx, id string) error {
-	_, err := tx.ExecContext(ctx, "DELETE FROM ticket_blockers WHERE ticket_id = ?", id)
+func deleteTicket(ctx context.Context, tx *sql.Tx, id uuid.UUID) error {
+	idStr := id.String()
+
+	_, err := tx.ExecContext(ctx, "DELETE FROM ticket_blockers WHERE ticket_id = ?", idStr)
 	if err != nil {
-		return fmt.Errorf("delete blockers %s: %w", id, err)
+		return fmt.Errorf("delete blockers %s: %w", idStr, err)
 	}
 
-	_, err = tx.ExecContext(ctx, "DELETE FROM tickets WHERE id = ?", id)
+	_, err = tx.ExecContext(ctx, "DELETE FROM tickets WHERE id = ?", idStr)
 	if err != nil {
-		return fmt.Errorf("delete ticket %s: %w", id, err)
+		return fmt.Errorf("delete ticket %s: %w", idStr, err)
 	}
 
 	return nil
@@ -255,6 +266,7 @@ func deleteTicket(ctx context.Context, tx *sql.Tx, id string) error {
 // buildTicketQuery constructs the SQL query and args for ticket listing.
 // When limit/offset is specified, it uses a subquery to paginate tickets
 // before joining blockers (since LIMIT applies to rows, not distinct tickets).
+// Note: body is excluded from listing queries for performance.
 func buildTicketQuery(options *QueryOptions) (string, []any) {
 	var (
 		clauses []string
@@ -343,16 +355,25 @@ func queryTickets(ctx context.Context, db *sql.DB, options *QueryOptions) ([]Tic
 
 	defer func() { _ = rows.Close() }()
 
-	return scanTicketRows(rows)
+	return scanTicketMetaRows(rows)
 }
 
-// nullStringValue extracts a string from sql.NullString, returning empty if not valid.
-func nullStringValue(value sql.NullString) string {
-	if !value.Valid {
-		return ""
+// nullStringPtr converts sql.NullString to *string.
+func nullStringPtr(ns sql.NullString) *string {
+	if !ns.Valid {
+		return nil
 	}
 
-	return value.String
+	return &ns.String
+}
+
+// nullFromPtr converts *string to sql.NullString for insertion.
+func nullFromPtr(s *string) sql.NullString {
+	if s == nil {
+		return sql.NullString{}
+	}
+
+	return sql.NullString{String: *s, Valid: true}
 }
 
 // nullTimePtr converts a Unix timestamp to *time.Time, returning nil if not valid.
@@ -398,12 +419,12 @@ func queryByPrefix(ctx context.Context, db *sql.DB, prefix string) ([]Ticket, er
 
 	defer func() { _ = rows.Close() }()
 
-	return scanTicketRows(rows)
+	return scanTicketMetaRows(rows)
 }
 
-// scanTicketRows scans ticket rows from a query result, grouping blockers by ticket.
+// scanTicketMetaRows scans ticket metadata rows from a query result, grouping blockers by ticket.
 // Rows must be ordered by ticket ID then blocker ID for correct grouping.
-func scanTicketRows(rows *sql.Rows) ([]Ticket, error) {
+func scanTicketMetaRows(rows *sql.Rows) ([]Ticket, error) {
 	var (
 		tickets []Ticket
 		current *Ticket
@@ -447,28 +468,48 @@ func scanTicketRows(rows *sql.Rows) ([]Ticket, error) {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 
-		if current == nil || current.ID != id {
+		if current == nil || current.ID.String() != id {
+			parsedID, err := uuid.Parse(id)
+			if err != nil {
+				return nil, fmt.Errorf("parse id %q: %w", id, err)
+			}
+
+			var parsedParent *uuid.UUID
+			if parent.Valid {
+				p, err := uuid.Parse(parent.String)
+				if err != nil {
+					return nil, fmt.Errorf("parse parent %q: %w", parent.String, err)
+				}
+				parsedParent = &p
+			}
+
 			tickets = append(tickets, Ticket{
-				ID:          id,
-				ShortID:     shortID,
-				Path:        path,
-				MtimeNS:     mtimeNS,
-				Status:      status,
-				Type:        ticketTyp,
-				Priority:    priority,
-				Assignee:    nullStringValue(assignee),
-				Parent:      nullStringValue(parent),
-				CreatedAt:   time.Unix(createdAt, 0).UTC(),
-				ClosedAt:    nullTimePtr(closedAt),
-				ExternalRef: nullStringValue(external),
-				Title:       title,
-				BlockedBy:   []string{},
+				TicketFrontmatter: TicketFrontmatter{
+					ID:          parsedID,
+					Status:      status,
+					Type:        ticketTyp,
+					Priority:    priority,
+					Title:       title,
+					CreatedAt:   time.Unix(createdAt, 0).UTC(),
+					Assignee:    nullStringPtr(assignee),
+					Parent:      parsedParent,
+					ExternalRef: nullStringPtr(external),
+					ClosedAt:    nullTimePtr(closedAt),
+					BlockedBy:   uuid.UUIDs{},
+				},
+				ShortID: shortID,
+				Path:    path,
+				MtimeNS: mtimeNS,
 			})
 			current = &tickets[len(tickets)-1]
 		}
 
 		if blockerID.Valid {
-			current.BlockedBy = append(current.BlockedBy, blockerID.String)
+			bid, err := uuid.Parse(blockerID.String)
+			if err != nil {
+				return nil, fmt.Errorf("parse blocker %q: %w", blockerID.String, err)
+			}
+			current.BlockedBy = append(current.BlockedBy, bid)
 		}
 	}
 

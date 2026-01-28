@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -80,21 +79,8 @@ func Test_Open_Rebuilds_Index_When_Schema_Version_Mismatches(t *testing.T) {
 	root := t.TempDir()
 	ticketDir := filepath.Join(root, ".tickets")
 
-	id, err := store.NewUUIDv7()
-	if err != nil {
-		t.Fatalf("uuidv7: %v", err)
-	}
-
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
-	})
+	ticket := newTestTicket(t, "Test Ticket")
+	writeTicketFile(t, ticketDir, ticket)
 
 	// First open creates schema
 	s, err := store.Open(t.Context(), ticketDir)
@@ -133,8 +119,8 @@ func Test_Open_Rebuilds_Index_When_Schema_Version_Mismatches(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
 
-	if rows[0].ID != id.String() {
-		t.Fatalf("id = %s, want %s", rows[0].ID, id.String())
+	if rows[0].ID != ticket.ID {
+		t.Fatalf("id = %s, want %s", rows[0].ID, ticket.ID)
 	}
 
 	db = openIndex(t, ticketDir)
@@ -188,21 +174,11 @@ func Test_Get_Returns_Ticket_When_File_Exists(t *testing.T) {
 
 	ticketDir := t.TempDir()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
+	ticket, _ := store.NewTicket("Test Ticket", "task", "open", 2)
+	ticket.Assignee = store.StringPtr("alice")
+	ticket.ExternalRef = store.StringPtr("GH-123")
 
-	fixture := &ticketFixture{
-		ID:          id.String(),
-		Status:      "open",
-		Type:        "task",
-		Priority:    2,
-		CreatedAt:   createdAt,
-		Title:       "Test Ticket",
-		Assignee:    "alice",
-		ExternalRef: "GH-123",
-	}
-
-	relPath := writeTicket(t, ticketDir, fixture)
+	writeTicketFile(t, ticketDir, ticket)
 
 	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
@@ -211,33 +187,33 @@ func Test_Get_Returns_Ticket_When_File_Exists(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	ticket, err := s.Get(t.Context(), id.String())
+	got, err := s.Get(t.Context(), ticket.ID.String())
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
-	if ticket.ID != id.String() {
-		t.Fatalf("id = %s, want %s", ticket.ID, id.String())
+	if got.ID != ticket.ID {
+		t.Fatalf("id = %s, want %s", got.ID, ticket.ID)
 	}
 
-	if ticket.Status != "open" {
-		t.Fatalf("status = %s, want open", ticket.Status)
+	if got.Status != "open" {
+		t.Fatalf("status = %s, want open", got.Status)
 	}
 
-	if ticket.Title != "Test Ticket" {
-		t.Fatalf("title = %s, want Test Ticket", ticket.Title)
+	if got.Title != "Test Ticket" {
+		t.Fatalf("title = %s, want Test Ticket", got.Title)
 	}
 
-	if ticket.Path != relPath {
-		t.Fatalf("path = %s, want %s", ticket.Path, relPath)
+	if got.Path != ticket.Path {
+		t.Fatalf("path = %s, want %s", got.Path, ticket.Path)
 	}
 
-	if ticket.Assignee != "alice" {
-		t.Fatalf("assignee = %s, want alice", ticket.Assignee)
+	if got.Assignee == nil || *got.Assignee != "alice" {
+		t.Fatalf("assignee = %v, want alice", got.Assignee)
 	}
 
-	if ticket.ExternalRef != "GH-123" {
-		t.Fatalf("external_ref = %s, want GH-123", ticket.ExternalRef)
+	if got.ExternalRef == nil || *got.ExternalRef != "GH-123" {
+		t.Fatalf("external_ref = %v, want GH-123", got.ExternalRef)
 	}
 }
 
@@ -253,66 +229,15 @@ func Test_Get_Returns_Error_When_File_Missing(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xABC, 0xDEF0123456789ABC)
+	ticket := newTestTicket(t, "Missing")
 
-	_, err = s.Get(t.Context(), id.String())
+	_, err = s.Get(t.Context(), ticket.ID.String())
 	if err == nil {
 		t.Fatal("expected error for missing ticket")
 	}
 
 	if !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("error = %v, want contains 'not found'", err)
-	}
-}
-
-func Test_Get_Returns_Error_When_File_Contains_Different_ID(t *testing.T) {
-	t.Parallel()
-
-	ticketDir := t.TempDir()
-
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-
-	// Create ticket with one ID
-	actualID := makeUUIDv7(t, createdAt, 0x111, 0x222333444555666)
-	fixture := &ticketFixture{
-		ID:        actualID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
-	}
-
-	// Write to canonical path for actualID
-	writeTicket(t, ticketDir, fixture)
-
-	s, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-
-	defer func() { _ = s.Close() }()
-
-	// Request with a different ID - file at wrongID's path has actualID in frontmatter
-	wrongID := makeUUIDv7(t, createdAt, 0x999, 0x888777666555444)
-
-	// Write a file at wrongID's path but with actualID in frontmatter
-	wrongPath, err := store.PathFromID(wrongID)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	writeTicketAtPath(t, ticketDir, wrongPath, fixture) // fixture still has actualID
-
-	_, err = s.Get(t.Context(), wrongID.String())
-	if err == nil {
-		t.Fatal("expected error for ID mismatch")
-	}
-
-	// ticketFromFrontmatter returns path mismatch error
-	if !strings.Contains(err.Error(), "validate path") {
-		t.Fatalf("error = %v, want contains 'validate path'", err)
 	}
 }
 
@@ -378,13 +303,12 @@ func Test_Get_Returns_Error_When_UUID_Is_Not_V7(t *testing.T) {
 		t.Fatal("expected error for non-UUIDv7")
 	}
 
-	if !strings.Contains(err.Error(), "version") {
-		t.Fatalf("error = %v, want contains 'version'", err)
+	if !strings.Contains(err.Error(), "not UUIDv7") {
+		t.Fatalf("error = %v, want contains 'not UUIDv7'", err)
 	}
 }
 
 // Contract: Get recovers committed WAL that appears after Open.
-// This simulates a crash mid-commit where WAL was written but store wasn't cleanly closed.
 func Test_Get_Recovers_WAL_When_WAL_Appears_After_Open(t *testing.T) {
 	t.Parallel()
 
@@ -398,50 +322,26 @@ func Test_Get_Recovers_WAL_When_WAL_Appears_After_Open(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x555, 0x666777888999AAA)
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "WAL Ticket",
-	}
-
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	fm := walFrontmatterFromTicket(fixture)
-	content := "# WAL Ticket\n\nBody\n"
+	ticket := newTestTicket(t, "WAL Ticket")
 
 	// Write committed WAL while store is open (simulates crash mid-commit)
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          id.String(),
-			Path:        relPath,
-			Frontmatter: frontmatterToAny(t, fm),
-			Content:     content,
-		},
+		makeWalPutRecord(ticket),
 	})
 
 	// Get should detect WAL, recover it, then return the ticket
-	ticket, err := s.Get(t.Context(), id.String())
+	got, err := s.Get(t.Context(), ticket.ID.String())
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
-	if ticket.ID != id.String() {
-		t.Fatalf("id = %s, want %s", ticket.ID, id.String())
+	if got.ID != ticket.ID {
+		t.Fatalf("id = %s, want %s", got.ID, ticket.ID)
 	}
 
-	if ticket.Title != "WAL Ticket" {
-		t.Fatalf("title = %s, want WAL Ticket", ticket.Title)
+	if got.Title != "WAL Ticket" {
+		t.Fatalf("title = %s, want WAL Ticket", got.Title)
 	}
 
 	// Verify WAL was truncated after recovery

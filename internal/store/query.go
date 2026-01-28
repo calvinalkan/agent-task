@@ -4,27 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
+	"os"
+	"path/filepath"
 )
-
-// Ticket is the SQLite-backed view returned by Query.
-// It mirrors the derived index and never reads the filesystem.
-type Ticket struct {
-	ID          string     // ID is the UUIDv7 stored in frontmatter.
-	ShortID     string     // ShortID is the 12-char Crockford base32 identifier.
-	Path        string     // Path is the canonical relative path to the ticket.
-	MtimeNS     int64      // MtimeNS is the file modification time in nanoseconds.
-	Status      string     // Status is the ticket status string (open/in_progress/closed).
-	Type        string     // Type is the ticket type string (bug/feature/task/etc.).
-	Priority    int64      // Priority is the numeric priority from frontmatter.
-	Assignee    string     // Assignee is empty when unset in frontmatter.
-	Parent      string     // Parent holds the parent ticket ID, empty when unset.
-	CreatedAt   time.Time  // CreatedAt is the UTC timestamp from frontmatter.
-	ClosedAt    *time.Time // ClosedAt is nil when the ticket is not closed.
-	ExternalRef string     // ExternalRef is empty when unset in frontmatter.
-	Title       string     // Title is parsed from the ticket body.
-	BlockedBy   []string   // BlockedBy contains blocker IDs, sorted by ID.
-}
 
 // QueryOptions defines optional SQLite filters for Query.
 // Zero values mean "no filter" (Priority uses 0 to mean "any").
@@ -32,16 +14,24 @@ type Ticket struct {
 //
 // For prefix-based ID lookups (short_id or UUID prefix), use [Store.GetByPrefix] instead.
 type QueryOptions struct {
-	Status   string // Status filters by exact status when non-empty.
-	Type     string // Type filters by exact ticket type when non-empty.
-	Priority int    // Priority filters by exact priority when > 0.
-	Parent   string // Parent filters by exact parent ID when non-empty.
-	Limit    int    // Limit caps the number of rows when > 0.
-	Offset   int    // Offset skips rows when > 0.
+	// Status filters by exact status when non-empty.
+	Status string
+	// Type filters by exact ticket type when non-empty.
+	Type string
+	// Priority filters by exact priority when > 0.
+	Priority int
+	// Parent filters by exact parent ID when non-empty.
+	Parent string
+	// Limit caps the number of rows when > 0.
+	Limit int
+	// Offset skips rows when > 0.
+	Offset int
 }
 
-// Query reads ticket summaries from SQLite. It avoids filesystem access so callers
+// Query reads ticket metadata from SQLite. It avoids filesystem access so callers
 // can list quickly after a rebuild or commit.
+//
+// Query returns TicketMeta without body content. Use [Store.Get] for full ticket data.
 //
 // Query acquires a shared WAL lock and replays any committed WAL entries before
 // returning results. It may return [ErrWALCorrupt] or [ErrWALReplay] if
@@ -84,12 +74,12 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Ticket, error)
 	return tickets, nil
 }
 
-// GetByPrefix resolves a short_id or UUID prefix to matching tickets via SQLite.
+// GetByPrefix resolves a short_id or UUID prefix to matching ticket metadata via SQLite.
 // It returns up to 50 tickets whose short_id or full ID starts with the given prefix.
 //
 // The caller decides how to handle the result:
 //   - Empty slice: no matches found
-//   - Single ticket: unambiguous match, use directly or call [Store.Get] for fresh filesystem data
+//   - Single ticket: unambiguous match, call [Store.Get] for full ticket with body
 //   - Multiple tickets: ambiguous prefix, display list for user to disambiguate
 //
 // GetByPrefix acquires a shared WAL lock and replays any committed WAL entries
@@ -141,4 +131,80 @@ func (s *Store) GetByPrefix(ctx context.Context, prefix string) ([]Ticket, error
 	}
 
 	return tickets, nil
+}
+
+// Get reads a ticket directly from the filesystem for fresh data.
+// It bypasses SQLite and always returns the current file contents.
+//
+// Get is strict: it only reads from the canonical path derived from the ID.
+// It returns an error if the file does not exist or contains a different ID.
+//
+// Get acquires a shared WAL lock and replays any committed WAL entries before
+// reading. It may return [ErrWALCorrupt] or [ErrWALReplay] if recovery fails.
+func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
+	if ctx == nil {
+		return nil, errors.New("get: context is nil")
+	}
+
+	if s == nil || s.sql == nil || s.wal == nil {
+		return nil, errors.New("get: store is not open")
+	}
+
+	parsed, err := parseUUIDv7(id)
+	if err != nil {
+		return nil, fmt.Errorf("get: %w", err)
+	}
+
+	relPath, err := pathFromID(parsed)
+	if err != nil {
+		return nil, fmt.Errorf("get: %w", err)
+	}
+
+	lockCtx, cancel := context.WithTimeout(ctx, s.lockTimeout)
+	defer cancel()
+
+	readLock, err := s.acquireReadLock(ctx, lockCtx)
+	if err != nil {
+		return nil, fmt.Errorf("get: %w", err)
+	}
+
+	defer func() { _ = readLock.Close() }()
+
+	ticket, err := s.readTicketFile(id, relPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return ticket, nil
+}
+
+// readTicketFile reads and parses a ticket from its canonical path.
+func (s *Store) readTicketFile(expectedID, relPath string) (*Ticket, error) {
+	absPath := filepath.Join(s.dir, relPath)
+
+	info, err := s.fs.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("get %s: not found", expectedID)
+		}
+
+		return nil, fmt.Errorf("get: stat %s: %w", relPath, err)
+	}
+
+	// Reject non-regular files (symlinks, devices, etc.) per spec.
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("get %s: not found", expectedID)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("get: read %s: %w", relPath, err)
+	}
+
+	ticket, err := parseTicketFile(data, relPath, info.ModTime().UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("get: %w", err)
+	}
+
+	return ticket, nil
 }

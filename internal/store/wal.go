@@ -14,13 +14,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
-
-	"github.com/calvinalkan/fileproc"
-	"github.com/google/uuid"
+	"time"
 
 	"github.com/calvinalkan/agent-task/pkg/fs"
+	"github.com/google/uuid"
 )
 
 const (
@@ -53,11 +51,10 @@ const (
 )
 
 type walOp struct {
-	Op          string            `json:"op"`
-	ID          string            `json:"id"`
-	Path        string            `json:"path"`
-	Frontmatter TicketFrontmatter `json:"frontmatter,omitempty"`
-	Content     string            `json:"content,omitempty"`
+	Op     string    `json:"op"`
+	ID     uuid.UUID `json:"id"`
+	Path   string    `json:"path"`
+	Ticket *Ticket   `json:"ticket,omitempty"` // nil for delete
 }
 
 // recoverWalLocked recovers any pending WAL state to restore consistency.
@@ -111,6 +108,138 @@ func (s *Store) recoverWalLocked(ctx context.Context) error {
 	default:
 		return fmt.Errorf("unknown wal state %d", state)
 	}
+}
+
+// replayWalOpsToFS applies WAL operations to the filesystem using atomic writes.
+func (s *Store) replayWalOpsToFS(ctx context.Context, ops []walOp) error {
+	dirsToSync := make(map[string]struct{})
+
+	for _, op := range ops {
+		err := ctx.Err()
+		if err != nil {
+			return fmt.Errorf("replay canceled: %w", context.Cause(ctx))
+		}
+
+		absPath := filepath.Join(s.dir, op.Path)
+		dir := filepath.Dir(absPath)
+
+		switch op.Op {
+		case walOpPut:
+			if op.Ticket == nil {
+				return fmt.Errorf("%w: missing ticket for %s", ErrWALReplay, op.ID)
+			}
+
+			content, err := op.Ticket.marshalFile()
+			if err != nil {
+				return fmt.Errorf("render ticket %s: %w", op.ID, err)
+			}
+
+			err = s.fs.MkdirAll(dir, 0o750)
+			if err != nil {
+				return fmt.Errorf("mkdir %s: %w", absPath, err)
+			}
+
+			err = s.atomic.Write(absPath, bytes.NewReader(content), fs.AtomicWriteOptions{
+				SyncDir: false,
+				Perm:    0o644, // We handle dir sync ourselves at the end.
+			})
+			if err != nil {
+				return fmt.Errorf("write %s: %w", absPath, err)
+			}
+
+			dirsToSync[dir] = struct{}{}
+
+		case walOpDelete:
+			err := s.fs.Remove(absPath)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("delete %s: %w", absPath, err)
+			}
+
+			dirsToSync[dir] = struct{}{}
+
+		default:
+			return fmt.Errorf("%w: replay op %q", ErrWALReplay, op.Op)
+		}
+	}
+
+	for dir := range dirsToSync {
+		fh, err := s.fs.Open(dir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+
+			return fmt.Errorf("open dir %q: %w", dir, err)
+		}
+
+		syncErr := fh.Sync()
+		closeErr := fh.Close()
+
+		if syncErr != nil || closeErr != nil {
+			return errors.Join(syncErr, closeErr)
+		}
+	}
+
+	return nil
+}
+
+// updateSqliteIndexFromOps applies WAL operations to SQLite in a single transaction.
+// Callers should wrap errors with context.
+func (s *Store) updateSqliteIndexFromOps(ctx context.Context, ops []walOp) error {
+	tx, err := s.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin txn: %w", err)
+	}
+
+	committed := false
+
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	inserter, err := prepareTicketInserter(ctx, tx)
+	if err != nil {
+		return err
+	}
+
+	defer inserter.Close()
+
+	for _, op := range ops {
+		err = ctx.Err()
+		if err != nil {
+			return fmt.Errorf("canceled: %w", context.Cause(ctx))
+		}
+
+		switch op.Op {
+		case walOpDelete:
+			err = deleteTicket(ctx, tx, op.ID)
+			if err != nil {
+				return err
+			}
+		case walOpPut:
+			if op.Ticket == nil {
+				return fmt.Errorf("%w: missing ticket for %s", ErrWALReplay, op.ID)
+			}
+
+			err = inserter.Insert(ctx, tx, op.Ticket)
+			if err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown op %q", op.Op)
+		}
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	committed = true
+
+	return nil
 }
 
 // readWalState inspects the WAL footer and checksum to decide whether the WAL
@@ -194,8 +323,8 @@ func readWalState(file fs.File) (walState, []byte, error) {
 	return walCommitted, body, nil
 }
 
-// truncateWal clears the WAL and fsyncs so readers see an empty log.
-// Callers should wrap errors with context.
+// truncateWal clears the WAL. No fsync - if truncate isn't persisted and we
+// crash, recovery replays the WAL which is idempotent.
 func truncateWal(file fs.File) error {
 	fd := file.Fd()
 	if fd == 0 {
@@ -207,12 +336,41 @@ func truncateWal(file fs.File) error {
 		return fmt.Errorf("ftruncate: %w", err)
 	}
 
-	err = file.Sync()
-	if err != nil {
-		return fmt.Errorf("fsync: %w", err)
+	return nil
+}
+
+// encodeWalContent serializes operations to a complete WAL payload (JSONL body + footer).
+// The returned bytes can be written directly to the WAL file.
+func encodeWalContent(ops []walOp) ([]byte, error) {
+	var body bytes.Buffer
+
+	enc := json.NewEncoder(&body)
+	for _, op := range ops {
+		err := enc.Encode(op)
+		if err != nil {
+			return nil, fmt.Errorf("encode op: %w", err)
+		}
 	}
 
-	return nil
+	bodyBytes := body.Bytes()
+
+	// Build 32-byte footer: magic + lengths + CRC.
+	footer := make([]byte, walFooterSize)
+	copy(footer[:8], walMagic)
+
+	bodyLen := uint64(len(bodyBytes))
+	binary.LittleEndian.PutUint64(footer[8:16], bodyLen)
+	binary.LittleEndian.PutUint64(footer[16:24], ^bodyLen)
+
+	crc := crc32.Checksum(bodyBytes, walCRC32C)
+	binary.LittleEndian.PutUint32(footer[24:28], crc)
+	binary.LittleEndian.PutUint32(footer[28:32], ^crc)
+
+	result := make([]byte, len(bodyBytes)+walFooterSize)
+	copy(result, bodyBytes)
+	copy(result[len(bodyBytes):], footer)
+
+	return result, nil
 }
 
 // decodeWalOps parses the JSONL body into validated operations.
@@ -246,12 +404,19 @@ func decodeWalOps(body []byte) ([]walOp, error) {
 
 		unmarshalErr := json.Unmarshal(line, &op)
 		if unmarshalErr != nil {
-			return nil, fmt.Errorf("parse line: %w: %w", ErrWALReplay, unmarshalErr)
+			return nil, fmt.Errorf("%w: parse line: %w", ErrWALReplay, unmarshalErr)
 		}
 
 		validated, err := validateWalOp(op)
 		if err != nil {
 			return nil, err
+		}
+
+		// Set mtime to now so the in-memory ticket and SQLite index are fresh
+		// without needing to stat the file after replay. This is fine since
+		// the ticket/SQLite always holds a potentially stale mtime anyway.
+		if validated.Op == walOpPut && validated.Ticket != nil {
+			validated.Ticket.MtimeNS = time.Now().UnixNano()
 		}
 
 		ops = append(ops, validated)
@@ -264,240 +429,46 @@ func decodeWalOps(body []byte) ([]walOp, error) {
 	return ops, nil
 }
 
-// validateWalOp enforces op shape, ID validity, and canonical path rules.
-// Callers should wrap errors with context.
+// validateWalOp enforces op shape and validates the ticket for puts.
 func validateWalOp(op walOp) (walOp, error) {
 	if op.Op != walOpPut && op.Op != walOpDelete {
-		return walOp{}, fmt.Errorf("invalid op %q: %w", op.Op, ErrWALReplay)
-	}
-
-	err := validateIDString(op.ID)
-	if err != nil {
-		return walOp{}, fmt.Errorf("invalid id %q: %w: %w", op.ID, ErrWALReplay, err)
-	}
-
-	id, err := uuid.Parse(op.ID)
-	if err != nil {
-		return walOp{}, fmt.Errorf("parse id %q: %w: %w", op.ID, ErrWALReplay, err)
-	}
-
-	err = validateUUIDv7(id)
-	if err != nil {
-		return walOp{}, fmt.Errorf("invalid id %q: %w: %w", op.ID, ErrWALReplay, err)
-	}
-
-	if op.Path == "" {
-		return walOp{}, fmt.Errorf("empty path: %w", ErrWALReplay)
-	}
-
-	if strings.Contains(op.Path, "\\") {
-		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
-	}
-
-	if filepath.IsAbs(op.Path) {
-		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
-	}
-
-	clean := filepath.Clean(op.Path)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
-	}
-
-	if clean != op.Path {
-		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
-	}
-
-	if !strings.HasSuffix(op.Path, ".md") {
-		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
-	}
-
-	expected, err := PathFromID(id)
-	if err != nil {
-		return walOp{}, fmt.Errorf("derive path for %q: %w: %w", op.ID, ErrWALReplay, err)
-	}
-
-	if filepath.Clean(op.Path) != filepath.Clean(expected) {
-		return walOp{}, fmt.Errorf("path mismatch %q for id %q: %w", op.Path, op.ID, ErrWALReplay)
+		return walOp{}, fmt.Errorf("%w: invalid op %q", ErrWALReplay, op.Op)
 	}
 
 	if op.Op == walOpPut {
-		if op.Frontmatter == nil {
-			return walOp{}, fmt.Errorf("missing frontmatter for %q: %w", op.ID, ErrWALReplay)
+		if op.Ticket == nil {
+			return walOp{}, fmt.Errorf("%w: missing ticket for put", ErrWALReplay)
+		}
+
+		err := op.Ticket.validate()
+		if err != nil {
+			return walOp{}, fmt.Errorf("%w: invalid ticket: %w", ErrWALReplay, err)
+		}
+
+		if op.Path != op.Ticket.Path {
+			return walOp{}, fmt.Errorf("%w: op path %q does not match ticket path %q", ErrWALReplay, op.Path, op.Ticket.Path)
+		}
+
+		if op.ID != op.Ticket.ID {
+			return walOp{}, fmt.Errorf("%w: op id %q does not match ticket id %q", ErrWALReplay, op.ID, op.Ticket.ID)
+		}
+	}
+
+	if op.Op == walOpDelete {
+		// For deletes, just validate the ID is UUIDv7 and path matches
+		if op.ID.Version() != 7 {
+			return walOp{}, fmt.Errorf("%w: id %q is not UUIDv7", ErrWALReplay, op.ID)
+		}
+
+		expected, err := pathFromID(op.ID)
+		if err != nil {
+			return walOp{}, fmt.Errorf("%w: %w", ErrWALReplay, err)
+		}
+
+		if op.Path != expected {
+			return walOp{}, fmt.Errorf("%w: path %q does not match id %q", ErrWALReplay, op.Path, op.ID)
 		}
 	}
 
 	return op, nil
-}
-
-// replayWalOpsToFS applies WAL operations to the filesystem using atomic writes.
-func (s *Store) replayWalOpsToFS(ctx context.Context, ops []walOp) error {
-	for _, op := range ops {
-		err := ctx.Err()
-		if err != nil {
-			return fmt.Errorf("replay canceled: %w", context.Cause(ctx))
-		}
-
-		absPath := filepath.Join(s.dir, op.Path)
-
-		switch op.Op {
-		case walOpPut:
-			content, err := ticketToFileContent(op.Frontmatter, op.Content)
-			if err != nil {
-				return fmt.Errorf("render ticket %s: %w", op.ID, err)
-			}
-
-			err = s.fs.MkdirAll(filepath.Dir(absPath), 0o750)
-			if err != nil {
-				return fmt.Errorf("mkdir %s: %w", absPath, err)
-			}
-
-			err = s.atomic.WriteWithDefaults(absPath, strings.NewReader(content))
-			if err != nil {
-				return fmt.Errorf("write %s: %w", absPath, err)
-			}
-		case walOpDelete:
-			err := s.fs.Remove(absPath)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("delete %s: %w", absPath, err)
-			}
-
-			// Sync the parent directory to persist the delete.
-			// Skip if the directory doesn't exist (parent was already cleaned up).
-			dir := filepath.Dir(absPath)
-
-			fh, err := s.fs.Open(dir)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					continue // directory doesn't exist, nothing to sync
-				}
-
-				return fmt.Errorf("open dir %q: %w", dir, err)
-			}
-
-			func() {
-				defer func() { _ = fh.Close() }()
-
-				err = fh.Sync()
-			}()
-
-			if err != nil {
-				return fmt.Errorf("sync dir %q: %w", dir, err)
-			}
-		default:
-			return fmt.Errorf("replay op %q: %w", op.Op, ErrWALReplay)
-		}
-	}
-
-	return nil
-}
-
-// updateSqliteIndexFromOps applies WAL operations to SQLite in a single transaction.
-// Callers should wrap errors with context.
-func (s *Store) updateSqliteIndexFromOps(ctx context.Context, ops []walOp) error {
-	tx, err := s.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if err != nil {
-		return fmt.Errorf("begin txn: %w", err)
-	}
-
-	committed := false
-
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	inserter, err := prepareTicketInserter(ctx, tx)
-	if err != nil {
-		return err
-	}
-
-	defer inserter.Close()
-
-	for _, op := range ops {
-		err = ctx.Err()
-		if err != nil {
-			return fmt.Errorf("canceled: %w", context.Cause(ctx))
-		}
-
-		switch op.Op {
-		case walOpDelete:
-			err = deleteTicket(ctx, tx, op.ID)
-			if err != nil {
-				return err
-			}
-		case walOpPut:
-			fm := op.Frontmatter
-			if fm == nil {
-				return fmt.Errorf("missing frontmatter for %s: %w", op.ID, ErrWALReplay)
-			}
-
-			var entry Ticket
-
-			entry, err = s.indexFromWAL(op, fm)
-			if err != nil {
-				return err
-			}
-
-			err = inserter.Insert(ctx, tx, &entry)
-			if err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("unknown op %q", op.Op)
-		}
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-
-	committed = true
-
-	return nil
-}
-
-// indexFromWAL builds an index row for a WAL put after the file write.
-// Callers should wrap errors with context.
-func (s *Store) indexFromWAL(op walOp, fm TicketFrontmatter) (Ticket, error) {
-	absPath := filepath.Join(s.dir, op.Path)
-
-	info, err := s.fs.Stat(absPath)
-	if err != nil {
-		return Ticket{}, fmt.Errorf("stat %s: %w", absPath, err)
-	}
-
-	stat := fileproc.Stat{
-		Size:    info.Size(),
-		ModTime: info.ModTime().UnixNano(),
-		Mode:    uint32(info.Mode()),
-	}
-
-	entry, _, err := ticketFromFrontmatter(op.Path, absPath, s.dir, stat, fm, strings.NewReader(op.Content))
-	if err != nil {
-		return Ticket{}, err // ticketFromFrontmatter already includes context
-	}
-
-	return entry, nil
-}
-
-// ticketToFileContent serializes frontmatter and body into a deterministic ticket payload.
-// Callers should wrap errors with context.
-func ticketToFileContent(fm TicketFrontmatter, body string) (string, error) {
-	frontmatter, err := fm.MarshalYAML()
-	if err != nil {
-		return "", fmt.Errorf("marshal frontmatter: %w: %w", ErrWALReplay, err)
-	}
-
-	builder := strings.Builder{}
-	builder.WriteString(frontmatter)
-	builder.WriteString("\n")
-	builder.WriteString(body)
-
-	if !strings.HasSuffix(body, "\n") {
-		builder.WriteString("\n")
-	}
-
-	return builder.String(), nil
 }

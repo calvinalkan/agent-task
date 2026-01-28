@@ -9,12 +9,31 @@ import (
 	"github.com/google/uuid"
 )
 
-// NewUUIDv7 generates time-ordered IDs so later path derivation can rely on the
+// newUUIDv7 generates time-ordered IDs so later path derivation can rely on the
 // embedded timestamp without extra metadata.
-func NewUUIDv7() (uuid.UUID, error) {
+func newUUIDv7() (uuid.UUID, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return uuid.UUID{}, fmt.Errorf("generate uuidv7: %w", err)
+	}
+
+	return id, nil
+}
+
+// parseUUIDv7 parses a string as a UUIDv7, returning an error if the string
+// is not a valid UUID or not version 7.
+func parseUUIDv7(s string) (uuid.UUID, error) {
+	if s == "" {
+		return uuid.UUID{}, fmt.Errorf("empty id")
+	}
+
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return uuid.UUID{}, fmt.Errorf("invalid id %q: %w", s, err)
+	}
+
+	if id.Version() != 7 {
+		return uuid.UUID{}, fmt.Errorf("id %q is not UUIDv7", s)
 	}
 
 	return id, nil
@@ -25,25 +44,23 @@ const (
 	crockfordBase = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 )
 
-// ShortIDFromUUID derives a stable, 12-char base32 (Crockford) ID from the
+// shortIDFromUUID derives a stable, 12-char base32 (Crockford) ID from the
 // UUIDv7 random bits so filenames stay stable even if timestamps are identical.
-// It returns an error when the UUID is not a valid UUIDv7.
-func ShortIDFromUUID(id uuid.UUID) (string, error) {
-	err := validateUUIDv7(id)
-	if err != nil {
-		return "", fmt.Errorf("derive short id: %w", err)
+// Caller must ensure id is a valid UUIDv7.
+func shortIDFromUUID(id uuid.UUID) (string, error) {
+	if id.Version() != 7 {
+		return "", fmt.Errorf("expected UUIDv7, got version %d", id.Version())
 	}
 
 	return shortIDFromUUIDBits(id), nil
 }
 
-// PathFromID derives the canonical ticket location for a UUIDv7 relative to the ticket dir.
+// pathFromID derives the canonical ticket location for a UUIDv7 relative to the ticket dir.
 // We key the directory by the embedded UTC timestamp to keep file layout stable.
-// It returns an error when the UUID is not a valid UUIDv7.
-func PathFromID(id uuid.UUID) (string, error) {
-	err := validateUUIDv7(id)
-	if err != nil {
-		return "", fmt.Errorf("derive path: %w", err)
+// Caller must ensure id is a valid UUIDv7.
+func pathFromID(id uuid.UUID) (string, error) {
+	if id.Version() != 7 {
+		return "", fmt.Errorf("expected UUIDv7, got version %d", id.Version())
 	}
 
 	shortID := shortIDFromUUIDBits(id)
@@ -87,16 +104,4 @@ func shortIDFromUUIDBits(id uuid.UUID) string {
 	top60 := (uint64(randA) << 48) | (randB >> 14)
 
 	return encodeCrockfordBase32(top60)
-}
-
-func validateUUIDv7(id uuid.UUID) error {
-	if id.Version() != 7 {
-		return fmt.Errorf("invalid UUID version %d (expected 7)", id.Version())
-	}
-
-	if id.Variant() != uuid.RFC4122 {
-		return fmt.Errorf("invalid UUID variant %d (expected RFC4122)", id.Variant())
-	}
-
-	return nil
 }

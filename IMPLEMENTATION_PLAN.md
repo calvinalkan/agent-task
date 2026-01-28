@@ -505,12 +505,11 @@ Not yet implemented. Will:
 
 ### Phase 7 — Cleanup / docs
 - [ ] Move `internal/ticket/config.go` → `internal/cli/config.go`
-- [ ] Split `internal/ticket/errors.go` into CLI/store errors
-- [ ] Move ticket structs + frontmatter parsing → `internal/store/types.go` + `internal/store/file.go`
+- [ ] Split `internal/ticket/errors.go` into cli files as inline erorrs, not sentital, unless cli programmatically handles them.
 - [ ] Remove binary cache code (`internal/ticket/cache*`)
 - [ ] Remove per-ticket locking (`internal/ticket/lock.go`)
 - [ ] Remove `github.com/natefinch/atomic` dependency (use `pkg/fs`)
-- [ ] Remove `internal/ticket` tests (cache-specific, no longer relevant)
+- [ ] Remove `internal/ticket` (no longer relevant)
 - [ ] All CLI commands use the correct architecture and reference the new APIs
 
 ---

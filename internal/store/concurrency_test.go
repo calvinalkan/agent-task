@@ -26,19 +26,12 @@ func Test_Get_Succeeds_When_Shared_Lock_Held(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
+	ticket, err := store.NewTicket("Test Ticket", "task", "open", 2)
+	if err != nil {
+		t.Fatalf("new ticket: %v", err)
 	}
 
-	writeTicket(t, ticketDir, fixture)
+	putTicket(t.Context(), t, s, ticket)
 
 	// Hold a shared lock - Get should still succeed (shared + shared = ok)
 	locker := fs.NewLocker(fs.NewReal())
@@ -51,13 +44,13 @@ func Test_Get_Succeeds_When_Shared_Lock_Held(t *testing.T) {
 
 	defer func() { _ = lock.Close() }()
 
-	ticket, err := s.Get(t.Context(), id.String())
+	got, err := s.Get(t.Context(), ticket.ID.String())
 	if err != nil {
 		t.Fatalf("get while shared lock held: %v", err)
 	}
 
-	if ticket.ID != id.String() {
-		t.Fatalf("id = %s, want %s", ticket.ID, id.String())
+	if got.ID != ticket.ID {
+		t.Fatalf("id = %s, want %s", got.ID, ticket.ID)
 	}
 }
 
@@ -74,19 +67,12 @@ func Test_Get_Returns_Error_When_Exclusive_Lock_Held(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
+	ticket, err := store.NewTicket("Test Ticket", "task", "open", 2)
+	if err != nil {
+		t.Fatalf("new ticket: %v", err)
 	}
 
-	writeTicket(t, ticketDir, fixture)
+	putTicket(t.Context(), t, s, ticket)
 
 	// Hold an exclusive lock - Get should block and timeout
 	locker := fs.NewLocker(fs.NewReal())
@@ -99,7 +85,7 @@ func Test_Get_Returns_Error_When_Exclusive_Lock_Held(t *testing.T) {
 
 	defer func() { _ = lock.Close() }()
 
-	_, err = s.Get(t.Context(), id.String())
+	_, err = s.Get(t.Context(), ticket.ID.String())
 	if err == nil {
 		t.Fatal("expected error when exclusive lock held")
 	}
@@ -122,19 +108,12 @@ func Test_Query_Succeeds_When_Shared_Lock_Held(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
+	ticket, err := store.NewTicket("Test Ticket", "task", "open", 2)
+	if err != nil {
+		t.Fatalf("new ticket: %v", err)
 	}
 
-	writeTicket(t, ticketDir, fixture)
+	putTicket(t.Context(), t, s, ticket)
 
 	// Reindex to populate SQLite
 	_, err = s.Reindex(t.Context())
@@ -210,24 +189,12 @@ func Test_GetByPrefix_Succeeds_When_Shared_Lock_Held(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	shortID, err := store.ShortIDFromUUID(id)
+	ticket, err := store.NewTicket("Test Ticket", "task", "open", 2)
 	if err != nil {
-		t.Fatalf("short id: %v", err)
+		t.Fatalf("new ticket: %v", err)
 	}
 
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
-	}
-
-	writeTicket(t, ticketDir, fixture)
+	putTicket(t.Context(), t, s, ticket)
 
 	// Reindex to populate SQLite
 	_, err = s.Reindex(t.Context())
@@ -246,7 +213,8 @@ func Test_GetByPrefix_Succeeds_When_Shared_Lock_Held(t *testing.T) {
 
 	defer func() { _ = lock.Close() }()
 
-	tickets, err := s.GetByPrefix(t.Context(), shortID[:4])
+	// Use first 4 chars of short ID
+	tickets, err := s.GetByPrefix(t.Context(), ticket.ShortID[:4])
 	if err != nil {
 		t.Fatalf("get by prefix while shared lock held: %v", err)
 	}
@@ -303,19 +271,12 @@ func Test_Multiple_Readers_Succeed_When_Called_Concurrently(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 28, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0x123, 0x456789ABCDEF0123)
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Test Ticket",
+	ticket, err := store.NewTicket("Test Ticket", "task", "open", 2)
+	if err != nil {
+		t.Fatalf("new ticket: %v", err)
 	}
 
-	writeTicket(t, ticketDir, fixture)
+	putTicket(t.Context(), t, s, ticket)
 
 	// Reindex for Query
 	_, err = s.Reindex(t.Context())
@@ -330,7 +291,7 @@ func Test_Multiple_Readers_Succeed_When_Called_Concurrently(t *testing.T) {
 	// Spawn concurrent Get calls
 	for range numReaders {
 		go func() {
-			_, err := s.Get(t.Context(), id.String())
+			_, err := s.Get(t.Context(), ticket.ID.String())
 			errs <- err
 		}()
 	}

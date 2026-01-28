@@ -1,4 +1,4 @@
-package store_test
+package frontmatter_test
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/calvinalkan/agent-task/internal/store"
+	"github.com/calvinalkan/agent-task/internal/frontmatter"
 )
 
 // Contract: enforce the restricted YAML subset so store parsing stays deterministic.
@@ -19,7 +19,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 		name  string
 		fm    string
 		tail  string
-		check func(t *testing.T, fm store.TicketFrontmatter)
+		check func(t *testing.T, fm frontmatter.Frontmatter)
 	}{
 		{
 			name: "scalar values",
@@ -34,7 +34,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"empty: ''",
 			}, "\n"),
 			tail: "# Title\n",
-			check: func(t *testing.T, fm store.TicketFrontmatter) {
+			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
 				requireScalarString(t, fm, "id", "018f5f25-7e7d-7f0a-8c5c-123456789abc")
 				requireScalarInt(t, fm, "schema_version", 1)
@@ -60,14 +60,14 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"tags: [ops, \"on-call\"]",
 			}, "\n"),
 			tail: "body text\n",
-			check: func(t *testing.T, fm store.TicketFrontmatter) {
+			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
 				requireList(t, fm, "blocked-by", []string{"abc", "def"})
 				requireList(t, fm, "tags", []string{"ops", "on-call"})
-				requireObject(t, fm, "meta", map[string]store.Scalar{
-					"owner":   {Kind: store.ScalarString, String: "alice"},
-					"retries": {Kind: store.ScalarInt, Int: 3},
-					"urgent":  {Kind: store.ScalarBool, Bool: false},
+				requireObject(t, fm, "meta", map[string]frontmatter.Scalar{
+					"owner":   {Kind: frontmatter.ScalarString, String: "alice"},
+					"retries": {Kind: frontmatter.ScalarInt, Int: 3},
+					"urgent":  {Kind: frontmatter.ScalarBool, Bool: false},
 				})
 			},
 		},
@@ -75,7 +75,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 			name: "empty list",
 			fm:   "blocked-by: []",
 			tail: "",
-			check: func(t *testing.T, fm store.TicketFrontmatter) {
+			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
 				requireList(t, fm, "blocked-by", []string{})
 			},
@@ -88,7 +88,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"status: open",
 			}, "\n"),
 			tail: "",
-			check: func(t *testing.T, fm store.TicketFrontmatter) {
+			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
 				requireList(t, fm, "blocked-by", []string{"abc"})
 				requireScalarString(t, fm, "status", "open")
@@ -102,10 +102,10 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"status: open",
 			}, "\n"),
 			tail: "",
-			check: func(t *testing.T, fm store.TicketFrontmatter) {
+			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
-				requireObject(t, fm, "meta", map[string]store.Scalar{
-					"owner": {Kind: store.ScalarString, String: "alice"},
+				requireObject(t, fm, "meta", map[string]frontmatter.Scalar{
+					"owner": {Kind: frontmatter.ScalarString, String: "alice"},
 				})
 				requireScalarString(t, fm, "status", "open")
 			},
@@ -116,7 +116,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"delta: -12",
 			}, "\n"),
 			tail: "",
-			check: func(t *testing.T, fm store.TicketFrontmatter) {
+			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
 				requireScalarInt(t, fm, "delta", -12)
 			},
@@ -129,7 +129,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 
 			payload := wrapFrontmatter(tc.fm, tc.tail)
 
-			fm, tail, err := store.ParseFrontmatter([]byte(payload))
+			fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
 			if err != nil {
 				t.Fatalf("parse frontmatter: %v", err)
 			}
@@ -144,15 +144,15 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 }
 
 // Contract: frontmatter marshal keeps delimiter defaults and key ordering stable.
-func Test_TicketFrontmatter_MarshalYAML_Returns_Delimited_Output_When_Defaults(t *testing.T) {
+func Test_Frontmatter_MarshalYAML_Returns_Delimited_Output_When_Defaults(t *testing.T) {
 	t.Parallel()
 
-	fm := store.TicketFrontmatter{
-		"type":           {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "task"}},
-		"id":             {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "123"}},
-		"schema_version": {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarInt, Int: 1}},
-		"status":         {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "open"}},
-		"priority":       {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarInt, Int: 2}},
+	fm := frontmatter.Frontmatter{
+		"type":           {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "task"}},
+		"id":             {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "123"}},
+		"schema_version": {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 1}},
+		"status":         {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "open"}},
+		"priority":       {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 2}},
 	}
 
 	got, err := fm.MarshalYAML()
@@ -177,16 +177,16 @@ func Test_TicketFrontmatter_MarshalYAML_Returns_Delimited_Output_When_Defaults(t
 }
 
 // Contract: frontmatter marshal can omit delimiters when requested.
-func Test_TicketFrontmatter_MarshalYAML_Omits_Delimiters_When_Option_Set(t *testing.T) {
+func Test_Frontmatter_MarshalYAML_Omits_Delimiters_When_Option_Set(t *testing.T) {
 	t.Parallel()
 
-	fm := store.TicketFrontmatter{
-		"id":             {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "123"}},
-		"schema_version": {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarInt, Int: 1}},
-		"status":         {Kind: store.ValueScalar, Scalar: store.Scalar{Kind: store.ScalarString, String: "open"}},
+	fm := frontmatter.Frontmatter{
+		"id":             {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "123"}},
+		"schema_version": {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 1}},
+		"status":         {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "open"}},
 	}
 
-	got, err := fm.MarshalYAML(store.WithYAMLDelimiters(false))
+	got, err := fm.MarshalYAML(frontmatter.WithYAMLDelimiters(false))
 	if err != nil {
 		t.Fatalf("marshal yaml: %v", err)
 	}
@@ -195,6 +195,39 @@ func Test_TicketFrontmatter_MarshalYAML_Omits_Delimiters_When_Option_Set(t *test
 		"id: 123",
 		"schema_version: 1",
 		"status: open",
+		"",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("yaml output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+}
+
+// Contract: frontmatter marshal respects custom key order.
+func Test_Frontmatter_MarshalYAML_Uses_Custom_Key_Order_When_Option_Set(t *testing.T) {
+	t.Parallel()
+
+	fm := frontmatter.Frontmatter{
+		"type":           {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "task"}},
+		"id":             {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "123"}},
+		"schema_version": {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 1}},
+		"status":         {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "open"}},
+		"priority":       {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 2}},
+	}
+
+	got, err := fm.MarshalYAML(frontmatter.WithKeyOrder([]string{"id", "schema_version", "type", "status"}))
+	if err != nil {
+		t.Fatalf("marshal yaml: %v", err)
+	}
+
+	// priority is omitted because it's not in the key order
+	want := strings.Join([]string{
+		"---",
+		"id: 123",
+		"schema_version: 1",
+		"type: task",
+		"status: open",
+		"---",
 		"",
 	}, "\n")
 
@@ -295,7 +328,7 @@ func Test_FrontmatterParser_ReturnsError_When_ShapeInvalid(t *testing.T) {
 
 			payload := wrapFrontmatter(tc.fm, "tail\n")
 
-			_, _, err := store.ParseFrontmatter([]byte(payload))
+			_, _, err := frontmatter.ParseFrontmatter([]byte(payload))
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -351,7 +384,7 @@ func Test_FrontmatterParser_ReturnsError_When_UnsupportedScalar(t *testing.T) {
 
 			payload := wrapFrontmatter(tc.fm, "")
 
-			_, _, err := store.ParseFrontmatter([]byte(payload))
+			_, _, err := frontmatter.ParseFrontmatter([]byte(payload))
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -371,7 +404,7 @@ func Test_FrontmatterParser_ReturnsError_When_LineLimitExceeded(t *testing.T) {
 	content := strings.TrimSuffix(builder.String(), "\n")
 	payload := wrapFrontmatter(content, "")
 
-	_, _, err := store.ParseFrontmatter([]byte(payload))
+	_, _, err := frontmatter.ParseFrontmatter([]byte(payload))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -389,7 +422,7 @@ func Test_FrontmatterParser_ReturnsValues_When_LineLimitDisabled(t *testing.T) {
 	content := strings.TrimSuffix(builder.String(), "\n")
 	payload := wrapFrontmatter(content, "")
 
-	_, _, err := store.ParseFrontmatter([]byte(payload), store.WithLineLimit(0))
+	_, _, err := frontmatter.ParseFrontmatter([]byte(payload), frontmatter.WithLineLimit(0))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -401,7 +434,7 @@ func Test_FrontmatterParser_ReturnsTail_When_DefaultTrimEnabled(t *testing.T) {
 
 	payload := wrapFrontmatter("status: open", "\n\nBody\n")
 
-	_, tail, err := store.ParseFrontmatter([]byte(payload))
+	_, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -417,7 +450,7 @@ func Test_FrontmatterParser_ReturnsTail_When_TrimLeadingBlankTailDisabled(t *tes
 
 	payload := wrapFrontmatter("status: open", "\n\nBody\n")
 
-	_, tail, err := store.ParseFrontmatter([]byte(payload), store.WithTrimLeadingBlankTail(false))
+	_, tail, err := frontmatter.ParseFrontmatter([]byte(payload), frontmatter.WithTrimLeadingBlankTail(false))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -433,7 +466,7 @@ func Test_FrontmatterParser_ReturnsValues_When_DelimitersOptional(t *testing.T) 
 
 	payload := "status: open\npriority: 2\n"
 
-	fm, tail, err := store.ParseFrontmatter([]byte(payload), store.WithRequireDelimiter(false))
+	fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload), frontmatter.WithRequireDelimiter(false))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -472,7 +505,7 @@ func Test_FrontmatterParser_ReturnsError_When_DelimitersMissing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, _, err := store.ParseFrontmatter([]byte(tc.src))
+			_, _, err := frontmatter.ParseFrontmatter([]byte(tc.src))
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -486,7 +519,7 @@ func Test_FrontmatterParser_ReturnsTail_When_NoTrailingNewline(t *testing.T) {
 
 	payload := "---\nstatus: open\n---"
 
-	fm, tail, err := store.ParseFrontmatter([]byte(payload))
+	fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -504,7 +537,7 @@ func Test_FrontmatterParser_ReturnsTail_When_MultipleDelimiters(t *testing.T) {
 
 	payload := "---\nstatus: open\n---\n---\nbody\n"
 
-	fm, tail, err := store.ParseFrontmatter([]byte(payload))
+	fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -526,7 +559,7 @@ func Test_FrontmatterReader_ReturnsValues_When_Delimited(t *testing.T) {
 		"status: open",
 	}, "\n"), "# Title\nBody\n")
 
-	fm, tailReader, err := store.ParseFrontmatterReader(strings.NewReader(payload))
+	fm, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -551,7 +584,7 @@ func Test_FrontmatterParser_ReturnsTail_When_CRLFInput(t *testing.T) {
 
 	payload := "---\r\nstatus: open\r\n---\r\n---\r\nbody\r\n"
 
-	_, tail, err := store.ParseFrontmatter([]byte(payload))
+	_, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -567,7 +600,7 @@ func Test_FrontmatterParser_ReturnsEmpty_When_NoKeys(t *testing.T) {
 
 	payload := wrapFrontmatter("", "body\n")
 
-	fm, tail, err := store.ParseFrontmatter([]byte(payload))
+	fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -607,7 +640,7 @@ func Test_FrontmatterReader_ReturnsError_When_DelimitersMissing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, _, err := store.ParseFrontmatterReader(strings.NewReader(tc.src))
+			_, _, err := frontmatter.ParseFrontmatterReader(strings.NewReader(tc.src))
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -628,7 +661,7 @@ func Test_FrontmatterReader_ReturnsError_When_LineLimitExceeded(t *testing.T) {
 
 	builder.WriteString("---\n")
 
-	_, _, err := store.ParseFrontmatterReader(strings.NewReader(builder.String()))
+	_, _, err := frontmatter.ParseFrontmatterReader(strings.NewReader(builder.String()))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -640,7 +673,7 @@ func Test_FrontmatterReader_ReturnsTail_When_DefaultTrimEnabled(t *testing.T) {
 
 	payload := wrapFrontmatter("status: open", "\n\nBody\n")
 
-	_, tailReader, err := store.ParseFrontmatterReader(strings.NewReader(payload))
+	_, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -661,7 +694,7 @@ func Test_FrontmatterReader_ReturnsTail_When_TrimLeadingBlankTailDisabled(t *tes
 
 	payload := wrapFrontmatter("status: open", "\n\nBody\n")
 
-	_, tailReader, err := store.ParseFrontmatterReader(strings.NewReader(payload), store.WithTrimLeadingBlankTail(false))
+	_, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload), frontmatter.WithTrimLeadingBlankTail(false))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -682,7 +715,7 @@ func Test_FrontmatterReader_ReturnsValues_When_DelimitersOptional(t *testing.T) 
 
 	payload := "status: open\npriority: 2\n"
 
-	fm, tailReader, err := store.ParseFrontmatterReader(strings.NewReader(payload), store.WithRequireDelimiter(false))
+	fm, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload), frontmatter.WithRequireDelimiter(false))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -706,7 +739,7 @@ func Test_FrontmatterReader_ReturnsEmptyTail_When_NoBody(t *testing.T) {
 
 	payload := wrapFrontmatter("status: open", "")
 
-	fm, tailReader, err := store.ParseFrontmatterReader(strings.NewReader(payload))
+	fm, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -723,8 +756,8 @@ func Test_FrontmatterReader_ReturnsEmptyTail_When_NoBody(t *testing.T) {
 	requireScalarString(t, fm, "status", "open")
 }
 
-func wrapFrontmatter(frontmatter string, tail string) string {
-	if frontmatter == "" {
+func wrapFrontmatter(fmContent string, tail string) string {
+	if fmContent == "" {
 		return strings.Join([]string{
 			"---",
 			"---",
@@ -734,7 +767,7 @@ func wrapFrontmatter(frontmatter string, tail string) string {
 
 	return strings.Join([]string{
 		"---",
-		frontmatter,
+		fmContent,
 		"---",
 		tail,
 	}, "\n")
@@ -757,13 +790,13 @@ func Benchmark_FrontmatterParser_Parse(b *testing.B) {
 
 	b.Run("bytes", func(b *testing.B) {
 		for range b.N {
-			_, _, _ = store.ParseFrontmatter(payload)
+			_, _, _ = frontmatter.ParseFrontmatter(payload)
 		}
 	})
 
 	b.Run("reader", func(b *testing.B) {
 		for range b.N {
-			_, _, _ = store.ParseFrontmatterReader(bytes.NewReader(payload))
+			_, _, _ = frontmatter.ParseFrontmatterReader(bytes.NewReader(payload))
 		}
 	})
 
@@ -802,55 +835,55 @@ func Benchmark_FrontmatterParser_Parse(b *testing.B) {
 		b.SetBytes(int64(len(typical)))
 
 		for range b.N {
-			_, _, _ = store.ParseFrontmatter(typical)
+			_, _, _ = frontmatter.ParseFrontmatter(typical)
 		}
 	})
 }
 
-func requireScalarString(t *testing.T, fm store.TicketFrontmatter, key, want string) {
+func requireScalarString(t *testing.T, fm frontmatter.Frontmatter, key, want string) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
-	if value.Kind != store.ValueScalar {
+	if value.Kind != frontmatter.ValueScalar {
 		t.Fatalf("%s: expected scalar", key)
 	}
 
-	if value.Scalar.Kind != store.ScalarString || value.Scalar.String != want {
+	if value.Scalar.Kind != frontmatter.ScalarString || value.Scalar.String != want {
 		t.Fatalf("%s: expected string %q", key, want)
 	}
 }
 
-func requireScalarInt(t *testing.T, fm store.TicketFrontmatter, key string, want int64) {
+func requireScalarInt(t *testing.T, fm frontmatter.Frontmatter, key string, want int64) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
-	if value.Kind != store.ValueScalar {
+	if value.Kind != frontmatter.ValueScalar {
 		t.Fatalf("%s: expected scalar", key)
 	}
 
-	if value.Scalar.Kind != store.ScalarInt || value.Scalar.Int != want {
+	if value.Scalar.Kind != frontmatter.ScalarInt || value.Scalar.Int != want {
 		t.Fatalf("%s: expected int %d", key, want)
 	}
 }
 
-func requireScalarBool(t *testing.T, fm store.TicketFrontmatter, key string, want bool) {
+func requireScalarBool(t *testing.T, fm frontmatter.Frontmatter, key string, want bool) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
-	if value.Kind != store.ValueScalar {
+	if value.Kind != frontmatter.ValueScalar {
 		t.Fatalf("%s: expected scalar", key)
 	}
 
-	if value.Scalar.Kind != store.ScalarBool || value.Scalar.Bool != want {
+	if value.Scalar.Kind != frontmatter.ScalarBool || value.Scalar.Bool != want {
 		t.Fatalf("%s: expected bool %v", key, want)
 	}
 }
 
-func requireList(t *testing.T, fm store.TicketFrontmatter, key string, want []string) {
+func requireList(t *testing.T, fm frontmatter.Frontmatter, key string, want []string) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
-	if value.Kind != store.ValueList {
+	if value.Kind != frontmatter.ValueList {
 		t.Fatalf("%s: expected list", key)
 	}
 
@@ -859,11 +892,11 @@ func requireList(t *testing.T, fm store.TicketFrontmatter, key string, want []st
 	}
 }
 
-func requireObject(t *testing.T, fm store.TicketFrontmatter, key string, want map[string]store.Scalar) {
+func requireObject(t *testing.T, fm frontmatter.Frontmatter, key string, want map[string]frontmatter.Scalar) {
 	t.Helper()
 
 	value := requireValue(t, fm, key)
-	if value.Kind != store.ValueObject {
+	if value.Kind != frontmatter.ValueObject {
 		t.Fatalf("%s: expected object", key)
 	}
 
@@ -872,7 +905,7 @@ func requireObject(t *testing.T, fm store.TicketFrontmatter, key string, want ma
 	}
 }
 
-func requireValue(t *testing.T, fm store.TicketFrontmatter, key string) store.Value {
+func requireValue(t *testing.T, fm frontmatter.Frontmatter, key string) frontmatter.Value {
 	t.Helper()
 
 	value, ok := fm[key]

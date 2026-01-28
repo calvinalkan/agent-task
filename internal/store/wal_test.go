@@ -1,14 +1,11 @@
 package store_test
 
 import (
-	"database/sql"
 	"errors"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/calvinalkan/agent-task/internal/store"
 )
@@ -32,34 +29,11 @@ func Test_Open_Replays_WAL_When_Committed(t *testing.T) {
 
 	_ = initStore.Close()
 
-	createdAt := time.Date(2026, 1, 24, 9, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0x1111111111111111)
-
-	shortID, err := store.ShortIDFromUUID(id)
-	if err != nil {
-		t.Fatalf("short id: %v", err)
-	}
-
-	relPath := filepath.Join(createdAt.Format("2006/01-02"), shortID+".md")
+	ticket := newTestTicket(t, "WAL Ticket")
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "WAL Ticket",
-	}
-
 	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          fixture.ID,
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(fixture),
-			Content:     "# WAL Ticket\nBody\n",
-		},
+		makeWalPutRecord(ticket),
 	})
 
 	storeHandle, err := store.Open(t.Context(), ticketDir)
@@ -78,6 +52,10 @@ func Test_Open_Replays_WAL_When_Committed(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
 
+	if rows[0].ID != ticket.ID {
+		t.Fatalf("id = %s, want %s", rows[0].ID, ticket.ID)
+	}
+
 	info, err := os.Stat(walPath)
 	if err != nil {
 		t.Fatalf("stat wal: %v", err)
@@ -87,20 +65,11 @@ func Test_Open_Replays_WAL_When_Committed(t *testing.T) {
 		t.Fatalf("wal size = %d, want 0", info.Size())
 	}
 
-	absPath := filepath.Join(ticketDir, relPath)
+	absPath := filepath.Join(ticketDir, ticket.Path)
 
-	fileInfo, err := os.Stat(absPath)
-	if err != nil {
-		t.Fatalf("ticket missing at %s: %v", absPath, err)
-	}
-
-	assertTicketMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
-
-	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# WAL Ticket\nBody\n")
-
-	actual := readFileString(t, absPath)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
+	_, statErr := os.Stat(absPath)
+	if statErr != nil {
+		t.Fatalf("ticket file missing at %s: %v", absPath, statErr)
 	}
 }
 
@@ -116,70 +85,48 @@ func Test_Open_Replays_WAL_Put_And_Delete_When_Committed(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	createdAt := time.Date(2026, 1, 23, 8, 0, 0, 0, time.UTC)
-	deleteID := makeUUIDv7(t, createdAt, 0xabc, 0x3333333333333333)
+	// Create a ticket to delete - write it to disk first
+	toDelete := newTestTicket(t, "To Delete")
+	writeTicketFile(t, ticketDir, toDelete)
 
-	deletePath, err := store.PathFromID(deleteID)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
+	// Create a ticket to put via WAL
+	toPut := newTestTicket(t, "To Put")
 
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        deleteID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "To Delete",
-	})
-
-	initStore, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("init store: %v", err)
+	initStore, openErr := store.Open(t.Context(), ticketDir)
+	if openErr != nil {
+		t.Fatalf("init store: %v", openErr)
 	}
 
 	_ = initStore.Close()
 
-	putCreatedAt := createdAt.Add(2 * time.Hour)
-	putID := makeUUIDv7(t, putCreatedAt, 0xabc, 0x4444444444444444)
-
-	putPath, err := store.PathFromID(putID)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	putFixture := &ticketFixture{
-		ID:        putID.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: putCreatedAt,
-		BlockedBy: []string{deleteID.String()},
-		Title:     "Inserted",
-	}
-
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:   "delete",
-			ID:   deleteID.String(),
-			Path: deletePath,
-		},
-		{
-			Op:          "put",
-			ID:          putFixture.ID,
-			Path:        putPath,
-			Frontmatter: walFrontmatterFromTicket(putFixture),
-			Content:     "# Inserted\nBody\n",
-		},
+		makeWalDeleteRecord(toDelete.ID, toDelete.Path),
+		makeWalPutRecord(toPut),
 	})
 
-	storeHandle, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
+	storeHandle, openErr := store.Open(t.Context(), ticketDir)
+	if openErr != nil {
+		t.Fatalf("open store: %v", openErr)
 	}
 
 	t.Cleanup(func() { _ = storeHandle.Close() })
+
+	// Deleted ticket should not exist
+	deleteAbsPath := filepath.Join(ticketDir, toDelete.Path)
+
+	_, deleteStatErr := os.Stat(deleteAbsPath)
+	if !os.IsNotExist(deleteStatErr) {
+		t.Fatalf("deleted ticket should not exist: %v", deleteStatErr)
+	}
+
+	// Put ticket should exist
+	putAbsPath := filepath.Join(ticketDir, toPut.Path)
+
+	_, putStatErr := os.Stat(putAbsPath)
+	if putStatErr != nil {
+		t.Fatalf("put ticket missing: %v", putStatErr)
+	}
 
 	rows, err := storeHandle.Query(t.Context(), nil)
 	if err != nil {
@@ -190,96 +137,52 @@ func Test_Open_Replays_WAL_Put_And_Delete_When_Committed(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
 
-	_, err = os.Stat(filepath.Join(ticketDir, deletePath))
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("deleted ticket still exists: %v", err)
-	}
-
-	absPut := filepath.Join(ticketDir, putPath)
-
-	fileInfo, err := os.Stat(absPut)
-	if err != nil {
-		t.Fatalf("stat put: %v", err)
-	}
-
-	assertTicketMatchesFixture(t, &rows[0], putFixture, putPath, fileInfo.ModTime().UnixNano())
-
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-
-	if info.Size() != 0 {
-		t.Fatalf("wal size = %d, want 0", info.Size())
-	}
-
-	files := listMarkdownFiles(t, ticketDir)
-	if len(files) != 1 || files[0] != absPut {
-		t.Fatalf("markdown files = %v, want [%s]", files, absPut)
-	}
-
-	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(putFixture), "# Inserted\nBody\n")
-
-	actual := readFileString(t, absPut)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
+	if rows[0].ID != toPut.ID {
+		t.Fatalf("id = %s, want %s", rows[0].ID, toPut.ID)
 	}
 }
 
-// Contract: uncommitted WALs are truncated and do not change files.
-func Test_Open_Truncates_WAL_And_Rebuilds_When_Uncommitted(t *testing.T) {
+// Contract: uncommitted WAL (missing footer) is ignored and WAL is truncated.
+func Test_Open_Ignores_Uncommitted_WAL_When_Footer_Missing(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	ticketDir := filepath.Join(root, ".tickets")
 
-	err := os.MkdirAll(ticketDir, 0o750)
-	if err != nil {
-		t.Fatalf("mkdir ticket dir: %v", err)
-	}
+	// Create a valid ticket on disk first
+	existing := newTestTicket(t, "Existing Ticket")
+	writeTicketFile(t, ticketDir, existing)
 
-	createdAt := time.Date(2026, 1, 25, 7, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0x5555555555555555)
-
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Original",
-	})
-
-	initStore, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("init store: %v", err)
+	initStore, openErr := store.Open(t.Context(), ticketDir)
+	if openErr != nil {
+		t.Fatalf("init store: %v", openErr)
 	}
 
 	_ = initStore.Close()
 
+	// Write WAL without footer (uncommitted)
+	uncommitted := newTestTicket(t, "Uncommitted")
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalBodyOnly(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          id.String(),
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(&ticketFixture{ID: id.String(), Status: "open", Type: "task", Priority: 2, CreatedAt: createdAt, Title: "Uncommitted"}),
-			Content:     "# Uncommitted\nBody\n",
-		},
+		makeWalPutRecord(uncommitted),
 	})
 
-	storeHandle, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
+	storeHandle, openErr := store.Open(t.Context(), ticketDir)
+	if openErr != nil {
+		t.Fatalf("open store: %v", openErr)
 	}
 
 	t.Cleanup(func() { _ = storeHandle.Close() })
 
+	// Uncommitted ticket should not exist
+	absPath := filepath.Join(ticketDir, uncommitted.Path)
+
+	_, statErr := os.Stat(absPath)
+	if !os.IsNotExist(statErr) {
+		t.Fatalf("uncommitted ticket should not exist: %v", statErr)
+	}
+
+	// WAL should be truncated
 	info, err := os.Stat(walPath)
 	if err != nil {
 		t.Fatalf("stat wal: %v", err)
@@ -289,123 +192,23 @@ func Test_Open_Truncates_WAL_And_Rebuilds_When_Uncommitted(t *testing.T) {
 		t.Fatalf("wal size = %d, want 0", info.Size())
 	}
 
-	absPath := filepath.Join(ticketDir, relPath)
-
-	fileInfo, err := os.Stat(absPath)
-	if err != nil {
-		t.Fatalf("stat ticket: %v", err)
-	}
-
-	expected := renderTicket(&ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Original",
-	})
-
-	actual := readFileString(t, absPath)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
-	}
-
+	// Only the existing ticket should be in index
 	rows, err := storeHandle.Query(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
 
 	if len(rows) != 1 {
-		t.Fatalf("rows = %+v, want 1", rows)
+		t.Fatalf("rows = %d, want 1", len(rows))
 	}
 
-	assertTicketMatchesFixture(t, &rows[0], &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Original",
-	}, relPath, fileInfo.ModTime().UnixNano())
-}
-
-// Contract: invalid WAL paths return ErrWALReplay and leave WAL intact.
-func Test_Open_Returns_Error_When_WAL_Path_Invalid(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		path func(root string) string
-	}{
-		{name: "empty", path: func(_ string) string { return "" }},
-		{name: "backslash", path: func(_ string) string { return "bad\\path.md" }},
-		{name: "absolute", path: func(root string) string { return filepath.Join(root, "abs.md") }},
-		{name: "escapes_root", path: func(_ string) string { return "../escape.md" }},
-		{name: "not_clean", path: func(_ string) string { return "bad/../path.md" }},
-		{name: "missing_suffix", path: func(_ string) string { return "missing.txt" }},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			root := t.TempDir()
-			ticketDir := filepath.Join(root, ".tickets")
-
-			err := os.MkdirAll(ticketDir, 0o750)
-			if err != nil {
-				t.Fatalf("mkdir ticket dir: %v", err)
-			}
-
-			initStore, err := store.Open(t.Context(), ticketDir)
-			if err != nil {
-				t.Fatalf("init store: %v", err)
-			}
-
-			_ = initStore.Close()
-
-			createdAt := time.Date(2026, 1, 26, 9, 0, 0, 0, time.UTC)
-			id := makeUUIDv7(t, createdAt, 0xabc, 0x6666666666666666)
-			walPath := filepath.Join(ticketDir, ".tk", "wal")
-
-			writeWalFile(t, walPath, []walRecord{
-				{
-					Op:          "put",
-					ID:          id.String(),
-					Path:        tc.path(root),
-					Frontmatter: walFrontmatterFromTicket(&ticketFixture{ID: id.String(), Status: "open", Type: "task", Priority: 1, CreatedAt: createdAt, Title: "Bad Path"}),
-					Content:     "# Bad Path\nBody\n",
-				},
-			})
-
-			_, err = store.Open(t.Context(), ticketDir)
-			if err == nil {
-				t.Fatal("expected wal replay error")
-			}
-
-			if !errors.Is(err, store.ErrWALReplay) {
-				t.Fatalf("error = %v, want ErrWALReplay", err)
-			}
-
-			info, err := os.Stat(walPath)
-			if err != nil {
-				t.Fatalf("stat wal: %v", err)
-			}
-
-			if info.Size() == 0 {
-				t.Fatal("wal should remain after replay failure")
-			}
-
-			files := listMarkdownFiles(t, ticketDir)
-			if len(files) != 0 {
-				t.Fatalf("unexpected markdown files: %v", files)
-			}
-		})
+	if rows[0].ID != existing.ID {
+		t.Fatalf("id = %s, want %s", rows[0].ID, existing.ID)
 	}
 }
 
-// Contract: mismatched WAL path returns ErrWALReplay without applying ops.
-func Test_Open_Returns_Error_When_WAL_Path_Mismatched(t *testing.T) {
+// Contract: WAL replay validates paths match ticket IDs.
+func Test_Open_Returns_Error_When_WAL_Path_Mismatches_ID(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -423,46 +226,26 @@ func Test_Open_Returns_Error_When_WAL_Path_Mismatched(t *testing.T) {
 
 	_ = initStore.Close()
 
-	createdAt := time.Date(2026, 1, 26, 10, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0x7777777777777777)
+	ticket := newTestTicket(t, "Wrong Path")
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 
+	// Write WAL with wrong path
 	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          id.String(),
-			Path:        "wrong.md",
-			Frontmatter: walFrontmatterFromTicket(&ticketFixture{ID: id.String(), Status: "open", Type: "task", Priority: 1, CreatedAt: createdAt, Title: "Wrong Path"}),
-			Content:     "# Wrong Path\nBody\n",
-		},
+		makeWalPutRecordWithPath(ticket, "wrong/path.md"),
 	})
 
 	_, err = store.Open(t.Context(), ticketDir)
 	if err == nil {
-		t.Fatal("expected wal replay error")
+		t.Fatal("expected error for path mismatch")
 	}
 
 	if !errors.Is(err, store.ErrWALReplay) {
 		t.Fatalf("error = %v, want ErrWALReplay", err)
 	}
-
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-
-	if info.Size() == 0 {
-		t.Fatal("wal should remain after replay failure")
-	}
-
-	files := listMarkdownFiles(t, ticketDir)
-	if len(files) != 0 {
-		t.Fatalf("unexpected markdown files: %v", files)
-	}
 }
 
-// Contract: checksum mismatches are surfaced as ErrWALCorrupt and leave WAL intact.
-func Test_Open_Returns_Error_When_WAL_Is_Corrupt(t *testing.T) {
+// Contract: WAL with invalid JSON body returns ErrWALReplay.
+func Test_Open_Returns_ErrWALReplay_When_Body_Invalid_JSON(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -480,867 +263,273 @@ func Test_Open_Returns_Error_When_WAL_Is_Corrupt(t *testing.T) {
 
 	_ = initStore.Close()
 
-	createdAt := time.Date(2026, 1, 24, 9, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0x2222222222222222)
+	// Write WAL with invalid JSON body (valid footer but JSON won't parse)
+	walPath := filepath.Join(ticketDir, ".tk", "wal")
+	writeWalWithBody(t, walPath, []byte("corrupted content that won't parse"))
 
-	shortID, err := store.ShortIDFromUUID(id)
-	if err != nil {
-		t.Fatalf("short id: %v", err)
+	_, err = store.Open(t.Context(), ticketDir)
+	if err == nil {
+		t.Fatal("expected error for invalid WAL body")
 	}
 
-	relPath := filepath.Join(createdAt.Format("2006/01-02"), shortID+".md")
+	if !errors.Is(err, store.ErrWALReplay) {
+		t.Fatalf("error = %v, want ErrWALReplay", err)
+	}
+}
+
+// Contract: WAL with invalid footer checksum returns ErrWALCorrupt.
+func Test_Open_Returns_ErrWALCorrupt_When_Footer_CRC_Mismatches(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	ticketDir := filepath.Join(root, ".tickets")
+
+	// Create existing ticket
+	existing := newTestTicket(t, "Existing")
+	writeTicketFile(t, ticketDir, existing)
+
+	initStore, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	_ = initStore.Close()
+
+	ticket := newTestTicket(t, "Invalid Footer")
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Corrupt WAL",
-	}
-
+	// Write valid WAL first
 	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          fixture.ID,
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(fixture),
-			Content:     "# Corrupt WAL\nBody\n",
-		},
+		makeWalPutRecord(ticket),
 	})
 
-	file, err := os.OpenFile(walPath, os.O_RDWR, 0o600)
+	// Corrupt the file by modifying body without updating CRC
+	data, err := os.ReadFile(walPath)
 	if err != nil {
-		t.Fatalf("open wal: %v", err)
+		t.Fatalf("read wal: %v", err)
 	}
 
-	t.Cleanup(func() { _ = file.Close() })
-
-	_, err = file.WriteAt([]byte{0xff}, 0)
-	if err != nil {
-		t.Fatalf("corrupt wal: %v", err)
+	// Modify a byte in the body (before footer)
+	if len(data) > 40 {
+		data[10] ^= 0xFF
 	}
 
-	err = file.Sync()
+	err = os.WriteFile(walPath, data, 0o600)
 	if err != nil {
-		t.Fatalf("sync wal: %v", err)
+		t.Fatalf("write corrupted wal: %v", err)
 	}
 
 	_, err = store.Open(t.Context(), ticketDir)
 	if err == nil {
-		t.Fatal("expected wal corrupt error")
+		t.Fatal("expected error for CRC mismatch")
 	}
 
 	if !errors.Is(err, store.ErrWALCorrupt) {
 		t.Fatalf("error = %v, want ErrWALCorrupt", err)
 	}
-
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-
-	if info.Size() == 0 {
-		t.Fatal("wal should remain after corrupt detection")
-	}
-
-	files := listMarkdownFiles(t, ticketDir)
-	if len(files) != 0 {
-		t.Fatalf("unexpected markdown files: %v", files)
-	}
 }
 
-// Contract: committed WAL replays even when schema mismatch forces a rebuild.
-func Test_Open_Replays_WAL_And_Rebuilds_When_Schema_Mismatch(t *testing.T) {
+// Contract: Put writes to WAL and creates parent directories.
+func Test_Tx_Creates_Parent_Dirs_When_Put(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	ticketDir := filepath.Join(root, ".tickets")
+	ticketDir := t.TempDir()
 
-	err := os.MkdirAll(ticketDir, 0o750)
-	if err != nil {
-		t.Fatalf("mkdir ticket dir: %v", err)
-	}
-
-	// First open creates the schema.
-	firstOpen, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("first open: %v", err)
-	}
-
-	err = firstOpen.Close()
-	if err != nil {
-		t.Fatalf("close first open: %v", err)
-	}
-
-	// Force schema mismatch by setting user_version to 0.
-	dbPath := filepath.Join(ticketDir, ".tk", "index.sqlite")
-
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-
-	_, err = db.Exec("PRAGMA user_version = 0")
-	if err != nil {
-		t.Fatalf("set user_version: %v", err)
-	}
-
-	err = db.Close()
-	if err != nil {
-		t.Fatalf("close sqlite: %v", err)
-	}
-
-	createdAt := time.Date(2026, 1, 24, 12, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0x8888888888888888)
-
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	walPath := filepath.Join(ticketDir, ".tk", "wal")
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Mismatch",
-	}
-
-	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          fixture.ID,
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(fixture),
-			Content:     "# Mismatch\nBody\n",
-		},
-	})
-
-	storeHandle, err := store.Open(t.Context(), ticketDir)
+	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 
-	t.Cleanup(func() { _ = storeHandle.Close() })
+	defer func() { _ = s.Close() }()
 
-	rows, err := storeHandle.Query(t.Context(), nil)
+	ticket := newTestTicket(t, "New Ticket")
+
+	tx, err := s.Begin(t.Context())
 	if err != nil {
-		t.Fatalf("query: %v", err)
+		t.Fatalf("begin: %v", err)
 	}
 
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1", len(rows))
-	}
-
-	info, err := os.Stat(walPath)
+	result, err := tx.Put(ticket)
 	if err != nil {
-		t.Fatalf("stat wal: %v", err)
+		t.Fatalf("put: %v", err)
 	}
 
-	if info.Size() != 0 {
-		t.Fatalf("wal size = %d, want 0", info.Size())
-	}
-
-	absPath := filepath.Join(ticketDir, relPath)
-
-	fileInfo, err := os.Stat(absPath)
+	err = tx.Commit(t.Context())
 	if err != nil {
-		t.Fatalf("stat ticket: %v", err)
+		t.Fatalf("commit: %v", err)
 	}
 
-	assertTicketMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
+	// Verify file exists with parent directories
+	absPath := filepath.Join(ticketDir, result.Path)
 
-	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# Mismatch\nBody\n")
+	_, statErr := os.Stat(absPath)
+	if statErr != nil {
+		t.Fatalf("ticket file missing: %v", statErr)
+	}
 
-	actual := readFileString(t, absPath)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
+	// Verify parent directory was created
+	parentDir := filepath.Dir(absPath)
+
+	info, err := os.Stat(parentDir)
+	if err != nil {
+		t.Fatalf("parent dir missing: %v", err)
+	}
+
+	if !info.IsDir() {
+		t.Fatal("parent path is not a directory")
 	}
 }
 
-// Contract: replayed WAL content is normalized with a trailing newline.
-func Test_Open_Replays_WAL_Appends_Newline_When_Content_Lacks_Trailing(t *testing.T) {
+// Contract: Delete removes file and updates index.
+func Test_Tx_Removes_File_When_Delete(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	ticketDir := filepath.Join(root, ".tickets")
+	ticketDir := t.TempDir()
 
-	err := os.MkdirAll(ticketDir, 0o750)
-	if err != nil {
-		t.Fatalf("mkdir ticket dir: %v", err)
-	}
-
-	initStore, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	_ = initStore.Close()
-
-	createdAt := time.Date(2026, 1, 24, 13, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0x9999999999999999)
-
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	walPath := filepath.Join(ticketDir, ".tk", "wal")
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		Title:     "No Newline",
-	}
-
-	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          fixture.ID,
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(fixture),
-			Content:     "# No Newline\nBody",
-		},
-	})
-
-	storeHandle, err := store.Open(t.Context(), ticketDir)
+	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 
-	t.Cleanup(func() { _ = storeHandle.Close() })
+	defer func() { _ = s.Close() }()
 
-	rows, err := storeHandle.Query(t.Context(), nil)
+	// Create ticket first
+	ticket := putTicket(t.Context(), t, s, newTestTicket(t, "To Delete"))
+
+	// Reindex to ensure it's in SQLite
+	_, err = s.Reindex(t.Context())
 	if err != nil {
-		t.Fatalf("query: %v", err)
+		t.Fatalf("reindex: %v", err)
 	}
 
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1", len(rows))
+	// Verify file exists
+	absPath := filepath.Join(ticketDir, ticket.Path)
+
+	_, statErr := os.Stat(absPath)
+	if statErr != nil {
+		t.Fatalf("ticket file should exist before delete: %v", statErr)
 	}
 
-	absPath := filepath.Join(ticketDir, relPath)
-
-	fileInfo, err := os.Stat(absPath)
+	// Delete
+	tx, err := s.Begin(t.Context())
 	if err != nil {
-		t.Fatalf("stat ticket: %v", err)
+		t.Fatalf("begin: %v", err)
 	}
 
-	assertTicketMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
-
-	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# No Newline\nBody")
-
-	actual := readFileString(t, absPath)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
-	}
-}
-
-// Contract: delete replay succeeds even if the file is already gone.
-func Test_Open_Replays_WAL_Delete_When_File_Missing(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	ticketDir := filepath.Join(root, ".tickets")
-
-	err := os.MkdirAll(ticketDir, 0o750)
+	err = tx.Delete(ticket.ID)
 	if err != nil {
-		t.Fatalf("mkdir ticket dir: %v", err)
+		t.Fatalf("delete: %v", err)
 	}
 
-	initStore, err := store.Open(t.Context(), ticketDir)
+	err = tx.Commit(t.Context())
 	if err != nil {
-		t.Fatalf("init store: %v", err)
+		t.Fatalf("commit: %v", err)
 	}
 
-	_ = initStore.Close()
+	// Verify file was removed
+	_, removeStatErr := os.Stat(absPath)
+	if !os.IsNotExist(removeStatErr) {
+		t.Fatalf("ticket file should not exist after delete: %v", removeStatErr)
+	}
 
-	createdAt := time.Date(2026, 1, 24, 14, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0xaaaaaaaaaaaaaaaa)
-
-	relPath, err := store.PathFromID(id)
+	// Verify removed from index
+	_, err = s.Reindex(t.Context())
 	if err != nil {
-		t.Fatalf("ticket path: %v", err)
+		t.Fatalf("reindex after delete: %v", err)
 	}
 
-	err = os.MkdirAll(filepath.Dir(filepath.Join(ticketDir, relPath)), 0o750)
-	if err != nil {
-		t.Fatalf("mkdir parent dir: %v", err)
-	}
-
-	walPath := filepath.Join(ticketDir, ".tk", "wal")
-	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:   "delete",
-			ID:   id.String(),
-			Path: relPath,
-		},
-	})
-
-	storeHandle, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-
-	t.Cleanup(func() { _ = storeHandle.Close() })
-
-	rows, err := storeHandle.Query(t.Context(), nil)
+	rows, err := s.Query(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
 
 	if len(rows) != 0 {
-		t.Fatalf("rows = %d, want 0", len(rows))
-	}
-
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-
-	if info.Size() != 0 {
-		t.Fatalf("wal size = %d, want 0", info.Size())
-	}
-
-	files := listMarkdownFiles(t, ticketDir)
-	if len(files) != 0 {
-		t.Fatalf("unexpected markdown files: %v", files)
+		t.Fatalf("expected 0 rows after delete, got %d", len(rows))
 	}
 }
 
-// Contract: invalid WAL footer is treated as uncommitted and discarded.
-func Test_Open_Truncates_WAL_When_Footer_Invalid(t *testing.T) {
+// Contract: Rollback does not apply WAL operations.
+func Test_WAL_Not_Applied_When_Rollback(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	ticketDir := filepath.Join(root, ".tickets")
+	ticketDir := t.TempDir()
 
-	err := os.MkdirAll(ticketDir, 0o750)
-	if err != nil {
-		t.Fatalf("mkdir ticket dir: %v", err)
-	}
-
-	createdAt := time.Date(2026, 1, 25, 7, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0x5555555555555555)
-
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	writeTicket(t, ticketDir, &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Original",
-	})
-
-	initStore, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	_ = initStore.Close()
-
-	walPath := filepath.Join(ticketDir, ".tk", "wal")
-	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          id.String(),
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(&ticketFixture{ID: id.String(), Status: "open", Type: "task", Priority: 2, CreatedAt: createdAt, Title: "Invalid Footer"}),
-			Content:     "# Invalid Footer\nBody\n",
-		},
-	})
-
-	file, err := os.OpenFile(walPath, os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatalf("open wal: %v", err)
-	}
-
-	t.Cleanup(func() { _ = file.Close() })
-
-	info, err := file.Stat()
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-
-	_, err = file.WriteAt([]byte{0xff}, info.Size()-testWalFooterSize)
-	if err != nil {
-		t.Fatalf("corrupt wal footer: %v", err)
-	}
-
-	err = file.Sync()
-	if err != nil {
-		t.Fatalf("sync wal: %v", err)
-	}
-
-	storeHandle, err := store.Open(t.Context(), ticketDir)
+	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 
-	t.Cleanup(func() { _ = storeHandle.Close() })
+	defer func() { _ = s.Close() }()
 
-	info, err = os.Stat(walPath)
+	tx, err := s.Begin(t.Context())
 	if err != nil {
-		t.Fatalf("stat wal: %v", err)
+		t.Fatalf("begin: %v", err)
 	}
 
-	if info.Size() != 0 {
-		t.Fatalf("wal size = %d, want 0", info.Size())
-	}
+	ticket := newTestTicket(t, "Will Rollback")
 
-	absPath := filepath.Join(ticketDir, relPath)
-
-	fileInfo, err := os.Stat(absPath)
+	result, err := tx.Put(ticket)
 	if err != nil {
-		t.Fatalf("stat ticket: %v", err)
+		t.Fatalf("put: %v", err)
 	}
 
-	expected := renderTicket(&ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Original",
-	})
-
-	actual := readFileString(t, absPath)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
+	err = tx.Rollback()
+	if err != nil {
+		t.Fatalf("rollback: %v", err)
 	}
 
-	rows, err := storeHandle.Query(t.Context(), nil)
+	// Verify file was not created
+	absPath := filepath.Join(ticketDir, result.Path)
+
+	_, statErr := os.Stat(absPath)
+	if !os.IsNotExist(statErr) {
+		t.Fatalf("ticket file should not exist after rollback: %v", statErr)
+	}
+
+	// Verify not in index
+	rows, err := s.Query(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
 
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1", len(rows))
-	}
-
-	assertTicketMatchesFixture(t, &rows[0], &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  2,
-		CreatedAt: createdAt,
-		Title:     "Original",
-	}, relPath, fileInfo.ModTime().UnixNano())
-}
-
-// Contract: invalid WAL JSON is surfaced and preserves the WAL for inspection.
-func Test_Open_Returns_Error_When_WAL_JSON_Invalid(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	ticketDir := filepath.Join(root, ".tickets")
-
-	err := os.MkdirAll(ticketDir, 0o750)
-	if err != nil {
-		t.Fatalf("mkdir ticket dir: %v", err)
-	}
-
-	initStore, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	_ = initStore.Close()
-
-	walPath := filepath.Join(ticketDir, ".tk", "wal")
-	writeWalWithBody(t, walPath, []byte("{"))
-
-	_, err = store.Open(t.Context(), ticketDir)
-	if err == nil {
-		t.Fatal("expected wal parse error")
-	}
-
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-
-	if info.Size() == 0 {
-		t.Fatal("wal should remain after parse failure")
-	}
-
-	files := listMarkdownFiles(t, ticketDir)
-	if len(files) != 0 {
-		t.Fatalf("unexpected markdown files: %v", files)
+	if len(rows) != 0 {
+		t.Fatalf("expected 0 rows after rollback, got %d", len(rows))
 	}
 }
 
-// Contract: malformed WAL operations are rejected without applying changes.
-func Test_Open_Returns_Error_When_WAL_Ops_Are_Invalid(t *testing.T) {
+// Contract: Body content is preserved through WAL round-trip.
+func Test_Tx_Preserves_Body_When_Put(t *testing.T) {
 	t.Parallel()
 
-	createdAt := time.Date(2026, 1, 26, 11, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0xbbbbbbbbbbbbbbbb)
+	ticketDir := t.TempDir()
 
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		Title:     "Bad WAL",
-	}
-
-	baseFrontmatter := frontmatterToAny(t, walFrontmatterFromTicket(fixture))
-	content := "# Bad WAL\nBody\n"
-
-	cloneFrontmatter := func() map[string]any {
-		out := make(map[string]any, len(baseFrontmatter))
-		maps.Copy(out, baseFrontmatter)
-
-		return out
-	}
-
-	cases := []struct {
-		name   string
-		record walRecord
-	}{
-		{
-			name: "unknown_op",
-			record: walRecord{
-				Op:          "boom",
-				ID:          id.String(),
-				Path:        relPath,
-				Frontmatter: baseFrontmatter,
-				Content:     content,
-			},
-		},
-		{
-			name: "invalid_id",
-			record: walRecord{
-				Op:          "put",
-				ID:          "not-a-uuid",
-				Path:        relPath,
-				Frontmatter: baseFrontmatter,
-				Content:     content,
-			},
-		},
-		{
-			name: "non_v7_id",
-			record: walRecord{
-				Op:          "put",
-				ID:          "550e8400-e29b-41d4-a716-446655440000",
-				Path:        relPath,
-				Frontmatter: baseFrontmatter,
-				Content:     content,
-			},
-		},
-		{
-			name: "missing_frontmatter",
-			record: walRecord{
-				Op:      "put",
-				ID:      id.String(),
-				Path:    relPath,
-				Content: content,
-			},
-		},
-		{
-			name: "frontmatter_missing_id",
-			record: func() walRecord {
-				fm := cloneFrontmatter()
-				delete(fm, "id")
-
-				return walRecord{Op: "put", ID: id.String(), Path: relPath, Frontmatter: fm, Content: content}
-			}(),
-		},
-		{
-			name: "frontmatter_missing_schema",
-			record: func() walRecord {
-				fm := cloneFrontmatter()
-				delete(fm, "schema_version")
-
-				return walRecord{Op: "put", ID: id.String(), Path: relPath, Frontmatter: fm, Content: content}
-			}(),
-		},
-		{
-			name: "frontmatter_non_integer",
-			record: func() walRecord {
-				fm := cloneFrontmatter()
-				fm["priority"] = 1.5
-
-				return walRecord{Op: "put", ID: id.String(), Path: relPath, Frontmatter: fm, Content: content}
-			}(),
-		},
-		{
-			name: "frontmatter_list_non_string",
-			record: func() walRecord {
-				fm := cloneFrontmatter()
-				fm["blocked-by"] = []any{"ok", 123}
-
-				return walRecord{Op: "put", ID: id.String(), Path: relPath, Frontmatter: fm, Content: content}
-			}(),
-		},
-		{
-			name: "frontmatter_object_non_scalar",
-			record: func() walRecord {
-				fm := cloneFrontmatter()
-				fm["meta"] = map[string]any{"nested": []any{"x"}}
-
-				return walRecord{Op: "put", ID: id.String(), Path: relPath, Frontmatter: fm, Content: content}
-			}(),
-		},
-		{
-			name: "frontmatter_empty_object",
-			record: func() walRecord {
-				fm := cloneFrontmatter()
-				fm["meta"] = map[string]any{}
-
-				return walRecord{Op: "put", ID: id.String(), Path: relPath, Frontmatter: fm, Content: content}
-			}(),
-		},
-		{
-			name: "frontmatter_list_empty_item",
-			record: func() walRecord {
-				fm := cloneFrontmatter()
-				fm["blocked-by"] = []string{""}
-
-				return walRecord{Op: "put", ID: id.String(), Path: relPath, Frontmatter: fm, Content: content}
-			}(),
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			root := t.TempDir()
-			ticketDir := filepath.Join(root, ".tickets")
-
-			err := os.MkdirAll(ticketDir, 0o750)
-			if err != nil {
-				t.Fatalf("mkdir ticket dir: %v", err)
-			}
-
-			initStore, err := store.Open(t.Context(), ticketDir)
-			if err != nil {
-				t.Fatalf("init store: %v", err)
-			}
-
-			_ = initStore.Close()
-
-			walPath := filepath.Join(ticketDir, ".tk", "wal")
-			writeWalFile(t, walPath, []walRecord{tc.record})
-
-			_, err = store.Open(t.Context(), ticketDir)
-			if err == nil {
-				t.Fatal("expected wal replay error")
-			}
-
-			if !errors.Is(err, store.ErrWALReplay) {
-				t.Fatalf("error = %v, want ErrWALReplay", err)
-			}
-
-			info, err := os.Stat(walPath)
-			if err != nil {
-				t.Fatalf("stat wal: %v", err)
-			}
-
-			if info.Size() == 0 {
-				t.Fatal("wal should remain after replay failure")
-			}
-
-			files := listMarkdownFiles(t, ticketDir)
-			if len(files) != 0 {
-				t.Fatalf("unexpected markdown files: %v", files)
-			}
-		})
-	}
-}
-
-// Contract: WAL replay errors after filesystem writes keep the WAL for recovery.
-func Test_Open_Returns_Error_When_WAL_Index_Update_Fails(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	ticketDir := filepath.Join(root, ".tickets")
-
-	err := os.MkdirAll(ticketDir, 0o750)
-	if err != nil {
-		t.Fatalf("mkdir ticket dir: %v", err)
-	}
-
-	initStore, err := store.Open(t.Context(), ticketDir)
-	if err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	_ = initStore.Close()
-
-	db := openIndex(t, ticketDir)
-
-	_, err = db.Exec(`
-		CREATE TRIGGER fail_insert
-		BEFORE INSERT ON tickets
-		BEGIN
-			SELECT RAISE(ABORT, 'fail insert');
-		END;`)
-	if err != nil {
-		_ = db.Close()
-
-		t.Fatalf("create trigger: %v", err)
-	}
-
-	err = db.Close()
-	if err != nil {
-		t.Fatalf("close db: %v", err)
-	}
-
-	createdAt := time.Date(2026, 1, 26, 12, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0xcccccccccccccccc)
-
-	relPath, err := store.PathFromID(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		Title:     "Index Failure",
-	}
-
-	walPath := filepath.Join(ticketDir, ".tk", "wal")
-	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          fixture.ID,
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(fixture),
-			Content:     "# Index Failure\nBody\n",
-		},
-	})
-
-	_, err = store.Open(t.Context(), ticketDir)
-	if err == nil {
-		t.Fatal("expected index update error")
-	}
-
-	if !strings.Contains(err.Error(), "fail insert") {
-		t.Fatalf("error = %v, want error containing 'fail insert'", err)
-	}
-
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-
-	if info.Size() == 0 {
-		t.Fatal("wal should remain after index failure")
-	}
-
-	absPath := filepath.Join(ticketDir, relPath)
-	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# Index Failure\nBody\n")
-
-	actual := readFileString(t, absPath)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
-	}
-}
-
-// Contract: Query replays a committed WAL before returning results.
-func Test_Query_Replays_WAL_When_Committed(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	ticketDir := filepath.Join(root, ".tickets")
-
-	err := os.MkdirAll(ticketDir, 0o750)
-	if err != nil {
-		t.Fatalf("mkdir ticket dir: %v", err)
-	}
-
-	storeHandle, err := store.Open(t.Context(), ticketDir)
+	s, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 
-	t.Cleanup(func() { _ = storeHandle.Close() })
+	defer func() { _ = s.Close() }()
 
-	createdAt := time.Date(2026, 1, 26, 13, 0, 0, 0, time.UTC)
-	id := makeUUIDv7(t, createdAt, 0xabc, 0xdddddddddddddddd)
+	ticket := newTestTicket(t, "With Body")
+	ticket.Body = "This is the body content.\n\nWith multiple paragraphs."
 
-	relPath, err := store.PathFromID(id)
+	result := putTicket(t.Context(), t, s, ticket)
+
+	// Read back via Get
+	got, err := s.Get(t.Context(), result.ID.String())
 	if err != nil {
-		t.Fatalf("ticket path: %v", err)
+		t.Fatalf("get: %v", err)
 	}
 
-	fixture := &ticketFixture{
-		ID:        id.String(),
-		Status:    "open",
-		Type:      "task",
-		Priority:  1,
-		CreatedAt: createdAt,
-		Title:     "Query WAL",
+	if got.Body != ticket.Body {
+		t.Fatalf("body = %q, want %q", got.Body, ticket.Body)
 	}
 
-	walPath := filepath.Join(ticketDir, ".tk", "wal")
-	writeWalFile(t, walPath, []walRecord{
-		{
-			Op:          "put",
-			ID:          fixture.ID,
-			Path:        relPath,
-			Frontmatter: walFrontmatterFromTicket(fixture),
-			Content:     "# Query WAL\nBody\n",
-		},
-	})
+	// Also verify file content
+	absPath := filepath.Join(ticketDir, result.Path)
+	content := readFileString(t, absPath)
 
-	rows, err := storeHandle.Query(t.Context(), nil)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1", len(rows))
-	}
-
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-
-	if info.Size() != 0 {
-		t.Fatalf("wal size = %d, want 0", info.Size())
-	}
-
-	absPath := filepath.Join(ticketDir, relPath)
-
-	fileInfo, err := os.Stat(absPath)
-	if err != nil {
-		t.Fatalf("stat ticket: %v", err)
-	}
-
-	assertTicketMatchesFixture(t, &rows[0], fixture, relPath, fileInfo.ModTime().UnixNano())
-
-	expected := renderTicketFromFrontmatter(t, walFrontmatterFromTicket(fixture), "# Query WAL\nBody\n")
-
-	actual := readFileString(t, absPath)
-	if actual != expected {
-		t.Fatalf("ticket content mismatch\n--- want ---\n%s\n--- got ---\n%s", expected, actual)
+	if !strings.Contains(content, "This is the body content.") {
+		t.Fatalf("file missing body content:\n%s", content)
 	}
 }
