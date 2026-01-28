@@ -57,7 +57,14 @@ func Test_Rebuild_Builds_SQLite_Index_When_Tickets_Are_Valid(t *testing.T) {
 
 	writeIgnoredTicket(t, ticketDir)
 
-	indexed, err := store.Reindex(t.Context(), ticketDir)
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	indexed, err := s.Reindex(t.Context())
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -224,6 +231,14 @@ func Test_Rebuild_Replays_WAL_When_Committed(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
+	// Initialize store first (creates schema)
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
 	createdAt := time.Date(2026, 1, 27, 9, 30, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x2222222222222222)
 
@@ -241,6 +256,7 @@ func Test_Rebuild_Replays_WAL_When_Committed(t *testing.T) {
 		Title:     "Rebuild WAL",
 	}
 
+	// Write WAL after store is open
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalFile(t, walPath, []walRecord{
 		{
@@ -252,7 +268,7 @@ func Test_Rebuild_Replays_WAL_When_Committed(t *testing.T) {
 		},
 	})
 
-	indexed, err := store.Reindex(t.Context(), ticketDir)
+	indexed, err := s.Reindex(t.Context())
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -303,6 +319,7 @@ func Test_Rebuild_Skips_Orphaned_Tickets_When_Path_Mismatches(t *testing.T) {
 
 	createdAt := time.Date(2026, 1, 21, 9, 0, 0, 0, time.UTC)
 
+	// Write valid ticket and initialize store first
 	writeTicket(t, ticketDir, &ticketFixture{
 		ID:        validID.String(),
 		Status:    "open",
@@ -312,6 +329,14 @@ func Test_Rebuild_Skips_Orphaned_Tickets_When_Path_Mismatches(t *testing.T) {
 		Title:     "Valid Ticket",
 	})
 
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	// Add orphan ticket after store is initialized
 	orphanRel := filepath.Join("2026", "01-21", "orphan.md")
 	writeTicketAtPath(t, ticketDir, orphanRel, &ticketFixture{
 		ID:        orphanID.String(),
@@ -322,7 +347,7 @@ func Test_Rebuild_Skips_Orphaned_Tickets_When_Path_Mismatches(t *testing.T) {
 		Title:     "Orphan Ticket",
 	})
 
-	indexed, err := store.Reindex(t.Context(), ticketDir)
+	indexed, err := s.Reindex(t.Context())
 	if err == nil {
 		t.Fatal("expected rebuild error for orphan")
 	}
@@ -335,19 +360,36 @@ func Test_Rebuild_Skips_Orphaned_Tickets_When_Path_Mismatches(t *testing.T) {
 		t.Fatalf("indexed = %d, want 0", indexed)
 	}
 
-	assertIndexMissing(t, ticketDir)
-
 	scanErr := requireIndexScanError(t, err)
 	assertIssuePaths(t, scanErr, []string{filepath.Join(ticketDir, orphanRel)})
+
+	// Verify original index is preserved (only valid ticket indexed)
+	rows, err := s.Query(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+
+	if len(rows) != 1 || rows[0].ID != validID.String() {
+		t.Fatalf("rows = %d, want 1 with valid ticket", len(rows))
+	}
 }
 
 func Test_Rebuild_Returns_Context_Error_When_Canceled(t *testing.T) {
 	t.Parallel()
 
+	ticketDir := t.TempDir()
+
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	indexed, err := store.Reindex(ctx, t.TempDir())
+	indexed, err := s.Reindex(ctx)
 	if err == nil {
 		t.Fatal("expected rebuild error for canceled context")
 	}
@@ -372,6 +414,7 @@ func Test_Rebuild_Indexes_Valid_Tickets_When_Other_Files_Invalid(t *testing.T) {
 		t.Fatalf("uuidv7: %v", err)
 	}
 
+	// Write valid ticket and initialize store first
 	_ = writeTicket(t, ticketDir, &ticketFixture{
 		ID:        id.String(),
 		Status:    "open",
@@ -381,6 +424,14 @@ func Test_Rebuild_Indexes_Valid_Tickets_When_Other_Files_Invalid(t *testing.T) {
 		Title:     "Valid",
 	})
 
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	// Add invalid tickets after store is initialized
 	badID, err := store.NewUUIDv7()
 	if err != nil {
 		t.Fatalf("uuidv7: %v", err)
@@ -417,7 +468,7 @@ func Test_Rebuild_Indexes_Valid_Tickets_When_Other_Files_Invalid(t *testing.T) {
 	missingTitlePath := writeRawTicket(t, ticketDir, missingTitleID, missingTitleContent)
 	assertFileStartsWith(t, ticketDir, missingTitlePath, "---")
 
-	indexed, err := store.Reindex(t.Context(), ticketDir)
+	indexed, err := s.Reindex(t.Context())
 	if err == nil {
 		t.Fatal("expected rebuild error for invalid tickets")
 	}
@@ -430,13 +481,21 @@ func Test_Rebuild_Indexes_Valid_Tickets_When_Other_Files_Invalid(t *testing.T) {
 		t.Fatalf("error = %v, want ErrIndexScan", err)
 	}
 
-	assertIndexMissing(t, ticketDir)
-
 	scanErr := requireIndexScanError(t, err)
 	assertIssuePaths(t, scanErr, []string{
 		filepath.Join(ticketDir, badPath),
 		filepath.Join(ticketDir, missingTitlePath),
 	})
+
+	// Verify original index is preserved (only valid ticket indexed)
+	rows, err := s.Query(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+
+	if len(rows) != 1 || rows[0].ID != id.String() {
+		t.Fatalf("rows = %d, want 1 with valid ticket", len(rows))
+	}
 }
 
 func Test_Rebuild_Skips_Tk_Directory_Files_When_Markdown_Present(t *testing.T) {
@@ -448,7 +507,14 @@ func Test_Rebuild_Skips_Tk_Directory_Files_When_Markdown_Present(t *testing.T) {
 	internalPath := filepath.Join(".tk", "ignored.md")
 	writeRawPath(t, ticketDir, internalPath, "---\nnot: valid\n")
 
-	indexed, err := store.Reindex(t.Context(), ticketDir)
+	s, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	indexed, err := s.Reindex(t.Context())
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -501,21 +567,6 @@ func readBlockers(t *testing.T, db *sql.DB) []blockerRow {
 	}
 
 	return results
-}
-
-func assertIndexMissing(t *testing.T, ticketDir string) {
-	t.Helper()
-
-	path := filepath.Join(ticketDir, ".tk", "index.sqlite")
-
-	_, err := os.Stat(path)
-	if err == nil {
-		t.Fatalf("expected index missing at %s", path)
-	}
-
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stat %s: %v", path, err)
-	}
 }
 
 func requireIndexScanError(t *testing.T, err error) *store.IndexScanError {

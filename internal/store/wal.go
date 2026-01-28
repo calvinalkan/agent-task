@@ -43,10 +43,6 @@ var ErrWALCorrupt = errors.New("wal corrupt")
 // Callers should use errors.Is(err, ErrWALReplay).
 var ErrWALReplay = errors.New("wal replay")
 
-// ErrIndexUpdate reports failures updating the SQLite index from WAL ops.
-// Callers should use errors.Is(err, ErrIndexUpdate).
-var ErrIndexUpdate = errors.New("index update")
-
 // walState describes the WAL state discovered during recovery.
 type walState uint8
 
@@ -64,57 +60,66 @@ type walOp struct {
 	Content     string            `json:"content,omitempty"`
 }
 
-type walRecovery struct {
-	state walState
-	ops   []walOp
-}
-
-// recoverWalLocked replays or discards WAL entries under the WAL lock (must be held by caller).
-// It only handles WAL and filesystem recovery, leaving index policy to the caller.
-func (s *Store) recoverWalLocked(ctx context.Context) (walRecovery, error) {
-	// Recovery runs under the WAL lock so readers never observe mid-commit state.
+// recoverWalLocked recovers any pending WAL state to restore consistency.
+// It must be called under the WAL write lock.
+//
+// Behavior by WAL state:
+//   - Empty: returns nil immediately (no work needed).
+//   - Uncommitted: truncates the incomplete WAL and returns nil.
+//   - Committed: replays ops to filesystem, updates SQLite index, truncates WAL.
+//
+// On success the WAL is always empty. On error the WAL may be partially
+// processed; callers should treat errors as fatal for the Store.
+func (s *Store) recoverWalLocked(ctx context.Context) error {
 	state, body, err := readWalState(s.wal)
 	if err != nil {
-		return walRecovery{}, err
+		return fmt.Errorf("read wal: %w", err)
 	}
 
 	switch state {
 	case walEmpty:
-		return walRecovery{state: walEmpty}, nil
+		return nil
 	case walUncommitted:
-		// Stage: discard partial WAL (no commit point reached).
 		err = truncateWal(s.wal)
 		if err != nil {
-			return walRecovery{}, fmt.Errorf("truncate uncommitted: %w", err)
+			return fmt.Errorf("truncate uncommitted wal: %w", err)
 		}
 
-		return walRecovery{state: walUncommitted}, nil
+		return nil
 	case walCommitted:
-		// Stage: decode WAL ops.
 		ops, err := decodeWalOps(body)
 		if err != nil {
-			return walRecovery{}, fmt.Errorf("decode wal ops: %w", err)
+			return fmt.Errorf("decode wal: %w", err)
 		}
 
-		// Stage: replay filesystem changes.
-		err = s.replayWalOps(ctx, ops)
+		err = s.replayWalOpsToFS(ctx, ops)
 		if err != nil {
-			return walRecovery{}, fmt.Errorf("replay wal ops: %w", err)
+			return fmt.Errorf("replay wal: %w", err)
 		}
 
-		return walRecovery{state: walCommitted, ops: ops}, nil
+		err = s.updateSqliteIndexFromOps(ctx, ops)
+		if err != nil {
+			return fmt.Errorf("update index: %w", err)
+		}
+
+		err = truncateWal(s.wal)
+		if err != nil {
+			return fmt.Errorf("truncate wal: %w", err)
+		}
+
+		return nil
 	default:
-		return walRecovery{}, fmt.Errorf("unknown state %d", state)
+		return fmt.Errorf("unknown wal state %d", state)
 	}
 }
 
 // readWalState inspects the WAL footer and checksum to decide whether the WAL
 // is empty, uncommitted, committed, or corrupt. For committed WALs it returns
-// the validated body bytes.
+// the validated body bytes. Callers should wrap errors with context.
 func readWalState(file fs.File) (walState, []byte, error) {
 	info, err := file.Stat()
 	if err != nil {
-		return walEmpty, nil, fmt.Errorf("stat wal: %w", err)
+		return walEmpty, nil, fmt.Errorf("stat: %w", err)
 	}
 
 	size := info.Size()
@@ -130,7 +135,7 @@ func readWalState(file fs.File) (walState, []byte, error) {
 
 	_, err = file.Seek(size-walFooterSize, io.SeekStart)
 	if err != nil {
-		return walEmpty, nil, fmt.Errorf("seek wal footer: %w", err)
+		return walEmpty, nil, fmt.Errorf("seek footer: %w", err)
 	}
 
 	_, err = io.ReadFull(file, footerBuf)
@@ -139,7 +144,7 @@ func readWalState(file fs.File) (walState, []byte, error) {
 			return walUncommitted, nil, nil
 		}
 
-		return walEmpty, nil, fmt.Errorf("read wal footer: %w", err)
+		return walEmpty, nil, fmt.Errorf("read footer: %w", err)
 	}
 
 	if string(footerBuf[:8]) != walMagic {
@@ -173,43 +178,45 @@ func readWalState(file fs.File) (walState, []byte, error) {
 
 	_, err = file.Seek(0, io.SeekStart)
 	if err != nil {
-		return walEmpty, nil, fmt.Errorf("seek wal body: %w", err)
+		return walEmpty, nil, fmt.Errorf("seek body: %w", err)
 	}
 
 	_, err = io.ReadFull(file, body)
 	if err != nil {
-		return walEmpty, nil, fmt.Errorf("read wal body: %w", err)
+		return walEmpty, nil, fmt.Errorf("read body: %w", err)
 	}
 
 	checksum := crc32.Checksum(body, walCRC32C)
 	if checksum != crc {
-		return walCommitted, nil, fmt.Errorf("wal checksum mismatch (expected %08x got %08x): %w", crc, checksum, ErrWALCorrupt)
+		return walCommitted, nil, fmt.Errorf("%w: checksum mismatch (expected %08x got %08x)", ErrWALCorrupt, crc, checksum)
 	}
 
 	return walCommitted, body, nil
 }
 
 // truncateWal clears the WAL and fsyncs so readers see an empty log.
+// Callers should wrap errors with context.
 func truncateWal(file fs.File) error {
 	fd := file.Fd()
 	if fd == 0 {
-		return errors.New("truncate wal: invalid file descriptor")
+		return errors.New("invalid file descriptor")
 	}
 
 	err := syscall.Ftruncate(int(fd), 0)
 	if err != nil {
-		return fmt.Errorf("truncate wal: %w", err)
+		return fmt.Errorf("ftruncate: %w", err)
 	}
 
 	err = file.Sync()
 	if err != nil {
-		return fmt.Errorf("sync wal: %w", err)
+		return fmt.Errorf("fsync: %w", err)
 	}
 
 	return nil
 }
 
 // decodeWalOps parses the JSONL body into validated operations.
+// Callers should wrap errors with context.
 func decodeWalOps(body []byte) ([]walOp, error) {
 	reader := bufio.NewReader(bytes.NewReader(body))
 	ops := make([]walOp, 0)
@@ -221,7 +228,7 @@ func decodeWalOps(body []byte) ([]walOp, error) {
 				break
 			}
 
-			return nil, fmt.Errorf("read wal line: %w", readErr)
+			return nil, fmt.Errorf("read line: %w", readErr)
 		}
 
 		line = bytes.TrimSpace(line)
@@ -239,7 +246,7 @@ func decodeWalOps(body []byte) ([]walOp, error) {
 
 		unmarshalErr := json.Unmarshal(line, &op)
 		if unmarshalErr != nil {
-			return nil, fmt.Errorf("parse wal line: %w: %w", ErrWALReplay, unmarshalErr)
+			return nil, fmt.Errorf("parse line: %w: %w", ErrWALReplay, unmarshalErr)
 		}
 
 		validated, err := validateWalOp(op)
@@ -258,71 +265,72 @@ func decodeWalOps(body []byte) ([]walOp, error) {
 }
 
 // validateWalOp enforces op shape, ID validity, and canonical path rules.
+// Callers should wrap errors with context.
 func validateWalOp(op walOp) (walOp, error) {
 	if op.Op != walOpPut && op.Op != walOpDelete {
-		return walOp{}, fmt.Errorf("validate wal op %q: %w", op.Op, ErrWALReplay)
+		return walOp{}, fmt.Errorf("invalid op %q: %w", op.Op, ErrWALReplay)
 	}
 
 	err := validateIDString(op.ID)
 	if err != nil {
-		return walOp{}, fmt.Errorf("validate wal id %q: %w: %w", op.ID, ErrWALReplay, err)
+		return walOp{}, fmt.Errorf("invalid id %q: %w: %w", op.ID, ErrWALReplay, err)
 	}
 
 	id, err := uuid.Parse(op.ID)
 	if err != nil {
-		return walOp{}, fmt.Errorf("parse wal id %q: %w: %w", op.ID, ErrWALReplay, err)
+		return walOp{}, fmt.Errorf("parse id %q: %w: %w", op.ID, ErrWALReplay, err)
 	}
 
 	err = validateUUIDv7(id)
 	if err != nil {
-		return walOp{}, fmt.Errorf("validate wal id %q: %w: %w", op.ID, ErrWALReplay, err)
+		return walOp{}, fmt.Errorf("invalid id %q: %w: %w", op.ID, ErrWALReplay, err)
 	}
 
 	if op.Path == "" {
-		return walOp{}, fmt.Errorf("validate wal path: %w", ErrWALReplay)
+		return walOp{}, fmt.Errorf("empty path: %w", ErrWALReplay)
 	}
 
 	if strings.Contains(op.Path, "\\") {
-		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
 	}
 
 	if filepath.IsAbs(op.Path) {
-		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
 	}
 
 	clean := filepath.Clean(op.Path)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
 	}
 
 	if clean != op.Path {
-		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
 	}
 
 	if !strings.HasSuffix(op.Path, ".md") {
-		return walOp{}, fmt.Errorf("validate wal path %q: %w", op.Path, ErrWALReplay)
+		return walOp{}, fmt.Errorf("invalid path %q: %w", op.Path, ErrWALReplay)
 	}
 
 	expected, err := TicketPath(id)
 	if err != nil {
-		return walOp{}, fmt.Errorf("derive wal path for %q: %w: %w", op.ID, ErrWALReplay, err)
+		return walOp{}, fmt.Errorf("derive path for %q: %w: %w", op.ID, ErrWALReplay, err)
 	}
 
 	if filepath.Clean(op.Path) != filepath.Clean(expected) {
-		return walOp{}, fmt.Errorf("validate wal path %q for id %q: %w", op.Path, op.ID, ErrWALReplay)
+		return walOp{}, fmt.Errorf("path mismatch %q for id %q: %w", op.Path, op.ID, ErrWALReplay)
 	}
 
 	if op.Op == walOpPut {
 		if op.Frontmatter == nil {
-			return walOp{}, fmt.Errorf("validate wal op %q missing frontmatter: %w", op.ID, ErrWALReplay)
+			return walOp{}, fmt.Errorf("missing frontmatter for %q: %w", op.ID, ErrWALReplay)
 		}
 	}
 
 	return op, nil
 }
 
-// replayWalOps applies WAL operations to the filesystem using atomic writes.
-func (s *Store) replayWalOps(ctx context.Context, ops []walOp) error {
+// replayWalOpsToFS applies WAL operations to the filesystem using atomic writes.
+func (s *Store) replayWalOpsToFS(ctx context.Context, ops []walOp) error {
 	for _, op := range ops {
 		err := ctx.Err()
 		if err != nil {
@@ -333,7 +341,7 @@ func (s *Store) replayWalOps(ctx context.Context, ops []walOp) error {
 
 		switch op.Op {
 		case walOpPut:
-			content, err := renderTicketFile(op.Frontmatter, op.Content)
+			content, err := ticketToFileContent(op.Frontmatter, op.Content)
 			if err != nil {
 				return fmt.Errorf("render ticket %s: %w", op.ID, err)
 			}
@@ -377,11 +385,12 @@ func (s *Store) replayWalOps(ctx context.Context, ops []walOp) error {
 	return nil
 }
 
-// updateIndexFromOps applies WAL operations to SQLite in a single transaction.
-func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
-	tx, err := s.sql.BeginTx(ctx, nil)
+// updateSqliteIndexFromOps applies WAL operations to SQLite in a single transaction.
+// Callers should wrap errors with context.
+func (s *Store) updateSqliteIndexFromOps(ctx context.Context, ops []walOp) error {
+	tx, err := s.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return fmt.Errorf("update index begin txn: %w: %w", ErrIndexUpdate, err)
+		return fmt.Errorf("begin txn: %w", err)
 	}
 
 	committed := false
@@ -392,57 +401,29 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 		}
 	}()
 
-	insertTicket, err := tx.PrepareContext(ctx, `
-		INSERT OR REPLACE INTO tickets (
-			id,
-			short_id,
-			path,
-			mtime_ns,
-			status,
-			type,
-			priority,
-			assignee,
-			parent,
-			created_at,
-			closed_at,
-			external_ref,
-			title
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	inserter, err := prepareTicketInserter(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("update index prepare insert: %w: %w", ErrIndexUpdate, err)
+		return err
 	}
 
-	defer func() { _ = insertTicket.Close() }()
-
-	insertBlocker, err := tx.PrepareContext(ctx, `
-		INSERT INTO ticket_blockers (ticket_id, blocker_id) VALUES (?, ?)`)
-	if err != nil {
-		return fmt.Errorf("update index prepare blocker insert: %w: %w", ErrIndexUpdate, err)
-	}
-
-	defer func() { _ = insertBlocker.Close() }()
+	defer inserter.Close()
 
 	for _, op := range ops {
 		err = ctx.Err()
 		if err != nil {
-			return fmt.Errorf("update index canceled: %w: %w", ErrIndexUpdate, context.Cause(ctx))
+			return fmt.Errorf("canceled: %w", context.Cause(ctx))
 		}
 
 		switch op.Op {
 		case walOpDelete:
-			_, err = tx.ExecContext(ctx, "DELETE FROM ticket_blockers WHERE ticket_id = ?", op.ID)
+			err = deleteTicket(ctx, tx, op.ID)
 			if err != nil {
-				return fmt.Errorf("update index delete blockers %s: %w: %w", op.ID, ErrIndexUpdate, err)
-			}
-
-			_, err = tx.ExecContext(ctx, "DELETE FROM tickets WHERE id = ?", op.ID)
-			if err != nil {
-				return fmt.Errorf("update index delete ticket %s: %w: %w", op.ID, ErrIndexUpdate, err)
+				return err
 			}
 		case walOpPut:
 			fm := op.Frontmatter
 			if fm == nil {
-				return fmt.Errorf("update index missing frontmatter for %s: %w", op.ID, ErrWALReplay)
+				return fmt.Errorf("missing frontmatter for %s: %w", op.ID, ErrWALReplay)
 			}
 
 			var entry Ticket
@@ -452,55 +433,18 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 				return err
 			}
 
-			_, err = tx.ExecContext(ctx, "DELETE FROM ticket_blockers WHERE ticket_id = ?", entry.ID)
+			err = inserter.Insert(ctx, tx, &entry)
 			if err != nil {
-				return fmt.Errorf("update index clear blockers %s: %w: %w", entry.ID, ErrIndexUpdate, err)
-			}
-
-			assignee := sql.NullString{String: entry.Assignee, Valid: entry.Assignee != ""}
-			parent := sql.NullString{String: entry.Parent, Valid: entry.Parent != ""}
-			external := sql.NullString{String: entry.ExternalRef, Valid: entry.ExternalRef != ""}
-			createdAt := entry.CreatedAt.Unix()
-
-			closedAt := sql.NullInt64{}
-			if entry.ClosedAt != nil {
-				closedAt = sql.NullInt64{Int64: entry.ClosedAt.Unix(), Valid: true}
-			}
-
-			_, err = insertTicket.ExecContext(
-				ctx,
-				entry.ID,
-				entry.ShortID,
-				entry.Path,
-				entry.MtimeNS,
-				entry.Status,
-				entry.Type,
-				entry.Priority,
-				assignee,
-				parent,
-				createdAt,
-				closedAt,
-				external,
-				entry.Title,
-			)
-			if err != nil {
-				return fmt.Errorf("update index insert ticket %s: %w: %w", entry.ID, ErrIndexUpdate, err)
-			}
-
-			for _, blocker := range entry.BlockedBy {
-				_, err = insertBlocker.ExecContext(ctx, entry.ID, blocker)
-				if err != nil {
-					return fmt.Errorf("update index insert blocker %s: %w: %w", entry.ID, ErrIndexUpdate, err)
-				}
+				return err
 			}
 		default:
-			return fmt.Errorf("update index unknown op %q: %w", op.Op, ErrIndexUpdate)
+			return fmt.Errorf("unknown op %q", op.Op)
 		}
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		return fmt.Errorf("update index commit: %w: %w", ErrIndexUpdate, err)
+		return fmt.Errorf("commit: %w", err)
 	}
 
 	committed = true
@@ -509,12 +453,13 @@ func (s *Store) updateIndexFromOps(ctx context.Context, ops []walOp) error {
 }
 
 // indexFromWAL builds an index row for a WAL put after the file write.
+// Callers should wrap errors with context.
 func (s *Store) indexFromWAL(op walOp, fm TicketFrontmatter) (Ticket, error) {
 	absPath := filepath.Join(s.dir, op.Path)
 
 	info, err := s.fs.Stat(absPath)
 	if err != nil {
-		return Ticket{}, fmt.Errorf("index stat %s: %w: %w", absPath, ErrIndexUpdate, err)
+		return Ticket{}, fmt.Errorf("stat %s: %w", absPath, err)
 	}
 
 	stat := fileproc.Stat{
@@ -525,25 +470,26 @@ func (s *Store) indexFromWAL(op walOp, fm TicketFrontmatter) (Ticket, error) {
 
 	entry, _, err := ticketFromFrontmatter(op.Path, absPath, s.dir, stat, fm, strings.NewReader(op.Content))
 	if err != nil {
-		return Ticket{}, fmt.Errorf("index parse %s: %w: %w", op.ID, ErrIndexUpdate, err)
+		return Ticket{}, err // ticketFromFrontmatter already includes context
 	}
 
 	return entry, nil
 }
 
-// renderTicketFile serializes frontmatter and body into a deterministic ticket payload.
-func renderTicketFile(fm TicketFrontmatter, content string) (string, error) {
+// ticketToFileContent serializes frontmatter and body into a deterministic ticket payload.
+// Callers should wrap errors with context.
+func ticketToFileContent(fm TicketFrontmatter, body string) (string, error) {
 	frontmatter, err := fm.MarshalYAML()
 	if err != nil {
-		return "", fmt.Errorf("render frontmatter: %w: %w", ErrWALReplay, err)
+		return "", fmt.Errorf("marshal frontmatter: %w: %w", ErrWALReplay, err)
 	}
 
 	builder := strings.Builder{}
 	builder.WriteString(frontmatter)
 	builder.WriteString("\n")
-	builder.WriteString(content)
+	builder.WriteString(body)
 
-	if !strings.HasSuffix(content, "\n") {
+	if !strings.HasSuffix(body, "\n") {
 		builder.WriteString("\n")
 	}
 

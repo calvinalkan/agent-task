@@ -1,10 +1,12 @@
 package store_test
 
 import (
+	"database/sql"
 	"errors"
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +25,12 @@ func Test_Open_Replays_WAL_When_Committed(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	createdAt := time.Date(2026, 1, 24, 9, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x1111111111111111)
@@ -129,10 +133,12 @@ func Test_Open_Replays_WAL_Put_And_Delete_When_Committed(t *testing.T) {
 		Title:     "To Delete",
 	})
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	putCreatedAt := createdAt.Add(2 * time.Hour)
 	putID := makeUUIDv7(t, putCreatedAt, 0xabc, 0x4444444444444444)
@@ -249,10 +255,12 @@ func Test_Open_Truncates_WAL_And_Rebuilds_When_Uncommitted(t *testing.T) {
 		Title:     "Original",
 	})
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalBodyOnly(t, walPath, []walRecord{
@@ -349,10 +357,12 @@ func Test_Open_Returns_Error_When_WAL_Path_Invalid(t *testing.T) {
 				t.Fatalf("mkdir ticket dir: %v", err)
 			}
 
-			_, err = store.Reindex(t.Context(), ticketDir)
+			initStore, err := store.Open(t.Context(), ticketDir)
 			if err != nil {
-				t.Fatalf("rebuild: %v", err)
+				t.Fatalf("init store: %v", err)
 			}
+
+			_ = initStore.Close()
 
 			createdAt := time.Date(2026, 1, 26, 9, 0, 0, 0, time.UTC)
 			id := makeUUIDv7(t, createdAt, 0xabc, 0x6666666666666666)
@@ -406,10 +416,12 @@ func Test_Open_Returns_Error_When_WAL_Path_Mismatched(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	createdAt := time.Date(2026, 1, 26, 10, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x7777777777777777)
@@ -461,10 +473,12 @@ func Test_Open_Returns_Error_When_WAL_Is_Corrupt(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	createdAt := time.Date(2026, 1, 24, 9, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x2222222222222222)
@@ -547,6 +561,35 @@ func Test_Open_Replays_WAL_And_Rebuilds_When_Schema_Mismatch(t *testing.T) {
 	err := os.MkdirAll(ticketDir, 0o750)
 	if err != nil {
 		t.Fatalf("mkdir ticket dir: %v", err)
+	}
+
+	// First open creates the schema.
+	firstOpen, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+
+	err = firstOpen.Close()
+	if err != nil {
+		t.Fatalf("close first open: %v", err)
+	}
+
+	// Force schema mismatch by setting user_version to 0.
+	dbPath := filepath.Join(ticketDir, ".tk", "index.sqlite")
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+
+	_, err = db.Exec("PRAGMA user_version = 0")
+	if err != nil {
+		t.Fatalf("set user_version: %v", err)
+	}
+
+	err = db.Close()
+	if err != nil {
+		t.Fatalf("close sqlite: %v", err)
 	}
 
 	createdAt := time.Date(2026, 1, 24, 12, 0, 0, 0, time.UTC)
@@ -632,10 +675,12 @@ func Test_Open_Replays_WAL_Appends_Newline_When_Content_Lacks_Trailing(t *testin
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	createdAt := time.Date(2026, 1, 24, 13, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0x9999999999999999)
@@ -711,10 +756,12 @@ func Test_Open_Replays_WAL_Delete_When_File_Missing(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	createdAt := time.Date(2026, 1, 24, 14, 0, 0, 0, time.UTC)
 	id := makeUUIDv7(t, createdAt, 0xabc, 0xaaaaaaaaaaaaaaaa)
@@ -798,10 +845,12 @@ func Test_Open_Truncates_WAL_When_Footer_Invalid(t *testing.T) {
 		Title:     "Original",
 	})
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalFile(t, walPath, []walRecord{
@@ -904,10 +953,12 @@ func Test_Open_Returns_Error_When_WAL_JSON_Invalid(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	walPath := filepath.Join(ticketDir, ".tk", "wal")
 	writeWalWithBody(t, walPath, []byte("{"))
@@ -1083,10 +1134,12 @@ func Test_Open_Returns_Error_When_WAL_Ops_Are_Invalid(t *testing.T) {
 				t.Fatalf("mkdir ticket dir: %v", err)
 			}
 
-			_, err = store.Reindex(t.Context(), ticketDir)
+			initStore, err := store.Open(t.Context(), ticketDir)
 			if err != nil {
-				t.Fatalf("rebuild: %v", err)
+				t.Fatalf("init store: %v", err)
 			}
+
+			_ = initStore.Close()
 
 			walPath := filepath.Join(ticketDir, ".tk", "wal")
 			writeWalFile(t, walPath, []walRecord{tc.record})
@@ -1129,10 +1182,12 @@ func Test_Open_Returns_Error_When_WAL_Index_Update_Fails(t *testing.T) {
 		t.Fatalf("mkdir ticket dir: %v", err)
 	}
 
-	_, err = store.Reindex(t.Context(), ticketDir)
+	initStore, err := store.Open(t.Context(), ticketDir)
 	if err != nil {
-		t.Fatalf("rebuild: %v", err)
+		t.Fatalf("init store: %v", err)
 	}
+
+	_ = initStore.Close()
 
 	db := openIndex(t, ticketDir)
 
@@ -1186,8 +1241,8 @@ func Test_Open_Returns_Error_When_WAL_Index_Update_Fails(t *testing.T) {
 		t.Fatal("expected index update error")
 	}
 
-	if !errors.Is(err, store.ErrIndexUpdate) {
-		t.Fatalf("error = %v, want ErrIndexUpdate", err)
+	if !strings.Contains(err.Error(), "fail insert") {
+		t.Fatalf("error = %v, want error containing 'fail insert'", err)
 	}
 
 	info, err := os.Stat(walPath)

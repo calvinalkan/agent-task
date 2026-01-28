@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,8 +15,6 @@ import (
 
 	"github.com/calvinalkan/fileproc"
 	"github.com/google/uuid"
-
-	"github.com/calvinalkan/agent-task/pkg/fs"
 )
 
 const (
@@ -72,84 +69,52 @@ func (*IndexScanError) Unwrap() error {
 //
 // If any scan errors are encountered, rebuild returns them without touching SQLite
 // to avoid publishing a partial or stale index. Fix the files and rerun rebuild.
-func Reindex(ctx context.Context, dir string) (int, error) {
+//
+// Reindex acquires the WAL lock before rebuilding. It may return [ErrWALCorrupt]
+// or [ErrWALReplay] if recovery fails.
+func (s *Store) Reindex(ctx context.Context) (int, error) {
 	if ctx == nil {
-		return 0, errors.New("rebuild index: context is nil")
+		return 0, errors.New("reindex: context is nil")
 	}
 
-	if dir == "" {
-		return 0, errors.New("rebuild index: directory is empty")
+	if s == nil || s.sql == nil || s.wal == nil {
+		return 0, errors.New("reindex: store is not open")
 	}
 
 	err := ctx.Err()
 	if err != nil {
-		return 0, fmt.Errorf("rebuild index: canceled: %w", context.Cause(ctx))
+		return 0, fmt.Errorf("reindex: canceled: %w", context.Cause(ctx))
 	}
 
-	ticketsDir := filepath.Clean(dir)
-	tkDir := filepath.Join(ticketsDir, ".tk")
+	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+	defer cancel()
 
-	fsReal := fs.NewReal()
-	locker := fs.NewLocker(fsReal)
-	atomicWriter := fs.NewAtomicWriter(fsReal)
-
-	err = fsReal.MkdirAll(tkDir, 0o750)
+	lock, err := s.locker.LockWithTimeout(lockCtx, s.lockPath)
 	if err != nil {
-		return 0, fmt.Errorf("rebuild index: create .tk directory: %w", err)
-	}
-
-	walPath := filepath.Join(tkDir, "wal")
-
-	lock, err := locker.Lock(walPath)
-	if err != nil {
-		return 0, fmt.Errorf("rebuild index: lock wal: %w", err)
+		return 0, fmt.Errorf("reindex: lock wal: %w", err)
 	}
 
 	defer func() { _ = lock.Close() }()
 
-	walFile, err := fsReal.OpenFile(walPath, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return 0, fmt.Errorf("rebuild index: open wal: %w", err)
-	}
+	return s.reindexLocked(ctx)
+}
 
-	defer func() { _ = walFile.Close() }()
-
-	store := &Store{
-		dir:     ticketsDir,
-		fs:      fsReal,
-		locker:  locker,
-		atomic:  atomicWriter,
-		wal:     walFile,
-		walPath: walPath,
-	}
-
-	recovery, err := store.recoverWalLocked(ctx)
+// reindexLocked rebuilds the index under the WAL write lock (must be held by caller).
+// It recovers any pending WAL, scans ticket files, and rebuilds SQLite.
+func (s *Store) reindexLocked(ctx context.Context) (int, error) {
+	err := s.recoverWalLocked(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	entries, scanErr := scanTicketFiles(ctx, ticketsDir)
+	entries, scanErr := scanTicketFiles(ctx, s.dir)
 	if scanErr != nil {
 		return 0, scanErr
 	}
 
-	db, err := openSQLite(ctx, filepath.Join(tkDir, "index.sqlite"))
-	if err != nil {
-		return 0, fmt.Errorf("rebuild index: open sqlite: %w", err)
-	}
-
-	defer func() { _ = db.Close() }()
-
-	indexed, err := reindexSqlInTxn(ctx, db, entries)
+	indexed, err := reindexSQLInTxn(ctx, s.sql, entries)
 	if err != nil {
 		return 0, fmt.Errorf("rebuild index: %w", err)
-	}
-
-	if recovery.state == walCommitted {
-		err = truncateWal(walFile)
-		if err != nil {
-			return 0, fmt.Errorf("rebuild index: truncate wal: %w", err)
-		}
 	}
 
 	return indexed, nil
@@ -232,9 +197,9 @@ func scanTicketFiles(ctx context.Context, root string) ([]fileproc.Result[Ticket
 	return results, nil
 }
 
-// reindexSqlInTxn rebuilds the derived index in a single SQLite transaction.
-func reindexSqlInTxn(ctx context.Context, db *sql.DB, entries []fileproc.Result[Ticket]) (int, error) {
-	tx, err := db.BeginTx(ctx, nil)
+// reindexSQLInTxn rebuilds the derived index in a single SQLite transaction.
+func reindexSQLInTxn(ctx context.Context, db *sql.DB, entries []fileproc.Result[Ticket]) (int, error) {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return 0, fmt.Errorf("begin rebuild txn: %w", err)
 	}
@@ -252,35 +217,12 @@ func reindexSqlInTxn(ctx context.Context, db *sql.DB, entries []fileproc.Result[
 		return 0, err
 	}
 
-	insertTicket, err := tx.PrepareContext(ctx, `
-		INSERT INTO tickets (
-			id,
-			short_id,
-			path,
-			mtime_ns,
-			status,
-			type,
-			priority,
-			assignee,
-			parent,
-			created_at,
-			closed_at,
-			external_ref,
-			title
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	inserter, err := prepareTicketInserter(ctx, tx)
 	if err != nil {
-		return 0, fmt.Errorf("prepare insert: %w", err)
+		return 0, err
 	}
 
-	defer func() { _ = insertTicket.Close() }()
-
-	insertBlocker, err := tx.PrepareContext(ctx, `
-		INSERT INTO ticket_blockers (ticket_id, blocker_id) VALUES (?, ?)`)
-	if err != nil {
-		return 0, fmt.Errorf("prepare blocker insert: %w", err)
-	}
-
-	defer func() { _ = insertBlocker.Close() }()
+	defer inserter.Close()
 
 	indexed := 0
 
@@ -290,47 +232,15 @@ func reindexSqlInTxn(ctx context.Context, db *sql.DB, entries []fileproc.Result[
 			continue
 		}
 
-		assignee := sql.NullString{String: entry.Assignee, Valid: entry.Assignee != ""}
-		parent := sql.NullString{String: entry.Parent, Valid: entry.Parent != ""}
-		external := sql.NullString{String: entry.ExternalRef, Valid: entry.ExternalRef != ""}
-		createdAt := entry.CreatedAt.Unix()
-
-		closedAt := sql.NullInt64{}
-		if entry.ClosedAt != nil {
-			closedAt = sql.NullInt64{Int64: entry.ClosedAt.Unix(), Valid: true}
-		}
-
-		_, err = insertTicket.ExecContext(
-			ctx,
-			entry.ID,
-			entry.ShortID,
-			entry.Path,
-			entry.MtimeNS,
-			entry.Status,
-			entry.Type,
-			entry.Priority,
-			assignee,
-			parent,
-			createdAt,
-			closedAt,
-			external,
-			entry.Title,
-		)
+		err = inserter.Insert(ctx, tx, entry)
 		if err != nil {
-			return 0, fmt.Errorf("insert index row for %s (%s): %w", entry.ID, entry.Path, err)
+			return 0, fmt.Errorf("index %s (%s): %w", entry.ID, entry.Path, err)
 		}
 
 		indexed++
-
-		for _, blocker := range entry.BlockedBy {
-			_, err = insertBlocker.ExecContext(ctx, entry.ID, blocker)
-			if err != nil {
-				return 0, fmt.Errorf("insert blocker for %s (%s): %w", entry.ID, entry.Path, err)
-			}
-		}
 	}
 
-	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion))
 	if err != nil {
 		return 0, fmt.Errorf("set user_version: %w", err)
 	}
@@ -384,8 +294,8 @@ func ticketFromFrontmatter(relPath, contextLabel, root string, st fileproc.Stat,
 		return Ticket{}, idRaw, err
 	}
 
-	if schema < 1 || schema != int64(schemaVersion) {
-		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: schema_version %d is unsupported (expected %d)", contextLabel, schema, schemaVersion)
+	if schema < 1 || schema != int64(currentSchemaVersion) {
+		return Ticket{}, idRaw, fmt.Errorf("parse frontmatter at %s: schema_version %d is unsupported (expected %d)", contextLabel, schema, currentSchemaVersion)
 	}
 
 	status, err := requireScalarString(fm, "status", contextLabel)

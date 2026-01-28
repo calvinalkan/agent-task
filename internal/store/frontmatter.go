@@ -136,7 +136,7 @@ func (fm TicketFrontmatter) MarshalJSON() ([]byte, error) {
 			case ScalarBool:
 				obj[key] = value.Scalar.Bool
 			default:
-				return nil, fmt.Errorf("marshal frontmatter %s: unsupported scalar kind %d", key, value.Scalar.Kind)
+				return nil, fmt.Errorf("%s: unsupported scalar kind %d", key, value.Scalar.Kind)
 			}
 		case ValueList:
 			obj[key] = value.List
@@ -151,19 +151,19 @@ func (fm TicketFrontmatter) MarshalJSON() ([]byte, error) {
 				case ScalarBool:
 					inner[objKey] = scalar.Bool
 				default:
-					return nil, fmt.Errorf("marshal frontmatter %s.%s: unsupported scalar kind %d", key, objKey, scalar.Kind)
+					return nil, fmt.Errorf("%s.%s: unsupported scalar kind %d", key, objKey, scalar.Kind)
 				}
 			}
 
 			obj[key] = inner
 		default:
-			return nil, fmt.Errorf("marshal frontmatter %s: unsupported value kind %d", key, value.Kind)
+			return nil, fmt.Errorf("%s: unsupported value kind %d", key, value.Kind)
 		}
 	}
 
 	data, err := json.Marshal(obj)
 	if err != nil {
-		return nil, fmt.Errorf("marshal frontmatter: %w", err)
+		return nil, fmt.Errorf("json marshal: %w", err)
 	}
 
 	return data, nil
@@ -200,15 +200,15 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 	}
 
 	if fm == nil {
-		return "", errors.New("marshal frontmatter: nil map")
+		return "", errors.New("nil map")
 	}
 
 	if _, ok := fm["id"]; !ok {
-		return "", errors.New("marshal frontmatter: missing id")
+		return "", errors.New("missing id")
 	}
 
 	if _, ok := fm["schema_version"]; !ok {
-		return "", errors.New("marshal frontmatter: missing schema_version")
+		return "", errors.New("missing schema_version")
 	}
 
 	keys := make([]string, 0, len(fm))
@@ -237,7 +237,7 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 	for _, key := range ordered {
 		value, ok := fm[key]
 		if !ok {
-			return "", fmt.Errorf("marshal frontmatter: missing %s", key)
+			return "", fmt.Errorf("missing %s", key)
 		}
 
 		builder.WriteString(key)
@@ -257,7 +257,7 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 					builder.WriteString("false")
 				}
 			default:
-				return "", fmt.Errorf("marshal frontmatter %s: unsupported scalar kind %d", key, value.Scalar.Kind)
+				return "", fmt.Errorf("%s: unsupported scalar kind %d", key, value.Scalar.Kind)
 			}
 
 			builder.WriteString("\n")
@@ -272,7 +272,7 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 
 			for _, item := range value.List {
 				if item == "" {
-					return "", fmt.Errorf("marshal frontmatter %s: empty list item", key)
+					return "", fmt.Errorf("%s: empty list item", key)
 				}
 
 				builder.WriteString("  - ")
@@ -281,7 +281,7 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 			}
 		case ValueObject:
 			if len(value.Object) == 0 {
-				return "", fmt.Errorf("marshal frontmatter %s: empty object", key)
+				return "", fmt.Errorf("%s: empty object", key)
 			}
 
 			builder.WriteString("\n")
@@ -312,13 +312,13 @@ func (fm TicketFrontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 						builder.WriteString("false")
 					}
 				default:
-					return "", fmt.Errorf("marshal frontmatter %s.%s: unsupported scalar kind %d", key, objKey, scalar.Kind)
+					return "", fmt.Errorf("%s.%s: unsupported scalar kind %d", key, objKey, scalar.Kind)
 				}
 
 				builder.WriteString("\n")
 			}
 		default:
-			return "", fmt.Errorf("marshal frontmatter %s: unsupported value kind %d", key, value.Kind)
+			return "", fmt.Errorf("%s: unsupported value kind %d", key, value.Kind)
 		}
 	}
 

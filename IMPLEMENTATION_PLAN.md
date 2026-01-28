@@ -232,31 +232,39 @@ struct WalFooterV1 {
 **Commit point:** footer is appended and `fsync(wal)` completes. If the footer is missing/invalid, the WAL is treated as **uncommitted** and truncated.
 
 **Recovery (on Open):**
-- If WAL is empty: nothing to do.
-- If footer missing/invalid: truncate WAL and rebuild index.
+- If WAL is empty (0 bytes): nothing to do, return nil immediately.
+- If footer missing/invalid (uncommitted): truncate WAL, return nil.
 - If footer valid but CRC mismatch: return `ErrWALCorrupt` (do not modify documents).
-- If footer valid + CRC ok: replay WAL to files (idempotent), attempt to update SQLite; if that fails, return `ErrIndexUpdate` and leave WAL (operator should run `tk rebuild`).
+- If footer valid + CRC ok (committed): `recoverWalLocked` does all work in one call:
+  1. Replay WAL ops to filesystem (idempotent)
+  2. Update SQLite index from ops (single transaction with `BEGIN IMMEDIATE`)
+  3. Truncate WAL
+  On any error, return immediately (caller should treat as fatal).
+
+**Implementation note:** `recoverWalLocked(ctx)` returns `error` only (no intermediate state struct). Callers hold exclusive lock before calling.
 
 **Force recovery (optional):**
 - Operator may copy `ticketDir/.tk/wal` for inspection, then `ftruncate` it to 0 and rebuild index.
 - Only allowed while holding the exclusive WAL lock.
 
-### 4.9 SQLite Configuration (PRAGMAs)
+### 4.9 SQLite Configuration
 
-```go
-db.Exec(`
-    PRAGMA journal_mode = WAL;        -- concurrent readers
-    PRAGMA synchronous = FULL;        -- durable writes before WAL removal
-    PRAGMA mmap_size = 268435456;     -- 256MB mmap
-    PRAGMA cache_size = -20000;       -- 20MB page cache
-    PRAGMA temp_store = MEMORY;       -- faster temp files
-`)
-```
+**PRAGMAs** (applied on connect):
+| Pragma | Value | Purpose |
+|--------|-------|---------|
+| `busy_timeout` | 10000 | 10s wait on locked DB |
+| `journal_mode` | WAL | Concurrent readers |
+| `synchronous` | FULL | Durable writes |
+| `mmap_size` | 268435456 | 256MB mmap |
+| `cache_size` | -20000 | 20MB page cache |
+| `temp_store` | MEMORY | Faster temp files |
 
-Apply on `Open()` after connecting.
+**Transactions:** All `BeginTx` calls use `sql.LevelSerializable` → `BEGIN IMMEDIATE` in SQLite.
 
-### 4.10 SQLite Schema (Derived Index)
-**Tables** (proposed):
+→ Implemented in `sql.go:applyPragmas()`
+
+### 4.10 SQLite Schema
+
 ```sql
 CREATE TABLE tickets (
   id TEXT PRIMARY KEY,
@@ -287,353 +295,163 @@ CREATE INDEX idx_short_id ON tickets(short_id);
 CREATE INDEX idx_blocker ON ticket_blockers(blocker_id);
 ```
 
+→ Implemented in `sql.go:dropAndRecreateSchema()`
+
 ### 4.11 Schema Versioning
 
-```go
-const schemaVersion = 1
+- `currentSchemaVersion = 1` constant in `sql.go`
+- Stored via `PRAGMA user_version`
+- On `Open()`: if version mismatch, trigger full reindex
+- No migrations - schema changes bump version and rebuild
 
-func Open(dir string) (*Store, error) {
-    s, err := openStore(dir) // initializes fs/locker/atomic/wal; applies pragmas
-    if err != nil {
-        return nil, err
-    }
-
-    version := getUserVersion(s.sql)
-    if version != schemaVersion {
-        lock, err := s.locker.Lock(walPath(dir))
-        if err != nil {
-            return nil, err
-        }
-        rebuildIndexInTxn(s.sql, dir)
-        setUserVersion(s.sql, schemaVersion)
-        _ = lock.Close()
-    }
-
-    return s, nil
-}
-```
-
-No migrations. Schema changes → bump version → rebuild.
+→ Implemented in `sql.go:storedSchemaVersion()`, `store.go:Open()`
 
 ---
 
-## 5. Operational Pseudocode
+## 5. Implementation Reference
 
 ### 5.1 Open
 
-```go
-func Open(dir string) (*Store, error) {
-    fsys := fs.NewReal()
-    locker := fs.NewLocker(fsys)
-    atomicWriter := fs.NewAtomicWriter(fsys)
+1. Create `pkg/fs` instances (Real, Locker, AtomicWriter)
+2. Ensure `.tk/` directory exists
+3. Open WAL file and SQLite database (applies pragmas)
+4. If no work needed (WAL empty + schema current): return immediately
+5. Acquire exclusive lock with 10s timeout
+6. If schema mismatch: run `reindexLocked()` (recovers WAL + scans files + rebuilds SQLite)
+7. Else: run `recoverWalLocked()` (replays WAL to FS + SQLite, truncates)
+8. Release lock
 
-    tkDir := dir + "/.tk"
-    walPath := tkDir + "/wal"
+→ Implemented in `store.go:Open()` (lines 40-95)
 
-    db := openSQLite(tkDir + "/index.sqlite")
-    ensureDirIfErr(tkDir)
-    wal := openWalFile(fsys, walPath)
-    applyPragmas(db)
+### 5.2 Query
 
-    if schemaVersion(db) != currentSchemaVersion {
-        lock, err := locker.Lock(walPath)
-        if err != nil {
-            return nil, err
-        }
-        rebuildIndexInTxn(db, dir) // uses fileproc
-        setSchemaVersion(db, currentSchemaVersion)
-        _ = lock.Close()
-    }
+1. Acquire shared lock with 10s timeout
+2. If WAL has data: upgrade to exclusive lock, run `recoverWalLocked()`, release, reacquire shared
+3. Execute query via `queryTickets()`:
+   - Uses LEFT JOIN to fetch tickets + blockers in single query
+   - When LIMIT/OFFSET specified: subquery paginates tickets first, then joins blockers
+4. Release lock
 
-    if walHasData(wal) {
-        lock, err := locker.Lock(walPath)
-        if err != nil {
-            return nil, err
-        }
-        defer lock.Close()
+→ Implemented in `query.go:Query()`, `sql.go:queryTickets()`, `sql.go:buildTicketQuery()`
 
-        switch walState := validateWal(wal); walState {
-        case walUncommitted: // footer missing/invalid
-            truncateWal(wal)
-            rebuildIndexInTxn(db, dir)
-        case walCommitted:
-            ops := readWal(wal)
-            replayToFiles(ops)   // temp+rename, idempotent
-            if err := updateSQLite(db, ops); err != nil {
-                return nil, ErrIndexUpdate(err)
-            }
-            truncateWal(wal)
-        case walCorrupt:
-            return nil, ErrWALCorrupt
-        }
-    }
+### 5.3 Recovery (recoverWalLocked)
 
-    return &Store{
-        dir: dir,
-        sql: db,
-        fs: fsys,
-        locker: locker,
-        atomic: atomicWriter,
-        wal: wal,
-    }, nil
-}
-```
+Called under exclusive lock. Returns `error` only.
 
-### 5.2 Commit
+1. If WAL empty (0 bytes): return nil
+2. Read and validate footer; if missing/invalid: truncate WAL, return nil
+3. If CRC mismatch: return `ErrWALCorrupt`
+4. Parse JSONL ops from body
+5. Replay ops to filesystem (put = atomic write, delete = remove)
+6. Update SQLite in single `BEGIN IMMEDIATE` transaction via `ticketInserter`
+7. Truncate WAL
 
-```go
-func (tx *Tx) Commit() error {
-    walPath := tx.store.dir + "/.tk/wal"
-    lock, err := tx.store.locker.Lock(walPath)
-    if err != nil {
-        return err
-    }
-    defer lock.Close()
+→ Implemented in `wal.go:recoverWalLocked()`
 
-    wal := tx.store.wal
-    if walHasData(wal) {
-        if err := recoverWal(tx.store); err != nil {
-            return err // do not truncate on corrupt WAL
-        }
-    }
-    ftruncate(wal, 0) // clear before writing new body+footer
+### 5.4 Reindex
 
-    writeWalBody(wal, tx.ops)
-    writeWalFooter(wal) // includes length + CRC
-    fsync(wal)          // commit point
+1. Acquire exclusive lock with 10s timeout
+2. Run `recoverWalLocked()` first (replay any committed WAL)
+3. Walk ticketDir recursively via `fileproc.ProcessStat` (suffix `.md`, skip `.tk/`)
+4. Parse each file, validate frontmatter, check path matches canonical
+5. If any scan errors: return errors without updating SQLite
+6. In single transaction: DROP tables, CREATE schema, INSERT all tickets + blockers, set `user_version`
+7. Truncate WAL
+8. Release lock
 
-    for _, op := range tx.ops {
-        switch op.Type {
-        case Put:
-            tx.store.atomic.WriteWithDefaults(op.Path, strings.NewReader(op.Content)) // pkg/fs.AtomicWriter
-        case Delete:
-            tx.store.fs.Remove(op.Path)
-            fsyncDir(tx.store.fs, parent(op.Path))
-        }
-    }
+→ Implemented in `reindex.go:Reindex()`, `reindex.go:reindexLocked()`
 
-    if err := updateSQLite(tx.store.sql, tx.ops); err != nil { // single txn
-        return ErrIndexUpdate(err) // leave WAL; run `tk rebuild`
-    }
-    truncateWal(wal)
+### 5.5 Shared SQL Helpers
 
-    return nil
-}
-```
+**ticketInserter:** Prepared statement wrapper for inserting tickets + blockers. Used by both WAL recovery and reindex to avoid code duplication.
 
-### 5.3 Read Path (Get / Query)
+→ Implemented in `sql.go:ticketInserter`, `sql.go:prepareTicketInserter()`
 
-```go
-func (s *Store) Query(opts QueryOpts) ([]Summary, error) {
-    walPath := s.dir + "/.tk/wal"
-    readLock, err := s.locker.RLock(walPath)
-    if err != nil {
-        return nil, err
-    }
-    defer lock.Close()
+### 5.6 Commit (TODO)
 
-    if walHasData(s.wal) {
-        _ = readLock.Close()
-        writeLock, err = s.locker.Lock(walPath)
-        if err != nil {
-            return nil, err
-        }
-        if err := recoverWal(s); err != nil {
-            return nil, err
-        }
-        _ = writeLock.Close()
+Not yet implemented. Sequence:
+1. Acquire exclusive lock
+2. Recover any existing WAL
+3. Truncate WAL, write body + footer, fsync (commit point)
+4. Write files via AtomicWriter
+5. Update SQLite
+6. Truncate WAL
 
-        readLock, err = s.locker.RLock(walPath)
-        if err != nil {
-            return nil, err
-        }
-        defer readLock.Close()
-    }
+### 5.7 Get (TODO)
 
-    return querySQLite(s.sql, opts)
-}
-
-func (s *Store) Get(id string) (*Ticket, error) {
-    walPath := s.dir + "/.tk/wal"
-    readLock, err := s.locker.RLock(walPath)
-    if err != nil {
-        return nil, err
-    }
-    defer lock.Close()
-
-    if walHasData(s.wal) {
-        _ = lock.Close()
-        readLock, err = s.locker.Lock(walPath)
-        if err != nil {
-            return nil, err
-        }
-        if err := recoverWal(s); err != nil {
-            return nil, err
-        }
-        _ = lock.Close()
-
-        readLock, err = s.locker.RLock(walPath)
-        if err != nil {
-            return nil, err
-        }
-        defer lock.Close()
-    }
-
-    path := pathFor(id)
-    return readTicket(s.fs, path)
-}
-```
+Not yet implemented. Will:
+1. Acquire shared lock
+2. Recover WAL if needed
+3. Read file directly from canonical path
 
 ---
 
-## 6. Codebase Structure + Public API
+## 6. Package Structure
 
-### 6.1 Package Tree
+### 6.1 File Layout (`internal/store/`)
 
-```
-internal/
-  cli/
-    create.go
-    ls.go
-    ready.go
-    show.go
-    start.go
-    close.go
-    reopen.go
-    block.go
-    unblock.go
-    edit.go
-    rebuild.go
-    ...
+| File | Purpose |
+|------|---------|
+| `store.go` | `Open()`, `Close()`, `Store` struct, `lockTimeout` constant |
+| `wal.go` | WAL encode/decode, footer CRC, `recoverWalLocked()` |
+| `sql.go` | SQLite pragmas, schema, `queryTickets()`, `ticketInserter` |
+| `reindex.go` | `Reindex()`, `Rebuild()`, file scanning via fileproc |
+| `query.go` | `Query()` method with lock handling |
+| `frontmatter.go` | YAML subset parsing + deterministic serialization |
+| `ids.go` | UUIDv7 + short_id derivation |
+| `path.go` | Path derivation from ID |
 
-  store/
-    store.go        # Open/Close, lock handling, recovery
-    fs.go           # filesystem wiring (pkg/fs Real, AtomicWriter, Locker)
-    tx.go           # Tx buffer + Commit/Rollback
-    wal.go          # WAL encode/decode + footer CRC
-    index_sqlite.go # PRAGMAs, schema init, queries
-    rebuild.go      # rebuild index from files (uses fileproc.ProcessStat)
-    path.go         # UUIDv7 + short_id + path derivation
-    file.go         # read/parse/format ticket files
-    types.go        # Ticket, Summary, QueryOpts
-    errors.go       # ErrNotFound, ErrWALCorrupt, ErrIndexUpdate, ...
-```
+### 6.2 Public API
 
-### 6.2 Public API (CLI uses only store)
+**Implemented:**
+- `Open(ctx, dir) (*Store, error)` — `store.go`
+- `(*Store) Close() error` — `store.go`
+- `(*Store) Query(ctx, opts) ([]Ticket, error)` — `query.go`
+- `(*Store) Reindex(ctx) (int, error)` — `reindex.go`
+- `Rebuild(ctx, ticketDir) (int, error)` — `reindex.go` (standalone, no Open required)
 
-```go
-type Store struct {
-  dir string
-  sql *sql.DB
-  fs  fs.FS
-  locker *fs.Locker
-  atomic *fs.AtomicWriter
-  wal fs.File
-}
+**TODO:**
+- `(*Store) Get(id) (*Ticket, error)`
+- `(*Store) Begin() (*Tx, error)`
+- `(*Tx) Put(t *Ticket) error`
+- `(*Tx) Delete(id string) error`
+- `(*Tx) Commit() error`
+- `(*Tx) Rollback() error`
 
-// fs/locker/atomic are created once in Open and reused across operations.
-func Open(dir string) (*Store, error)
-func (s *Store) Close() error
+### 6.3 Ownership
 
-func (s *Store) Get(id string) (*Ticket, error)
-func (s *Store) Query(opts QueryOpts) ([]Summary, error)
-
-func (s *Store) Begin() (*Tx, error)
-func (tx *Tx) Put(t *Ticket) error
-func (tx *Tx) Delete(id string) error
-func (tx *Tx) Commit() error
-func (tx *Tx) Rollback() error
-
-func Rebuild(ctx context.Context, ticketDir string) (int, error)
-```
-
-Rules ownership:
-- **Business rules live in CLI** (parent/child, blockers, status transitions).
-- **Store enforces format correctness** (frontmatter parsing, required fields, schema_version).
+- **CLI owns business rules:** parent/child relationships, blockers, status transitions
+- **Store owns format correctness:** frontmatter parsing, required fields, schema_version
 
 ---
 
 ## 7. CLI Integration
 
-### 7.1 Command → Store mapping
-
-| Command | Current behavior | New behavior |
-|--------|------------------|--------------|
-| `create` | write file + update cache | store.Begin → Put → Commit |
-| `ls` | ListTickets (cache scan) | store.Query |
-| `ready` | scan summaries + Go logic | SQL query |
-| `show` | read file | store.Get |
-| `start/close/reopen` | per-file lock + edit | store.Update via Tx |
-| `block/unblock` | per-file lock + edit | store.Update via Tx |
-| `edit --apply` | direct file write | store.Update via Tx |
-| `rebuild` (was `repair --rebuild-cache`) | rebuild binary cache | store.Rebuild(ctx, ticketDir) |
-
-### 7.2 Dataflow Diagram
-
-```
-CLI Command
-    │
-    │ (business rules / checks)
-    ▼
-internal/store
-    │
-    ├─ Begin() → Tx
-    │    ├─ Put/Delete (buffered)
-    │    └─ Commit() → WAL → Files → SQLite
-    │
-    ├─ Get(id)      → read file
-    ├─ Query()      → SQLite only
-    └─ Rebuild(ctx, ticketDir) → scan files → SQLite (only if scan is clean)
-```
+| Command | Store API |
+|--------|-----------|
+| `create` | `Begin()` → `Put()` → `Commit()` |
+| `ls` | `Query()` |
+| `ready` | `Query()` with status filter |
+| `show` | `Get()` |
+| `start/close/reopen` | `Begin()` → `Put()` → `Commit()` |
+| `block/unblock` | `Begin()` → `Put()` → `Commit()` |
+| `edit --apply` | `Begin()` → `Put()` → `Commit()` |
+| `rebuild` | `Rebuild()` |
 
 ---
 
-## 8. Transaction / Read Dataflow
+## 8. External Edits / Staleness
 
-```
-Tx.Commit()
-   │
-   ├─ LOCK_EX on ticketDir/.tk/wal
-   ├─ recover WAL if needed
-   ├─ write WAL body
-   ├─ write WAL footer + fsync (commit point)
-   ├─ write files (temp + rename + fsync file/dir)
-   ├─ update SQLite index (single transaction)
-   ├─ truncate WAL
-   └─ unlock
-```
-
-```
-Query()
-   │
-   ├─ LOCK_SH on ticketDir/.tk/wal
-   ├─ recover WAL if needed
-   └─ query SQLite
-```
-
-```
-Get(id)
-   │
-   ├─ LOCK_SH on ticketDir/.tk/wal
-   ├─ recover WAL if needed
-   └─ read file directly
-```
+- `Get(id)` always reads the file → always fresh
+- `Query()` reads SQLite → may be stale if files edited outside tk
+- SQLite stores `mtime_ns` per ticket (for future staleness detection)
+- Primary remediation: explicit `tk rebuild`
+- Invalid references from external edits: warn + mark non-ready
+- Future: file watcher, per-result mtime verification
 
 ---
 
-## 9. External Edits / Staleness
-
-- `Get(id)` always reads the file and is always fresh.
-- `Query()` reads SQLite and may be stale if files are edited outside tk.
-- SQLite stores `mtime_ns` for each ticket to help detect staleness.
-- The primary remediation is an explicit `tk rebuild` (full reindex).
-- Treat externally edited frontmatter that introduces invalid references (e.g., missing blockers/parents) as errors (warn + non-ready).
-- Optional future: file watcher to trigger rebuild/refresh.
-- Optional future: per-result mtime verification for queries.
-
----
-
-## 10. Migration Phases (Checkbox Plan)
+## 9. Migration Phases
 
 ### Phase 1 — Core primitives
 - [x] Create `internal/store/` package skeleton
@@ -659,14 +477,18 @@ Get(id)
 - [x] Implement lock file using `pkg/fs.Locker` on `.tk/wal`
 - [x] Add shared lock for reads, exclusive for writes
 - [x] Add atomic write helper using `pkg/fs.AtomicWriter` (temp + rename + fsync)
+- [x] Add lock acquisition timeouts (10s) via `LockWithTimeout`/`RLockWithTimeout`
+- [x] Add SQLite busy_timeout pragma (10s)
 
 ### Phase 4 — Store API
 - [ ] Implement `Get(id)` 
 - [ ] Implement Tx buffer + `Put`/`Delete`
 - [ ] Implement `Commit()` sequence: WAL → files → SQLite → truncate WAL
 - [ ] Implement `Rollback()`
-- [ ] Add typed query options (status/type/priority/parent/short-id)
+- [x] Add typed query options (status/type/priority/parent/short-id)
 - [x] Expose `Rebuild(ctx, ticketDir)` as a standalone entrypoint (no `Open()` required)
+- [x] Query uses LEFT JOIN for tickets + blockers (single query)
+- [x] Query handles LIMIT/OFFSET with subquery for correct pagination
 
 ### Phase 5 — CLI migration
 - [ ] Replace `internal/ticket.ListTickets` usage with store.Query
@@ -693,15 +515,15 @@ Get(id)
 
 ---
 
-## 11. Open Questions (Deferred / Optional)
+## 10. Open Questions
 
-- File watcher for external edits (optional)
-- Optional `tk migrate` helper for rewriting old tickets
-- Performance tuning for SQLite indices
+- File watcher for external edits
+- `tk migrate` helper for rewriting old tickets
+- SQLite index performance tuning
 
 ---
 
-## 12. Acceptance Checklist
+## 11. Acceptance Checklist
 - [ ] All CLI commands operate through store
 - [ ] Reads never see mid-commit state
 - [ ] WAL recovery passes tests

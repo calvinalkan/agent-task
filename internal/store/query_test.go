@@ -169,6 +169,16 @@ func Test_Query_Applies_Filters_And_Ordering_When_Options_Are_Set(t *testing.T) 
 			opts: store.QueryOptions{Limit: 1, Offset: 1},
 			want: []string{idB.String()},
 		},
+		{
+			name: "offset_only",
+			opts: store.QueryOptions{Offset: 2},
+			want: []string{idC.String()},
+		},
+		{
+			name: "limit_only",
+			opts: store.QueryOptions{Limit: 2},
+			want: []string{idA.String(), idB.String()},
+		},
 	}
 
 	for _, tc := range cases {
@@ -190,5 +200,116 @@ func Test_Query_Applies_Filters_And_Ordering_When_Options_Are_Set(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+// Contract: Query with limit returns correct ticket count even when tickets have multiple blockers.
+// This tests that LIMIT applies to tickets, not to joined rows.
+func Test_Query_Limit_Counts_Tickets_Not_Rows_When_Blockers_Exist(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	ticketDir := filepath.Join(root, ".tickets")
+
+	base := time.Date(2026, 1, 4, 9, 0, 0, 0, time.UTC)
+	idA := makeUUIDv7(t, base, 0xabc, 0x1111111111111111)
+	idB := makeUUIDv7(t, base.Add(time.Hour), 0xabc, 0x2222222222222222)
+	idC := makeUUIDv7(t, base.Add(2*time.Hour), 0xabc, 0x3333333333333333)
+	idD := makeUUIDv7(t, base.Add(3*time.Hour), 0xabc, 0x4444444444444444)
+
+	// Ticket A has 3 blockers - without subquery, LIMIT 2 would return only A
+	writeTicket(t, ticketDir, &ticketFixture{
+		ID:        idA.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  1,
+		CreatedAt: base,
+		BlockedBy: []string{idB.String(), idC.String(), idD.String()},
+		Title:     "Alpha",
+	})
+
+	writeTicket(t, ticketDir, &ticketFixture{
+		ID:        idB.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  1,
+		CreatedAt: base.Add(time.Hour),
+		Title:     "Beta",
+	})
+
+	writeTicket(t, ticketDir, &ticketFixture{
+		ID:        idC.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  1,
+		CreatedAt: base.Add(2 * time.Hour),
+		BlockedBy: []string{idA.String()},
+		Title:     "Gamma",
+	})
+
+	writeTicket(t, ticketDir, &ticketFixture{
+		ID:        idD.String(),
+		Status:    "open",
+		Type:      "task",
+		Priority:  1,
+		CreatedAt: base.Add(3 * time.Hour),
+		Title:     "Delta",
+	})
+
+	storeHandle, err := store.Open(t.Context(), ticketDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	t.Cleanup(func() { _ = storeHandle.Close() })
+
+	// LIMIT 2 should return 2 tickets, not be confused by A's 3 blocker rows
+	results, err := storeHandle.Query(t.Context(), &store.QueryOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("count = %d, want 2", len(results))
+	}
+
+	if results[0].ID != idA.String() {
+		t.Fatalf("results[0].ID = %s, want %s", results[0].ID, idA.String())
+	}
+
+	if results[1].ID != idB.String() {
+		t.Fatalf("results[1].ID = %s, want %s", results[1].ID, idB.String())
+	}
+
+	// Verify blockers are correctly attached
+	if len(results[0].BlockedBy) != 3 {
+		t.Fatalf("results[0].BlockedBy = %v, want 3 blockers", results[0].BlockedBy)
+	}
+
+	if len(results[1].BlockedBy) != 0 {
+		t.Fatalf("results[1].BlockedBy = %v, want empty", results[1].BlockedBy)
+	}
+
+	// LIMIT 2 OFFSET 1 should return B and C
+	results, err = storeHandle.Query(t.Context(), &store.QueryOptions{Limit: 2, Offset: 1})
+	if err != nil {
+		t.Fatalf("query with offset: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("offset count = %d, want 2", len(results))
+	}
+
+	if results[0].ID != idB.String() {
+		t.Fatalf("offset results[0].ID = %s, want %s", results[0].ID, idB.String())
+	}
+
+	if results[1].ID != idC.String() {
+		t.Fatalf("offset results[1].ID = %s, want %s", results[1].ID, idC.String())
+	}
+
+	// C has 1 blocker
+	if len(results[1].BlockedBy) != 1 || results[1].BlockedBy[0] != idA.String() {
+		t.Fatalf("offset results[1].BlockedBy = %v, want [%s]", results[1].BlockedBy, idA.String())
 	}
 }
