@@ -86,7 +86,7 @@ func (s *Store) Reindex(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("reindex: canceled: %w", context.Cause(ctx))
 	}
 
-	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+	lockCtx, cancel := context.WithTimeout(ctx, s.lockTimeout)
 	defer cancel()
 
 	lock, err := s.locker.LockWithTimeout(lockCtx, s.lockPath)

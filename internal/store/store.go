@@ -16,20 +16,36 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/fs"
 )
 
-// lockTimeout is the maximum time to wait when acquiring WAL locks.
+// defaultLockTimeout is the maximum time to wait when acquiring WAL locks.
 // Operations fail with a timeout error if the lock cannot be acquired.
-const lockTimeout = 10 * time.Second
+const defaultLockTimeout = 10 * time.Second
+
+// Option configures Store behavior.
+type Option func(*storeOptions)
+
+type storeOptions struct {
+	lockTimeout time.Duration
+}
+
+// WithLockTimeout sets the max wait time for WAL lock acquisition.
+// Default is 10 seconds. Use shorter values in tests to avoid slow blocking tests.
+func WithLockTimeout(d time.Duration) Option {
+	return func(o *storeOptions) {
+		o.lockTimeout = d
+	}
+}
 
 // Store wires the derived SQLite index together with WAL and lock coordination.
 // Keeping these handles centralized ensures recovery uses consistent fs primitives.
 type Store struct {
-	dir      string
-	sql      *sql.DB
-	fs       fs.FS
-	locker   *fs.Locker
-	atomic   *fs.AtomicWriter
-	wal      fs.File
-	lockPath string // the wal path, for now. But opaque to callers.
+	dir         string
+	sql         *sql.DB
+	fs          fs.FS
+	locker      *fs.Locker
+	atomic      *fs.AtomicWriter
+	wal         fs.File
+	lockPath    string // the wal path, for now. But opaque to callers.
+	lockTimeout time.Duration
 }
 
 // Open initializes the SQLite index for a ticket directory.
@@ -37,7 +53,12 @@ type Store struct {
 //
 // Open acquires the WAL lock before recovery. It may return [ErrWALCorrupt]
 // or [ErrWALReplay] if recovery fails.
-func Open(ctx context.Context, dir string) (*Store, error) {
+func Open(ctx context.Context, dir string, opts ...Option) (*Store, error) {
+	cfg := storeOptions{lockTimeout: defaultLockTimeout}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	if ctx == nil {
 		return nil, errors.New("open store: context is nil")
 	}
@@ -72,13 +93,14 @@ func Open(ctx context.Context, dir string) (*Store, error) {
 	}
 
 	store := &Store{
-		dir:      ticketDir,
-		sql:      db,
-		fs:       fsReal,
-		locker:   locker,
-		atomic:   atomicWriter,
-		wal:      walFile,
-		lockPath: walPath,
+		dir:         ticketDir,
+		sql:         db,
+		fs:          fsReal,
+		locker:      locker,
+		atomic:      atomicWriter,
+		wal:         walFile,
+		lockPath:    walPath,
+		lockTimeout: cfg.lockTimeout,
 	}
 
 	storedSchemaVersion, err := storedSchemaVersion(ctx, db)
@@ -101,7 +123,7 @@ func Open(ctx context.Context, dir string) (*Store, error) {
 		return store, nil
 	}
 
-	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+	lockCtx, cancel := context.WithTimeout(ctx, cfg.lockTimeout)
 	defer cancel()
 
 	lock, err := locker.LockWithTimeout(lockCtx, walPath)
@@ -190,7 +212,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
 		return nil, fmt.Errorf("get: %w", err)
 	}
 
-	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+	lockCtx, cancel := context.WithTimeout(ctx, s.lockTimeout)
 	defer cancel()
 
 	readLock, err := s.acquireReadLock(ctx, lockCtx)

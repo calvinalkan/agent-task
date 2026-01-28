@@ -63,7 +63,7 @@ func (s *Store) Query(ctx context.Context, opts *QueryOptions) ([]Ticket, error)
 		return nil, errors.New("query: limit/offset must be non-negative")
 	}
 
-	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+	lockCtx, cancel := context.WithTimeout(ctx, s.lockTimeout)
 	defer cancel()
 
 	readLock, err := s.acquireReadLock(ctx, lockCtx)
