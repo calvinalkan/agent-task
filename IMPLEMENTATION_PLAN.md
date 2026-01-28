@@ -645,13 +645,13 @@ Get(id)
 
 ### Phase 2 — SQLite index
 - [x] Define schema + version (`PRAGMA user_version`)
-- [ ] Implement `Open()` SQLite initialization
+- [x] Implement `Open()` SQLite initialization
 - [x] Implement `Rebuild(ctx, ticketDir)` using `fileproc.ProcessStat` (recursive, suffix `.md`)
 - [x] Add `github.com/calvinalkan/fileproc` dependency (go.mod; go.work for local dev)
 - [x] Add `github.com/mattn/go-sqlite3` dependency (CGO)
 - [x] Rebuild runs in a single SQLite transaction (DROP/CREATE/INSERT, set `user_version` last)
 - [x] Insert/update `ticket_blockers` table
-- [ ] Implement `Query()` with filters + ordering by `id`
+- [x] Implement `Query()` with filters + ordering by `id`
 
 ### Phase 3 — WAL + locking
 - [ ] Implement WAL format (JSONL + footer/CRC)

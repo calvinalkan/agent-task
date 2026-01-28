@@ -17,20 +17,6 @@ import (
 	"github.com/calvinalkan/agent-task/internal/store"
 )
 
-type ticketFixture struct {
-	ID          string
-	Status      string
-	Type        string
-	Priority    int
-	CreatedAt   time.Time
-	ClosedAt    *time.Time
-	BlockedBy   []string
-	Assignee    string
-	Parent      string
-	ExternalRef string
-	Title       string
-}
-
 func Test_Rebuild_Builds_SQLite_Index_When_Tickets_Are_Valid(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -84,7 +70,7 @@ func Test_Rebuild_Builds_SQLite_Index_When_Tickets_Are_Valid(t *testing.T) {
 
 	defer func() { _ = db.Close() }()
 
-	version, err := userVersion(db)
+	version, err := userVersion(t.Context(), db)
 	if err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
@@ -443,32 +429,6 @@ func readBlockers(t *testing.T, db *sql.DB) []blockerRow {
 	return results
 }
 
-func countTickets(t *testing.T, db *sql.DB) int {
-	t.Helper()
-
-	row := db.QueryRow("SELECT COUNT(*) FROM tickets")
-
-	var count int
-
-	err := row.Scan(&count)
-	if err != nil {
-		t.Fatalf("count tickets: %v", err)
-	}
-
-	return count
-}
-
-func openIndex(t *testing.T, ticketDir string) *sql.DB {
-	t.Helper()
-
-	db, err := sql.Open("sqlite3", filepath.Join(ticketDir, ".tk", "index.sqlite"))
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-
-	return db
-}
-
 func assertIndexMissing(t *testing.T, ticketDir string) {
 	t.Helper()
 
@@ -512,37 +472,6 @@ func assertIssuePaths(t *testing.T, scanErr *store.IndexScanError, paths []strin
 			t.Fatalf("missing issue for %s", path)
 		}
 	}
-}
-
-func userVersion(db *sql.DB) (int, error) {
-	row := db.QueryRowContext(context.Background(), "PRAGMA user_version")
-
-	var version int
-
-	err := row.Scan(&version)
-	if err != nil {
-		return 0, err
-	}
-
-	return version, nil
-}
-
-func writeTicket(t *testing.T, root string, ticket *ticketFixture) string {
-	t.Helper()
-
-	id, err := uuidFromString(ticket.ID)
-	if err != nil {
-		t.Fatalf("parse uuid: %v", err)
-	}
-
-	relPath, err := store.TicketPath(id)
-	if err != nil {
-		t.Fatalf("ticket path: %v", err)
-	}
-
-	writeTicketAtPath(t, root, relPath, ticket)
-
-	return relPath
 }
 
 func writeRawTicket(t *testing.T, root string, id uuid.UUID, contents string) string {
@@ -607,72 +536,4 @@ func writeIgnoredTicket(t *testing.T, root string) {
 		CreatedAt: time.Date(2026, 1, 22, 8, 0, 0, 0, time.UTC),
 		Title:     "Ignored",
 	})
-}
-
-func writeTicketAtPath(t *testing.T, root, relPath string, ticket *ticketFixture) {
-	t.Helper()
-
-	absPath := filepath.Join(root, relPath)
-
-	err := os.MkdirAll(filepath.Dir(absPath), 0o750)
-	if err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	content := renderTicket(ticket)
-
-	err = os.WriteFile(absPath, []byte(content), 0o644)
-	if err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-}
-
-func renderTicket(ticket *ticketFixture) string {
-	builder := strings.Builder{}
-	fmt.Fprint(&builder, "---\n")
-	fmt.Fprintf(&builder, "id: %s\n", ticket.ID)
-	fmt.Fprint(&builder, "schema_version: 1\n")
-	fmt.Fprintf(&builder, "status: %s\n", ticket.Status)
-	fmt.Fprintf(&builder, "type: %s\n", ticket.Type)
-	fmt.Fprintf(&builder, "priority: %d\n", ticket.Priority)
-	fmt.Fprintf(&builder, "created: %s\n", ticket.CreatedAt.UTC().Format(time.RFC3339))
-
-	if ticket.ClosedAt != nil {
-		fmt.Fprintf(&builder, "closed: %s\n", ticket.ClosedAt.UTC().Format(time.RFC3339))
-	}
-
-	if len(ticket.BlockedBy) > 0 {
-		fmt.Fprint(&builder, "blocked-by:\n")
-
-		for _, blocker := range ticket.BlockedBy {
-			fmt.Fprintf(&builder, "  - %s\n", blocker)
-		}
-	}
-
-	if ticket.Assignee != "" {
-		fmt.Fprintf(&builder, "assignee: %s\n", ticket.Assignee)
-	}
-
-	if ticket.Parent != "" {
-		fmt.Fprintf(&builder, "parent: %s\n", ticket.Parent)
-	}
-
-	if ticket.ExternalRef != "" {
-		fmt.Fprintf(&builder, "external-ref: %s\n", ticket.ExternalRef)
-	}
-
-	fmt.Fprint(&builder, "---\n\n")
-	fmt.Fprintf(&builder, "# %s\n", ticket.Title)
-	fmt.Fprint(&builder, "Body\n")
-
-	return builder.String()
-}
-
-func uuidFromString(raw string) (uuid.UUID, error) {
-	parsed, err := uuid.Parse(raw)
-	if err != nil {
-		return uuid.UUID{}, err
-	}
-
-	return parsed, nil
 }

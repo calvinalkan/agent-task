@@ -59,6 +59,19 @@ func applyPragmas(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func userVersion(ctx context.Context, db *sql.DB) (int, error) {
+	row := db.QueryRowContext(ctx, "PRAGMA user_version")
+
+	var version int
+
+	err := row.Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("read user_version: %w", err)
+	}
+
+	return version, nil
+}
+
 func rebuildIndexInTxn(ctx context.Context, db *sql.DB, entries []fileproc.Result[indexTicket]) (int, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {

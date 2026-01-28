@@ -96,43 +96,6 @@ func Test_ShortID_ReturnsError_When_UUIDNotV7(t *testing.T) {
 	}
 }
 
-func makeUUIDv7(t *testing.T, ts time.Time, randA uint16, randB uint64) uuid.UUID {
-	t.Helper()
-
-	ms := uint64(ts.UnixMilli())
-	if ms>>48 != 0 {
-		t.Fatal("timestamp out of range for uuidv7")
-	}
-
-	var b [16]byte
-
-	b[0] = byte(ms >> 40)
-	b[1] = byte(ms >> 32)
-	b[2] = byte(ms >> 24)
-	b[3] = byte(ms >> 16)
-	b[4] = byte(ms >> 8)
-	b[5] = byte(ms)
-
-	b[6] = byte(0x70 | ((randA >> 8) & 0x0f))
-	b[7] = byte(randA)
-
-	b[8] = byte(0x80 | ((randB >> 56) & 0x3f))
-	b[9] = byte(randB >> 48)
-	b[10] = byte(randB >> 40)
-	b[11] = byte(randB >> 32)
-	b[12] = byte(randB >> 24)
-	b[13] = byte(randB >> 16)
-	b[14] = byte(randB >> 8)
-	b[15] = byte(randB)
-
-	id := uuid.UUID(b)
-	if id.Version() != 7 || id.Variant() != uuid.RFC4122 {
-		t.Fatal("constructed uuid is not v7")
-	}
-
-	return id
-}
-
 func isCrockfordBase32(value string) bool {
 	for _, r := range value {
 		if !strings.ContainsRune("0123456789ABCDEFGHJKMNPQRSTVWXYZ", r) {
