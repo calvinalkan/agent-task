@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/calvinalkan/agent-task/internal/frontmatter"
+	"github.com/calvinalkan/agent-task/internal/mddb/frontmatter"
 )
 
 // Contract: enforce the restricted YAML subset so store parsing stays deterministic.
