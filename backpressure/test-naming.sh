@@ -52,7 +52,7 @@ get_test_funcs_from_git() {
         # rg returns 1 when no matches - that's valid here
         local rg_exit
         untracked=$(echo "$untracked_files" | xargs -r rg -n '^func Test' 2>&1) && rg_exit=0 || rg_exit=$?
-        if [ "$rg_exit" -gt 1 ]; then
+        if [ "$rg_exit" -gt 1 ] && [ "$rg_exit" -ne 123 ]; then
             echo "Error: rg failed on untracked files: $untracked" >&2
             return 1
         fi
@@ -130,9 +130,10 @@ fi
 
 # Filter to only INVALID test names (those not matching the valid pattern)
 # rg -v returns 1 when all lines match (meaning no invalid names) - that's valid
+# Exclude TestMain - it's Go's special test entry point and cannot be renamed
 FOUND=""
 if [ -n "$ALL_TESTS" ]; then
-    FOUND=$(echo "$ALL_TESTS" | rg -v "$VALID_PATTERN") || true
+    FOUND=$(echo "$ALL_TESTS" | grep -v 'func TestMain(' | rg -v "$VALID_PATTERN") || true
 fi
 
 if [ -n "$FOUND" ]; then

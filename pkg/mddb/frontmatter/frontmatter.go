@@ -76,19 +76,71 @@ type Value struct {
 	Object map[string]Scalar // Object holds the value when Kind == ValueObject.
 }
 
-// StringValue creates a Value with a string scalar.
-func StringValue(s string) Value {
+// String creates a Value with a string scalar.
+func String(s string) Value {
 	return Value{Kind: ValueScalar, Scalar: Scalar{Kind: ScalarString, String: s}}
 }
 
-// IntValue creates a Value with an integer scalar.
-func IntValue(i int64) Value {
+// Int creates a Value with an integer scalar.
+func Int(i int64) Value {
 	return Value{Kind: ValueScalar, Scalar: Scalar{Kind: ScalarInt, Int: i}}
 }
 
-// ListValue creates a Value with a string list.
-func ListValue(items []string) Value {
+// Bool returns a Value with a bool scalar.
+func Bool(b bool) Value {
+	return Value{Kind: ValueScalar, Scalar: Scalar{Kind: ScalarBool, Bool: b}}
+}
+
+// StringList creates a Value with a string list.
+func StringList(items []string) Value {
 	return Value{Kind: ValueList, List: items}
+}
+
+// Frontmatter maps top-level keys to validated values.
+type Frontmatter map[string]Value
+
+// GetString returns the string value for key.
+// Returns ("", false) if key is missing or not a string scalar.
+func (fm Frontmatter) GetString(key string) (string, bool) {
+	v, ok := fm[key]
+	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarString {
+		return "", false
+	}
+
+	return v.Scalar.String, true
+}
+
+// GetInt returns the int64 value for key.
+// Returns (0, false) if key is missing or not an int scalar.
+func (fm Frontmatter) GetInt(key string) (int64, bool) {
+	v, ok := fm[key]
+	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarInt {
+		return 0, false
+	}
+
+	return v.Scalar.Int, true
+}
+
+// GetBool returns the bool value for key.
+// Returns (false, false) if key is missing or not a bool scalar.
+func (fm Frontmatter) GetBool(key string) (bool, bool) {
+	v, ok := fm[key]
+	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarBool {
+		return false, false
+	}
+
+	return v.Scalar.Bool, true
+}
+
+// GetList returns the string slice for key.
+// Returns (nil, false) if key is missing or not a list.
+func (fm Frontmatter) GetList(key string) ([]string, bool) {
+	v, ok := fm[key]
+	if !ok || v.Kind != ValueList {
+		return nil, false
+	}
+
+	return v.List, true
 }
 
 // UnmarshalJSON parses a JSON scalar, list, or object into a frontmatter value.
@@ -159,53 +211,6 @@ func (v *Value) UnmarshalJSON(data []byte) error {
 	}
 
 	return nil
-}
-
-// Frontmatter maps top-level keys to validated values.
-type Frontmatter map[string]Value
-
-// GetString returns the string value for key.
-// Returns ("", false) if key is missing or not a string scalar.
-func (fm Frontmatter) GetString(key string) (string, bool) {
-	v, ok := fm[key]
-	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarString {
-		return "", false
-	}
-
-	return v.Scalar.String, true
-}
-
-// GetInt returns the int64 value for key.
-// Returns (0, false) if key is missing or not an int scalar.
-func (fm Frontmatter) GetInt(key string) (int64, bool) {
-	v, ok := fm[key]
-	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarInt {
-		return 0, false
-	}
-
-	return v.Scalar.Int, true
-}
-
-// GetBool returns the bool value for key.
-// Returns (false, false) if key is missing or not a bool scalar.
-func (fm Frontmatter) GetBool(key string) (bool, bool) {
-	v, ok := fm[key]
-	if !ok || v.Kind != ValueScalar || v.Scalar.Kind != ScalarBool {
-		return false, false
-	}
-
-	return v.Scalar.Bool, true
-}
-
-// GetList returns the string slice for key.
-// Returns (nil, false) if key is missing or not a list.
-func (fm Frontmatter) GetList(key string) ([]string, bool) {
-	v, ok := fm[key]
-	if !ok || v.Kind != ValueList {
-		return nil, false
-	}
-
-	return v.List, true
 }
 
 // MarshalJSON renders the frontmatter map as a JSON object.
@@ -351,7 +356,7 @@ func (fm Frontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 
 			switch value.Scalar.Kind {
 			case ScalarString:
-				builder.WriteString(value.Scalar.String)
+				builder.WriteString(marshalYAMLString(value.Scalar.String))
 			case ScalarInt:
 				builder.WriteString(strconv.FormatInt(value.Scalar.Int, 10))
 			case ScalarBool:
@@ -380,7 +385,7 @@ func (fm Frontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 				}
 
 				builder.WriteString("  - ")
-				builder.WriteString(item)
+				builder.WriteString(marshalYAMLString(item))
 				builder.WriteString("\n")
 			}
 		case ValueObject:
@@ -406,7 +411,7 @@ func (fm Frontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 
 				switch scalar.Kind {
 				case ScalarString:
-					builder.WriteString(scalar.String)
+					builder.WriteString(marshalYAMLString(scalar.String))
 				case ScalarInt:
 					builder.WriteString(strconv.FormatInt(scalar.Int, 10))
 				case ScalarBool:
@@ -431,6 +436,39 @@ func (fm Frontmatter) MarshalYAML(opts ...MarshalOption) (string, error) {
 	}
 
 	return builder.String(), nil
+}
+
+func marshalYAMLString(value string) string {
+	if shouldQuoteYAMLString(value) {
+		return strconv.Quote(value)
+	}
+
+	return value
+}
+
+func shouldQuoteYAMLString(value string) bool {
+	if value == "" {
+		return true
+	}
+
+	if strings.TrimSpace(value) != value {
+		return true
+	}
+
+	if strings.ContainsAny(value, "\n\r\t") {
+		return true
+	}
+
+	scalar, err := parseScalar([]byte(value))
+	if err != nil {
+		return true
+	}
+
+	if scalar.Kind != ScalarString {
+		return true
+	}
+
+	return scalar.String != value
 }
 
 const (

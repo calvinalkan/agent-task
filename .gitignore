@@ -3,6 +3,7 @@
 /tk-bench
 /tk-seed
 /sloty
+/mddb
 *.test
 
 # Lock files (only in .tickets)

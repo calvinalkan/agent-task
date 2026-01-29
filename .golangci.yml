@@ -343,6 +343,20 @@ linters:
       - path: fuzz_model_test\.go
         linters:
           - ireturn
+      # Generic Query function returns type parameter R by design
+      - path: pkg/mddb/query\.go
+        linters:
+          - ireturn
+      # SQL table name concatenation - tableName validated in Open() via isValidIdentifier()
+      - path: pkg/mddb/query\.go
+        text: "G202:"
+        linters:
+          - gosec
+      # Test helper methods on DocID - value receiver is fine for tests
+      - path: pkg/mddb/testing_test\.go
+        linters:
+          - gocritic
+        text: "hugeParam"
       # Allow math/rand/v2 for fuzz testing
       - path: internal/cli/fuzz.*\.go
         text: "math/rand"

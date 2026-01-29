@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/calvinalkan/agent-task/internal/frontmatter"
+	"github.com/calvinalkan/agent-task/pkg/mddb/frontmatter"
 )
 
 // Contract: enforce the restricted YAML subset so store parsing stays deterministic.
@@ -162,7 +162,7 @@ func Test_Frontmatter_MarshalYAML_Returns_Delimited_Output_When_Defaults(t *test
 
 	want := strings.Join([]string{
 		"---",
-		"id: 123",
+		"id: \"123\"",
 		"schema_version: 1",
 		"priority: 2",
 		"status: open",
@@ -192,7 +192,7 @@ func Test_Frontmatter_MarshalYAML_Omits_Delimiters_When_Option_Set(t *testing.T)
 	}
 
 	want := strings.Join([]string{
-		"id: 123",
+		"id: \"123\"",
 		"schema_version: 1",
 		"status: open",
 		"",
@@ -223,7 +223,7 @@ func Test_Frontmatter_MarshalYAML_Uses_Custom_Key_Order_When_Option_Set(t *testi
 	// priority is omitted because it's not in the key order
 	want := strings.Join([]string{
 		"---",
-		"id: 123",
+		"id: \"123\"",
 		"schema_version: 1",
 		"type: task",
 		"status: open",
@@ -233,6 +233,53 @@ func Test_Frontmatter_MarshalYAML_Uses_Custom_Key_Order_When_Option_Set(t *testi
 
 	if got != want {
 		t.Fatalf("yaml output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+}
+
+// Contract: marshal should preserve string scalars that look like other types or invalid tokens.
+func Test_Frontmatter_MarshalYAML_RoundTrips_StringScalars_When_Ambiguous(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{name: "empty", value: ""},
+		{name: "bool-true", value: "true"},
+		{name: "bool-false", value: "false"},
+		{name: "int", value: "123"},
+		{name: "negative-int", value: "-12"},
+		{name: "list-like", value: "[a]"},
+		{name: "object-like", value: "{a}"},
+		{name: "dash-space", value: "- x"},
+		{name: "quoted-content", value: "\"hello\""},
+		{name: "leading-space", value: " leading"},
+		{name: "trailing-space", value: "trailing "},
+		{name: "newline-escape", value: "a\nb"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fm := frontmatter.Frontmatter{
+				"id":             frontmatter.String("abc"),
+				"schema_version": frontmatter.Int(1),
+				"note":           frontmatter.String(tc.value),
+			}
+
+			serialized, err := fm.MarshalYAML()
+			if err != nil {
+				t.Fatalf("marshal yaml: %v", err)
+			}
+
+			parsed, _, err := frontmatter.ParseFrontmatter([]byte(serialized))
+			if err != nil {
+				t.Fatalf("parse frontmatter: %v", err)
+			}
+
+			requireScalarString(t, parsed, "note", tc.value)
+		})
 	}
 }
 
