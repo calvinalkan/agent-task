@@ -3,6 +3,7 @@ package mddb
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -32,10 +33,12 @@ const (
 var walCRC32C = crc32.MakeTable(crc32.Castagnoli)
 
 // ErrWALCorrupt reports a committed WAL with a mismatched checksum.
-var ErrWALCorrupt = errors.New("wal corrupt")
+// ErrWALCorrupt indicates the WAL file has invalid structure or checksum.
+// Recovery: delete the WAL file and reindex. Data in uncommitted transactions is lost.
+var ErrWALCorrupt = errors.New("corrupt")
 
 // ErrWALReplay reports WAL validation or replay failures.
-var ErrWALReplay = errors.New("wal replay")
+var ErrWALReplay = errors.New("replay")
 
 type walState uint8
 
@@ -59,7 +62,7 @@ type walOp[T Document] struct {
 func (mddb *MDDB[T]) recoverWalLocked(ctx context.Context) error {
 	state, body, err := readWalState(mddb.wal)
 	if err != nil {
-		return fmt.Errorf("read wal: %w", err)
+		return err
 	}
 
 	switch state {
@@ -68,34 +71,34 @@ func (mddb *MDDB[T]) recoverWalLocked(ctx context.Context) error {
 	case walUncommitted:
 		err := truncateWal(mddb.wal)
 		if err != nil {
-			return fmt.Errorf("truncate uncommitted wal: %w", err)
+			return err
 		}
 
 		return nil
 	case walCommitted:
 		ops, err := decodeWalOps[T](body)
 		if err != nil {
-			return fmt.Errorf("decode wal: %w", err)
+			return err
 		}
 
 		err = mddb.applyOpsToFS(ctx, ops)
 		if err != nil {
-			return fmt.Errorf("replay wal: %w", err)
+			return err
 		}
 
 		err = mddb.updateSqliteIndexFromOps(ctx, ops)
 		if err != nil {
-			return fmt.Errorf("update index: %w", err)
+			return err
 		}
 
 		err = truncateWal(mddb.wal)
 		if err != nil {
-			return fmt.Errorf("truncate wal: %w", err)
+			return err
 		}
 
 		return nil
 	default:
-		return fmt.Errorf("unknown wal state %d", state)
+		return fmt.Errorf("wal: unknown state %d", state)
 	}
 }
 
@@ -116,12 +119,12 @@ func (mddb *MDDB[T]) applyOpsToFS(ctx context.Context, ops []walOp[T]) error {
 	for _, op := range ops {
 		err := mddb.validateRelPath(op.Path)
 		if err != nil {
-			return fmt.Errorf("%w: invalid path %q: %w", ErrWALReplay, op.Path, err)
+			return fmt.Errorf("wal: %w: path %q: %w", ErrWALReplay, op.Path, err)
 		}
 
 		err = ctx.Err()
 		if err != nil {
-			return fmt.Errorf("replay canceled: %w", context.Cause(ctx))
+			return fmt.Errorf("wal: %w: canceled: %w", ErrWALReplay, context.Cause(ctx))
 		}
 
 		absPath := filepath.Join(mddb.dataDir, op.Path)
@@ -130,34 +133,36 @@ func (mddb *MDDB[T]) applyOpsToFS(ctx context.Context, ops []walOp[T]) error {
 		switch op.Op {
 		case walOpPut:
 			if op.Content == "" {
-				return fmt.Errorf("%w: missing content for %s", ErrWALReplay, op.ID)
+				return fmt.Errorf("wal: %w: missing content for %s", ErrWALReplay, op.ID)
 			}
 
 			err = ensureDir(mddb.fs, dir, rootDir, existingDirs, createdDirs, dirsToSync)
 			if err != nil {
-				return fmt.Errorf("mkdir %s: %w", absPath, err)
+				return err
 			}
 
 			err = mddb.atomic.Write(absPath, strings.NewReader(op.Content), fs.AtomicWriteOptions{
-				SyncDir: false,
+				SyncDir: false, // We track our own syncing deduplicated per dir.
 				Perm:    0o644,
 			})
 			if err != nil {
-				return fmt.Errorf("write %s: %w", absPath, err)
+				return fmt.Errorf("fs: write %s: %w", absPath, err)
 			}
 
+			// Even when a file is just "updated", we need to sync it parent,
+			// because atomic.write uses tmp file + rename to atomically update (which updates the file's inode)
 			dirsToSync[dir] = struct{}{}
 
 		case walOpDelete:
 			err := mddb.fs.Remove(absPath)
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("delete %s: %w", absPath, err)
+				return fmt.Errorf("fs: delete %s: %w", absPath, err)
 			}
 
 			dirsToSync[dir] = struct{}{}
 
 		default:
-			return fmt.Errorf("%w: replay op %q", ErrWALReplay, op.Op)
+			return fmt.Errorf("wal: %w: op %q", ErrWALReplay, op.Op)
 		}
 	}
 
@@ -168,13 +173,21 @@ func (mddb *MDDB[T]) applyOpsToFS(ctx context.Context, ops []walOp[T]) error {
 				continue
 			}
 
-			return fmt.Errorf("open dir %q: %w", dir, err)
+			return fmt.Errorf("fs: open dir %q: %w", dir, err)
 		}
 
 		syncErr := fh.Sync()
 		closeErr := fh.Close()
 
 		if syncErr != nil || closeErr != nil {
+			if syncErr != nil {
+				syncErr = fmt.Errorf("fs: sync dir %q: %w", dir, syncErr)
+			}
+
+			if closeErr != nil {
+				closeErr = fmt.Errorf("fs: close dir %q: %w", dir, closeErr)
+			}
+
 			return errors.Join(syncErr, closeErr)
 		}
 	}
@@ -202,7 +215,7 @@ func ensureDir(fsys fs.FS, dir string, root string, existing map[string]struct{}
 	info, err := fsys.Stat(dir)
 	if err == nil {
 		if !info.IsDir() {
-			return fmt.Errorf("path %s is not a directory", dir)
+			return fmt.Errorf("fs: path %s is not a directory", dir)
 		}
 
 		existing[dir] = struct{}{}
@@ -211,7 +224,7 @@ func ensureDir(fsys fs.FS, dir string, root string, existing map[string]struct{}
 	}
 
 	if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat %s: %w", dir, err)
+		return fmt.Errorf("fs: stat %s: %w", dir, err)
 	}
 
 	missing := []string{}
@@ -248,7 +261,7 @@ func ensureDir(fsys fs.FS, dir string, root string, existing map[string]struct{}
 		parentInfo, statErr := fsys.Stat(parent)
 		if statErr == nil {
 			if !parentInfo.IsDir() {
-				return fmt.Errorf("path %s is not a directory", parent)
+				return fmt.Errorf("fs: path %s is not a directory", parent)
 			}
 
 			existing[parent] = struct{}{}
@@ -257,7 +270,7 @@ func ensureDir(fsys fs.FS, dir string, root string, existing map[string]struct{}
 		}
 
 		if !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("stat %s: %w", parent, statErr)
+			return fmt.Errorf("fs: stat %s: %w", parent, statErr)
 		}
 
 		current = parent
@@ -265,7 +278,7 @@ func ensureDir(fsys fs.FS, dir string, root string, existing map[string]struct{}
 
 	err = fsys.MkdirAll(dir, 0o750)
 	if err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
+		return fmt.Errorf("fs: mkdir %s: %w", dir, err)
 	}
 
 	for _, createdDir := range missing {
@@ -283,11 +296,12 @@ func ensureDir(fsys fs.FS, dir string, root string, existing map[string]struct{}
 	return nil
 }
 
-// updateSqliteIndexFromOps applies WAL operations to SQLite.
+// updateSqliteIndexFromOps applies WAL operations to SQLite in one transaction.
+// Note, this is not used for reindexing, only for recovery (reindex is super-hot path and has different logic).
 func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T]) error {
 	tx, err := mddb.sql.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin txn: %w", err)
+		return fmt.Errorf("sqlite: begin txn: %w", err)
 	}
 
 	committed := false
@@ -298,60 +312,125 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 		}
 	}()
 
-	inserter, err := mddb.cfg.Prepare(ctx, tx, mddb.tableName)
-	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
-	}
-
-	defer func() { _ = inserter.Close() }()
+	var (
+		deleteStmt *sql.Stmt
+		putDocs    []IndexableDocument
+		afterDocs  []*T // for AfterPut callback only
+	)
 
 	for _, op := range ops {
 		err = mddb.validateRelPath(op.Path)
 		if err != nil {
-			return fmt.Errorf("%w: invalid path %q: %w", ErrWALReplay, op.Path, err)
+			return fmt.Errorf("wal: %w: path %q: %w", ErrWALReplay, op.Path, err)
 		}
 
 		ctxErr := ctx.Err()
 		if ctxErr != nil {
-			return fmt.Errorf("canceled: %w", context.Cause(ctx))
+			return fmt.Errorf("wal: canceled: %w", context.Cause(ctx))
 		}
 
 		switch op.Op {
 		case walOpDelete:
-			delErr := inserter.Delete(ctx, op.ID)
+			// Delete uses id + derived path; no content needed for replay.
+			if deleteStmt == nil {
+				stmt, prepErr := tx.PrepareContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", mddb.schema.tableName))
+				if prepErr != nil {
+					return fmt.Errorf("sqlite: prepare delete: %w", prepErr)
+				}
+
+				deleteStmt = stmt
+			}
+
+			_, delErr := deleteStmt.ExecContext(ctx, op.ID)
 			if delErr != nil {
-				return fmt.Errorf("delete %s: %w", op.ID, delErr)
+				return fmt.Errorf("sqlite: delete id %s: %w", op.ID, delErr)
+			}
+
+			if mddb.cfg.AfterDelete != nil {
+				callbackErr := mddb.cfg.AfterDelete(ctx, tx, op.ID)
+				if callbackErr != nil {
+					return fmt.Errorf("after delete %s: %w", op.ID, callbackErr)
+				}
 			}
 		case walOpPut:
 			if op.Content == "" {
-				return fmt.Errorf("%w: missing content for %s", ErrWALReplay, op.ID)
+				return fmt.Errorf("wal: %w: missing content for %s", ErrWALReplay, op.ID)
 			}
 
 			absPath := filepath.Join(mddb.dataDir, op.Path)
 
 			info, statErr := mddb.fs.Stat(absPath)
 			if statErr != nil {
-				return fmt.Errorf("stat %s: %w", op.Path, statErr)
+				return fmt.Errorf("fs: stat file %s: %w", op.Path, statErr)
 			}
 
 			// Re-parse from WAL content to avoid relying on in-memory Doc serialization.
-			doc, parseErr := mddb.parseDocumentContent(op.Path, []byte(op.Content), info.ModTime().UnixNano(), op.ID)
+			parsed, parseErr := mddb.parseIndexable([]byte(op.Path), []byte(op.Content), info.ModTime().UnixNano(), op.ID)
 			if parseErr != nil {
-				return fmt.Errorf("parse %s: %w", op.Path, parseErr)
+				return fmt.Errorf("wal: parse document %s: %w", op.Path, parseErr)
 			}
 
-			upsertErr := inserter.Upsert(ctx, doc)
-			if upsertErr != nil {
-				return fmt.Errorf("upsert %s: %w", op.ID, upsertErr)
+			putDocs = append(putDocs, parsed)
+
+			if mddb.cfg.AfterPut != nil {
+				if op.Doc != nil {
+					afterDocs = append(afterDocs, op.Doc)
+				} else {
+					doc, docErr := mddb.parseDocument(op.Path, []byte(op.Content), info.ModTime().UnixNano(), op.ID)
+					if docErr != nil {
+						return fmt.Errorf("wal: parse document %s: %w", op.Path, docErr)
+					}
+
+					afterDocs = append(afterDocs, doc)
+				}
 			}
 		default:
-			return fmt.Errorf("unknown op %q", op.Op)
+			return fmt.Errorf("wal: unknown op %q", op.Op)
+		}
+	}
+
+	if deleteStmt != nil {
+		defer func() { _ = deleteStmt.Close() }()
+	}
+
+	// Insert docs one-by-one so AfterPut callbacks fire immediately per doc.
+	// WAL recovery typically has few entries, so batching is unnecessary.
+	if len(putDocs) > 0 {
+		colCount := len(mddb.schema.columnNames())
+
+		stmt, prepErr := mddb.prepareUpsertStmt(ctx, tx, 1)
+		if prepErr != nil {
+			return prepErr
+		}
+
+		defer func() { _ = stmt.Close() }()
+
+		args := make([]any, colCount)
+
+		for i := range putDocs {
+			err = mddb.fillBatchUpsertSQLArgs([]IndexableDocument{putDocs[i]}, colCount, args)
+			if err != nil {
+				return err
+			}
+
+			_, err = stmt.ExecContext(ctx, args...)
+			if err != nil {
+				return fmt.Errorf("sqlite: insert row: %w", err)
+			}
+
+			// Call AfterPut immediately after each insert.
+			if mddb.cfg.AfterPut != nil {
+				callbackErr := mddb.cfg.AfterPut(ctx, tx, afterDocs[i])
+				if callbackErr != nil {
+					return fmt.Errorf("after put %s: %w", string(putDocs[i].ID), callbackErr)
+				}
+			}
 		}
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return fmt.Errorf("sqlite: commit txn: %w", err)
 	}
 
 	committed = true
@@ -363,7 +442,7 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 func (mddb *MDDB[T]) marshalDocument(doc T) ([]byte, error) {
 	d, ok := any(doc).(Document)
 	if !ok {
-		return nil, errors.New("marshal: type assertion to Document failed")
+		return nil, errors.New("document type assertion failed")
 	}
 
 	fm := d.Frontmatter()
@@ -371,15 +450,24 @@ func (mddb *MDDB[T]) marshalDocument(doc T) ([]byte, error) {
 	// Inject reserved fields
 	id := d.ID()
 	if id == "" {
-		return nil, errors.New("marshal: id is empty")
+		return nil, ErrEmptyID
 	}
 
-	fm["id"] = frontmatter.String(id)
-	fm["schema_version"] = frontmatter.Int(int64(combinedSchemaVersion(mddb.cfg.SchemaVersion)))
+	if err := fm.Set(frontmatterKeyID, frontmatter.StringValue(id)); err != nil {
+		return nil, fmt.Errorf("frontmatter: %w", err)
+	}
 
-	yamlStr, err := fm.MarshalYAML()
+	if err := fm.Set(frontmatterKeySchemaVersion, frontmatter.IntValue(int64(mddb.schema.fingerprint()))); err != nil {
+		return nil, fmt.Errorf("frontmatter: %w", err)
+	}
+
+	if err := fm.Set(frontmatterKeyTitle, frontmatter.StringValue(d.Title())); err != nil {
+		return nil, fmt.Errorf("frontmatter: %w", err)
+	}
+
+	yamlStr, err := fm.MarshalYAML(frontmatter.WithKeyPriority(frontmatterKeyID, frontmatterKeySchemaVersion, frontmatterKeyTitle))
 	if err != nil {
-		return nil, fmt.Errorf("marshal frontmatter: %w", err)
+		return nil, fmt.Errorf("frontmatter: %w", err)
 	}
 
 	var b strings.Builder
@@ -402,7 +490,7 @@ func (mddb *MDDB[T]) marshalDocument(doc T) ([]byte, error) {
 func readWalState(file fs.File) (walState, []byte, error) {
 	info, err := file.Stat()
 	if err != nil {
-		return walEmpty, nil, fmt.Errorf("stat: %w", err)
+		return walEmpty, nil, fmt.Errorf("wal: stat: %w", err)
 	}
 
 	size := info.Size()
@@ -418,7 +506,7 @@ func readWalState(file fs.File) (walState, []byte, error) {
 
 	_, err = file.Seek(size-walFooterSize, io.SeekStart)
 	if err != nil {
-		return walEmpty, nil, fmt.Errorf("seek footer: %w", err)
+		return walEmpty, nil, fmt.Errorf("wal: seek footer: %w", err)
 	}
 
 	_, err = io.ReadFull(file, footerBuf)
@@ -427,7 +515,7 @@ func readWalState(file fs.File) (walState, []byte, error) {
 			return walUncommitted, nil, nil
 		}
 
-		return walEmpty, nil, fmt.Errorf("read footer: %w", err)
+		return walEmpty, nil, fmt.Errorf("wal: read footer: %w", err)
 	}
 
 	if string(footerBuf[:8]) != walMagic {
@@ -461,19 +549,19 @@ func readWalState(file fs.File) (walState, []byte, error) {
 
 	_, err = file.Seek(0, io.SeekStart)
 	if err != nil {
-		return walEmpty, nil, fmt.Errorf("seek body: %w", err)
+		return walEmpty, nil, fmt.Errorf("wal: seek body: %w", err)
 	}
 
 	_, err = io.ReadFull(file, body)
 	if err != nil {
-		return walEmpty, nil, fmt.Errorf("read body: %w", err)
+		return walEmpty, nil, fmt.Errorf("wal: read body: %w", err)
 	}
 
 	checksum := crc32.Checksum(body, walCRC32C)
 	if checksum != crc {
 		// Deliberate hard failure: corrupt WAL requires manual inspection.
 		// WAL is JSON so users can recover without code.
-		return walCommitted, nil, fmt.Errorf("%w: checksum mismatch", ErrWALCorrupt)
+		return walCommitted, nil, fmt.Errorf("wal: %w: checksum mismatch", ErrWALCorrupt)
 	}
 
 	return walCommitted, body, nil
@@ -482,12 +570,12 @@ func readWalState(file fs.File) (walState, []byte, error) {
 func truncateWal(file fs.File) error {
 	fd := file.Fd()
 	if fd == 0 {
-		return errors.New("invalid file descriptor")
+		return errors.New("wal: invalid file descriptor")
 	}
 
 	err := syscall.Ftruncate(int(fd), 0)
 	if err != nil {
-		return fmt.Errorf("ftruncate: %w", err)
+		return fmt.Errorf("wal: ftruncate: %w", err)
 	}
 
 	return nil
@@ -500,7 +588,7 @@ func encodeWalContent[T Document](ops []walOp[T]) ([]byte, error) {
 	for _, op := range ops {
 		err := enc.Encode(op)
 		if err != nil {
-			return nil, fmt.Errorf("encode op: %w", err)
+			return nil, fmt.Errorf("json: encode op: %w", err)
 		}
 	}
 
@@ -519,7 +607,7 @@ func encodeWalContent[T Document](ops []walOp[T]) ([]byte, error) {
 
 	_, err := body.Write(footer)
 	if err != nil {
-		return nil, fmt.Errorf("encode footer: %w", err)
+		return nil, fmt.Errorf("wal: encode footer: %w", err)
 	}
 
 	return body.Bytes(), nil
@@ -539,23 +627,23 @@ func decodeWalOps[T Document](body []byte) ([]walOp[T], error) {
 		}
 
 		if err != nil {
-			return nil, fmt.Errorf("%w: decode: %w", ErrWALReplay, err)
+			return nil, fmt.Errorf("wal: %w: json decode: %w", ErrWALReplay, err)
 		}
 
 		if op.Op != walOpPut && op.Op != walOpDelete {
-			return nil, fmt.Errorf("%w: invalid op %q", ErrWALReplay, op.Op)
+			return nil, fmt.Errorf("wal: %w: invalid op %q", ErrWALReplay, op.Op)
 		}
 
 		if op.Op == walOpPut && op.Content == "" {
-			return nil, fmt.Errorf("%w: missing content for put", ErrWALReplay)
+			return nil, fmt.Errorf("wal: %w: missing content for put", ErrWALReplay)
 		}
 
 		if op.ID == "" {
-			return nil, fmt.Errorf("%w: id is empty", ErrWALReplay)
+			return nil, fmt.Errorf("wal: %w: %w", ErrWALReplay, ErrEmptyID)
 		}
 
 		if op.Path == "" {
-			return nil, fmt.Errorf("%w: path is empty", ErrWALReplay)
+			return nil, fmt.Errorf("wal: %w: %w", ErrWALReplay, ErrEmptyPath)
 		}
 
 		ops = append(ops, op)

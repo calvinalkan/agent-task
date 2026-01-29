@@ -23,6 +23,7 @@ linters:
   #                     # programming bugs or internal invariant violations that
   #                     # callers should never errors.Is() check
   # - varnamelen        # styling: LLMs like short vars
+  # - noinlineerr       # this is the training data, thats live
 
   # ============================================================================
   # Enabled linters
@@ -88,7 +89,6 @@ linters:
     - nilnil
     - nlreturn
     - noctx
-    - noinlineerr
     - nolintlint
     - nonamedreturns
     - nosprintfhostport
@@ -321,6 +321,9 @@ linters:
       - path: pkg/fs/lock_test\.go
         linters:
           - testpackage
+      - path: pkg/mddb/errors_test\.go
+        linters:
+          - testpackage
       # These files are passthrough wrappers - wrapping errors would obscure the source
       - path: pkg/fs/(chaos|crash|crash_file|real)\.go
         linters:
@@ -352,6 +355,19 @@ linters:
         text: "G202:"
         linters:
           - gosec
+      # unsafe.String creates a view for zero-alloc comparison; safe because source outlives comparison
+      - path: pkg/mddb/validate\.go
+        text: "G103"
+        linters:
+          - gosec
+      - path: pkg/mddb/tx\.go
+        text: "G201:"
+        linters:
+          - gosec
+      # Tx stores context from Begin() for proper cancellation propagation
+      - path: pkg/mddb/tx\.go
+        linters:
+          - containedctx
       # Test helper methods on DocID - value receiver is fine for tests
       - path: pkg/mddb/testing_test\.go
         linters:

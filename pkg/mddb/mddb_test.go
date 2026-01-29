@@ -56,9 +56,9 @@ func Test_Open_Creates_Schema_When_Directory_Empty(t *testing.T) {
 		t.Fatalf("user_version: %v", err)
 	}
 
-	// Combined version = internal(1) * 10000 + user(1) = 10001
-	if version != 10001 {
-		t.Fatalf("user_version = %d, want 10001", version)
+	// Fingerprint-based version should be non-zero after schema creation.
+	if version == 0 {
+		t.Fatal("user_version = 0, want non-zero fingerprint")
 	}
 
 	if !tableExists(t, db, testTableName) {
@@ -110,8 +110,9 @@ func Test_Open_Rebuilds_Index_When_Schema_Version_Mismatches(t *testing.T) {
 		t.Fatalf("user_version: %v", err)
 	}
 
-	if version != 10001 {
-		t.Fatalf("user_version = %d, want 10001", version)
+	// After rebuild, version should be non-zero fingerprint (not 999).
+	if version == 0 || version == 999 {
+		t.Fatalf("user_version = %d, want non-zero fingerprint after rebuild", version)
 	}
 }
 
@@ -169,8 +170,8 @@ func Test_Get_Returns_Doc_When_File_Exists(t *testing.T) {
 		t.Fatalf("title = %s, want Test Doc", got.Title())
 	}
 
-	if got.RelPath() != doc.DocPath {
-		t.Fatalf("path = %s, want %s", got.RelPath(), doc.DocPath)
+	if got.DocPath != doc.DocPath {
+		t.Fatalf("path = %s, want %s", got.DocPath, doc.DocPath)
 	}
 }
 

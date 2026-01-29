@@ -21,7 +21,7 @@ func Test_Get_Succeeds_When_Shared_Lock_Held(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	doc := newTestDoc(t, "Test Doc")
-	putTestDoc(t.Context(), t, s, doc)
+	createTestDoc(t.Context(), t, s, doc)
 
 	// Hold a shared lock - Get should still succeed
 	locker := fs.NewLocker(fs.NewReal())
@@ -54,7 +54,7 @@ func Test_Get_Returns_Error_When_Exclusive_Lock_Held(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	doc := newTestDoc(t, "Test Doc")
-	putTestDoc(t.Context(), t, s, doc)
+	createTestDoc(t.Context(), t, s, doc)
 
 	// Hold an exclusive lock - Get should block and timeout
 	locker := fs.NewLocker(fs.NewReal())
@@ -87,7 +87,7 @@ func Test_Query_Succeeds_When_Shared_Lock_Held(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	doc := newTestDoc(t, "Test Doc")
-	putTestDoc(t.Context(), t, s, doc)
+	createTestDoc(t.Context(), t, s, doc)
 
 	// Hold a shared lock - Query should still succeed
 	locker := fs.NewLocker(fs.NewReal())
@@ -158,7 +158,7 @@ func Test_GetByPrefix_Succeeds_When_Shared_Lock_Held(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	doc := newTestDoc(t, "Test Doc")
-	putTestDoc(t.Context(), t, s, doc)
+	createTestDoc(t.Context(), t, s, doc)
 
 	// Hold a shared lock - GetByPrefix should still succeed
 	locker := fs.NewLocker(fs.NewReal())
@@ -221,7 +221,7 @@ func Test_Multiple_Readers_Succeed_When_Called_Concurrently(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	doc := newTestDoc(t, "Test Doc")
-	putTestDoc(t.Context(), t, s, doc)
+	createTestDoc(t.Context(), t, s, doc)
 
 	const numReaders = 5
 

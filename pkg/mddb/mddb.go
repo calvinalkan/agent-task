@@ -7,16 +7,33 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // sqlite3 driver
 
 	"github.com/calvinalkan/agent-task/pkg/fs"
+	"github.com/calvinalkan/agent-task/pkg/mddb/frontmatter"
 )
 
 const (
-	defaultLockTimeout = 10 * time.Second
-	defaultTableName   = "documents"
+	defaultWalLockTimeout = 10 * time.Second
+	defaultTableName      = "documents"
+	// sqliteBusyTimeout is the time SQLite waits when the database is locked.
+	// After this, operations return SQLITE_BUSY.
+	sqliteBusyTimeout = 10000 // milliseconds
+)
+
+var (
+	// frontmatterKeyID is the "id" frontmatter key.
+	// Do not modify; reuse to avoid per-call allocations in hot paths.
+	frontmatterKeyID = []byte("id")
+	// frontmatterKeySchemaVersion is the "schema_version" frontmatter key.
+	// Do not modify; reuse to avoid per-call allocations in hot paths.
+	frontmatterKeySchemaVersion = []byte("schema_version")
+	// frontmatterKeyTitle is the "title" frontmatter key.
+	// Do not modify; reuse to avoid per-call allocations in hot paths.
+	frontmatterKeyTitle = []byte("title")
 )
 
 // ErrClosed indicates an operation was attempted on a closed MDDB.
@@ -31,22 +48,16 @@ var ErrClosed = errors.New("mddb closed")
 //
 // # Concurrency
 //
-// Uses file locking for multi-process coordination. Readers hold shared locks;
-// writers hold exclusive locks. Safe for concurrent reads within a process.
-// Only one write transaction active at a time; others block until lock available.
-//
-// # Operations
-//
-//   - [Open]: Create/open store, recover pending WAL
-//   - [MDDB.Get], [MDDB.GetByPrefix]: Read by ID
-//   - [Query]: Custom SQL queries with read lock
-//   - [MDDB.Begin]: Start write transaction
-//   - [MDDB.Reindex]: Rebuild index from files
-//   - [MDDB.Close]: Release resources
+// Safe for concurrent use. Uses [sync.RWMutex] for in-process coordination and
+// flock for cross-process coordination:
+//   - Readers ([MDDB.Get], [MDDB.GetByPrefix], [Query]) hold shared lock
+//   - Writers ([MDDB.Begin], [MDDB.Reindex]) hold exclusive lock
+//   - [MDDB.Begin] holds lock until [Tx.Commit] or [Tx.Rollback]
+//   - [MDDB.Close] waits for in-flight operations
 type MDDB[T Document] struct {
 	cfg         Config[T]
 	dataDir     string
-	tableName   string
+	schema      *SQLSchema
 	sql         *sql.DB
 	fs          fs.FS
 	locker      *fs.Locker
@@ -54,54 +65,87 @@ type MDDB[T Document] struct {
 	wal         fs.File
 	lockPath    string
 	lockTimeout time.Duration
+
+	// mu guards in-process concurrent access to the MDDB.
+	//
+	// File locking (flock) coordinates across processes but not within a process -
+	// multiple goroutines in the same process share the same flock. This RWMutex
+	// provides in-process coordination:
+	//
+	//   - Writers (Begin, Reindex, Close) acquire exclusive lock via mu.Lock()
+	//   - Readers (Get, GetByPrefix, Query) acquire shared lock via mu.RLock()
+	//   - Begin holds the lock until Commit/Rollback releases it
+	//
+	// Lock ordering: mu is always acquired BEFORE flock to avoid deadlocks and
+	// ensure goroutines block early (mutex) rather than all hitting the kernel (flock).
+	mu sync.RWMutex
 }
 
 // Open initializes a document store for the configured data directory.
 //
 // Creates the data directory and .mddb subdirectory if needed. On open:
 //   - Replays pending WAL if previous transaction crashed
-//   - Rebuilds index if [Config.SchemaVersion] changed
+//   - Rebuilds index if schema fingerprint changed (columns, types, indexes)
 //
-// Required [Config] fields: Dir, Parse, RecreateIndex, Prepare.
+// Required [Config] fields: BaseDir, DocumentFrom.
 //
 // Returns errors for config validation, directory/SQLite init failures,
 // WAL recovery, reindex failures, or lock timeout.
 func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if ctx == nil {
-		return nil, errors.New("open: context is nil")
+		return nil, wrap(errors.New("context is nil"))
 	}
 
-	if cfg.Dir == "" {
-		return nil, errors.New("open: Config.Dir is required")
+	if cfg.BaseDir == "" {
+		return nil, wrap(errors.New("Config.BaseDir is required"))
 	}
 
-	if cfg.Parse == nil {
-		return nil, errors.New("open: Config.Parse is required")
+	if cfg.DocumentFrom == nil {
+		return nil, wrap(errors.New("Config.DocumentFrom is required"))
 	}
 
-	if cfg.RecreateIndex == nil {
-		return nil, errors.New("open: Config.RecreateIndex is required")
+	// Default path layout: flat (id.md)
+	if cfg.RelPathFromID == nil {
+		cfg.RelPathFromID = func(id string) string { return id + ".md" }
 	}
 
-	if cfg.Prepare == nil {
-		return nil, errors.New("open: Config.Prepare is required")
+	// Default short ID: full ID
+	if cfg.ShortIDFromID == nil {
+		cfg.ShortIDFromID = func(id string) string { return id }
 	}
 
-	tableName := cfg.TableName
-	if tableName == "" {
-		tableName = defaultTableName
+	// Default schema if not provided
+	schema := cfg.SQLSchema
+	if schema == nil {
+		schema = NewBaseSQLSchema(defaultTableName)
 	}
 
-	if !isValidIdentifier(tableName) {
-		return nil, fmt.Errorf("open: invalid table name %q: must be lowercase a-z and underscore", tableName)
+	// Validate schema
+	if err := schema.validate(); err != nil {
+		return nil, wrap(err)
+	}
+
+	// If schema has user columns, SQLColumnValues is required
+	userColCount := schema.userColumnCount()
+	if userColCount > 0 && cfg.SQLColumnValues == nil {
+		return nil, wrap(errors.New("Config.SQLColumnValues is required when SQLSchema has user columns"))
+	}
+
+	// Default parse options: no line limit, require opening delimiter
+	if cfg.ParseOptions == nil {
+		cfg.ParseOptions = []frontmatter.ParseOption{
+			frontmatter.WithLineLimit(0),
+			frontmatter.WithRequireDelimiter(true),
+			frontmatter.WithTrimLeadingBlankTail(true),
+		}
 	}
 
 	lockTimeout := cfg.LockTimeout
 	if lockTimeout == 0 {
-		lockTimeout = defaultLockTimeout
+		lockTimeout = defaultWalLockTimeout
 	}
 
-	dataDir := filepath.Clean(cfg.Dir)
+	dataDir := filepath.Clean(cfg.BaseDir)
 	mddbDir := filepath.Join(dataDir, ".mddb")
 	fsReal := fs.NewReal()
 	locker := fs.NewLocker(fsReal)
@@ -109,27 +153,27 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 
 	err := fsReal.MkdirAll(mddbDir, 0o750)
 	if err != nil {
-		return nil, fmt.Errorf("open: create .mddb directory: %w", err)
+		return nil, wrap(fmt.Errorf("fs: mkdir %s: %w", mddbDir, err))
 	}
 
 	walPath := filepath.Join(mddbDir, "wal")
 
 	walFile, err := fsReal.OpenFile(walPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("open: wal: %w", err)
+		return nil, wrap(fmt.Errorf("fs: open wal %s: %w", walPath, err))
 	}
 
 	sqlite, err := openSqlite(ctx, filepath.Join(mddbDir, "index.sqlite"))
 	if err != nil {
 		_ = walFile.Close()
 
-		return nil, fmt.Errorf("open: %w", err)
+		return nil, wrap(err)
 	}
 
 	mddb := &MDDB[T]{
 		cfg:         cfg,
 		dataDir:     dataDir,
-		tableName:   tableName,
+		schema:      schema,
 		sql:         sqlite,
 		fs:          fsReal,
 		locker:      locker,
@@ -143,17 +187,17 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if err != nil {
 		_ = mddb.Close()
 
-		return nil, fmt.Errorf("open: %w", err)
+		return nil, wrap(err)
 	}
 
-	expectedVersion := combinedSchemaVersion(cfg.SchemaVersion)
+	expectedVersion := int(schema.fingerprint())
 	versionMismatch := storedVersion != expectedVersion
 
 	walSize, err := mddb.walSize()
 	if err != nil {
 		_ = mddb.Close()
 
-		return nil, fmt.Errorf("open: wal stat: %w", err)
+		return nil, wrap(err)
 	}
 
 	if !versionMismatch && walSize == 0 {
@@ -167,7 +211,7 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if err != nil {
 		_ = mddb.Close()
 
-		return nil, fmt.Errorf("open: lock wal: %w", err)
+		return nil, wrap(fmt.Errorf("lock: wal: %w", err))
 	}
 
 	if versionMismatch {
@@ -181,25 +225,33 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if err != nil || closeErr != nil {
 		_ = mddb.Close()
 
-		return nil, errors.Join(err, closeErr)
+		if closeErr != nil {
+			closeErr = fmt.Errorf("lock: unlock wal: %w", closeErr)
+		}
+
+		return nil, wrap(errors.Join(err, closeErr))
 	}
 
 	return mddb, nil
 }
 
 // Close releases SQLite and WAL file handles. Safe on nil, idempotent.
-// Does not wait for active transactions; caller must commit/rollback first.
+// Waits for in-flight operations to complete before closing.
 func (mddb *MDDB[T]) Close() error {
 	if mddb == nil {
 		return nil
 	}
+
+	// Wait for all in-flight operations (readers and writers) to complete.
+	mddb.mu.Lock()
+	defer mddb.mu.Unlock()
 
 	var errs []error
 
 	if mddb.sql != nil {
 		err := mddb.sql.Close()
 		if err != nil {
-			errs = append(errs, fmt.Errorf("close sqlite: %w", err))
+			errs = append(errs, fmt.Errorf("sqlite: close: %w", err))
 		}
 
 		mddb.sql = nil
@@ -208,82 +260,180 @@ func (mddb *MDDB[T]) Close() error {
 	if mddb.wal != nil {
 		err := mddb.wal.Close()
 		if err != nil {
-			errs = append(errs, fmt.Errorf("close wal: %w", err))
+			errs = append(errs, fmt.Errorf("wal: close: %w", err))
 		}
 
 		mddb.wal = nil
 	}
 
-	return errors.Join(errs...)
+	return wrap(errors.Join(errs...))
 }
 
 func (mddb *MDDB[T]) walSize() (int64, error) {
 	info, err := mddb.wal.Stat()
 	if err != nil {
-		return 0, fmt.Errorf("stat: %w", err)
+		return 0, fmt.Errorf("wal: stat: %w", err)
 	}
 
 	return info.Size(), nil
 }
 
-func (mddb *MDDB[T]) acquireReadLock(ctx, lockCtx context.Context) (*fs.Lock, error) {
-	readLock, err := mddb.locker.RLockWithTimeout(lockCtx, mddb.lockPath)
+// acquireReadLock acquires both the in-process read lock (mu.RLock) and the
+// cross-process file lock, replaying any pending WAL first. Returns a release
+// function that must be called to unlock both.
+func (mddb *MDDB[T]) acquireReadLock(ctx context.Context) (func(), error) {
+	mddb.mu.RLock()
+
+	lockCtx, cancel := context.WithTimeout(ctx, mddb.lockTimeout)
+	defer cancel()
+
+	flock, err := mddb.locker.RLockWithTimeout(lockCtx, mddb.lockPath)
 	if err != nil {
-		return nil, fmt.Errorf("lock wal: %w", err)
+		mddb.mu.RUnlock()
+
+		return nil, fmt.Errorf("lock: read: %w", err)
 	}
 
+	// Check for pending WAL and replay if needed.
 	for {
 		walSize, statErr := mddb.walSize()
 		if statErr != nil {
-			_ = readLock.Close()
+			_ = flock.Close()
 
-			return nil, fmt.Errorf("wal stat: %w", statErr)
+			mddb.mu.RUnlock()
+
+			return nil, statErr
 		}
 
 		if walSize == 0 {
-			return readLock, nil
+			return func() {
+				_ = flock.Close()
+
+				mddb.mu.RUnlock()
+			}, nil
 		}
 
-		err = readLock.Close()
-		if err != nil {
-			return nil, fmt.Errorf("unlock wal: %w", err)
-		}
+		// WAL not empty - upgrade to write lock, replay, then re-acquire read lock.
+		_ = flock.Close()
 
 		writeLock, lockErr := mddb.locker.LockWithTimeout(lockCtx, mddb.lockPath)
 		if lockErr != nil {
-			return nil, fmt.Errorf("lock wal: %w", lockErr)
+			mddb.mu.RUnlock()
+
+			return nil, fmt.Errorf("lock: write: %w", lockErr)
 		}
 
 		err = mddb.recoverWalLocked(ctx)
 		if err != nil {
 			_ = writeLock.Close()
 
+			mddb.mu.RUnlock()
+
 			return nil, err
 		}
 
-		err = writeLock.Close()
-		if err != nil {
-			return nil, fmt.Errorf("unlock wal: %w", err)
-		}
+		_ = writeLock.Close()
 
-		readLock, err = mddb.locker.RLockWithTimeout(lockCtx, mddb.lockPath)
+		flock, err = mddb.locker.RLockWithTimeout(lockCtx, mddb.lockPath)
 		if err != nil {
-			return nil, fmt.Errorf("lock wal: %w", err)
+			mddb.mu.RUnlock()
+
+			return nil, fmt.Errorf("lock: read: %w", err)
 		}
 	}
 }
 
-// isValidIdentifier checks if s is a valid SQL identifier (a-z, underscore only).
-func isValidIdentifier(s string) bool {
-	if s == "" {
-		return false
+// acquireWriteLock acquires both the in-process write lock (mu.Lock) and the
+// cross-process file lock, replaying any pending WAL first. Returns a release
+// function that must be called to unlock both.
+func (mddb *MDDB[T]) acquireWriteLock(ctx context.Context) (func(), error) {
+	mddb.mu.Lock()
+
+	lockCtx, cancel := context.WithTimeout(ctx, mddb.lockTimeout)
+	defer cancel()
+
+	flock, err := mddb.locker.LockWithTimeout(lockCtx, mddb.lockPath)
+	if err != nil {
+		mddb.mu.Unlock()
+
+		return nil, fmt.Errorf("lock: write: %w", err)
 	}
 
-	for _, r := range s {
-		if (r < 'a' || r > 'z') && r != '_' {
-			return false
-		}
+	err = mddb.recoverWalLocked(ctx)
+	if err != nil {
+		_ = flock.Close()
+
+		mddb.mu.Unlock()
+
+		return nil, err
 	}
 
-	return true
+	return func() {
+		_ = flock.Close()
+
+		mddb.mu.Unlock()
+	}, nil
+}
+
+// openSqlite opens the derived index database and applies the configured pragmas.
+func openSqlite(ctx context.Context, path string) (*sql.DB, error) {
+	if path == "" {
+		return nil, errors.New("sqlite: path is empty")
+	}
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: open: %w", err)
+	}
+
+	// Ensure per-connection PRAGMAs apply consistently.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	err = db.PingContext(ctx)
+	if err != nil {
+		_ = db.Close()
+
+		return nil, fmt.Errorf("sqlite: ping: %w", err)
+	}
+
+	err = applyPragmas(ctx, db)
+	if err != nil {
+		_ = db.Close()
+
+		return nil, err
+	}
+
+	return db, nil
+}
+
+// applyPragmas configures the SQLite connection using a single batch statement.
+func applyPragmas(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, fmt.Sprintf(`
+		PRAGMA busy_timeout = %d;
+		PRAGMA journal_mode = WAL;
+		PRAGMA synchronous = FULL;
+		PRAGMA mmap_size = 268435456;
+		PRAGMA cache_size = -20000;
+		PRAGMA temp_store = MEMORY;
+	`, sqliteBusyTimeout))
+	if err != nil {
+		return fmt.Errorf("sqlite: apply pragmas: %w", err)
+	}
+
+	return nil
+}
+
+// storedSchemaVersion reads the current SQLite PRAGMA user_version.
+func storedSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	row := db.QueryRowContext(ctx, "PRAGMA user_version")
+
+	var version int
+
+	err := row.Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: user_version: %w", err)
+	}
+
+	return version, nil
 }

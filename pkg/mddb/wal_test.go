@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/calvinalkan/agent-task/pkg/mddb"
@@ -239,9 +238,9 @@ func Test_Tx_Creates_Parent_Dirs_When_Put(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	result, err := tx.Put(doc)
+	result, err := tx.Create(doc)
 	if err != nil {
-		t.Fatalf("put: %v", err)
+		t.Fatalf("create: %v", err)
 	}
 
 	err = tx.Commit(t.Context())
@@ -250,7 +249,7 @@ func Test_Tx_Creates_Parent_Dirs_When_Put(t *testing.T) {
 	}
 
 	// Verify file and parent dir exist
-	absPath := filepath.Join(dir, result.RelPath())
+	absPath := filepath.Join(dir, result.DocPath)
 
 	_, err = os.Stat(absPath)
 	if err != nil {
@@ -278,7 +277,7 @@ func Test_Tx_Removes_File_When_Delete(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	doc := putTestDoc(t.Context(), t, s, newTestDoc(t, "To Delete"))
+	doc := createTestDoc(t.Context(), t, s, newTestDoc(t, "To Delete"))
 
 	absPath := filepath.Join(dir, doc.DocPath)
 
@@ -292,7 +291,7 @@ func Test_Tx_Removes_File_When_Delete(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	err = tx.Delete(doc.DocID, doc.DocPath)
+	err = tx.Delete(doc.DocID)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -337,9 +336,9 @@ func Test_WAL_Not_Applied_When_Rollback(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	doc, err := tx.Put(newTestDoc(t, "Will Rollback"))
+	doc, err := tx.Create(newTestDoc(t, "Will Rollback"))
 	if err != nil {
-		t.Fatalf("put: %v", err)
+		t.Fatalf("create: %v", err)
 	}
 
 	err = tx.Rollback()
@@ -347,7 +346,7 @@ func Test_WAL_Not_Applied_When_Rollback(t *testing.T) {
 		t.Fatalf("rollback: %v", err)
 	}
 
-	absPath := filepath.Join(dir, doc.RelPath())
+	absPath := filepath.Join(dir, doc.DocPath)
 
 	_, err = os.Stat(absPath)
 	if !os.IsNotExist(err) {
@@ -367,36 +366,5 @@ func Test_WAL_Not_Applied_When_Rollback(t *testing.T) {
 
 	if count != 0 {
 		t.Fatalf("count = %d, want 0", count)
-	}
-}
-
-func Test_Tx_Preserves_Body_When_Put(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	s := openTestStore(t, dir)
-
-	defer func() { _ = s.Close() }()
-
-	doc := newTestDoc(t, "With Body")
-	doc.DocBody = "Body content.\n\nMultiple paragraphs."
-
-	result := putTestDoc(t.Context(), t, s, doc)
-
-	got, err := s.Get(t.Context(), result.DocID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-
-	if got.Body() != doc.DocBody {
-		t.Fatalf("body = %q, want %q", got.Body(), doc.DocBody)
-	}
-
-	absPath := filepath.Join(dir, result.DocPath)
-
-	content := readFileString(t, absPath)
-	if !strings.Contains(content, "Body content.") {
-		t.Fatalf("file missing body:\n%s", content)
 	}
 }

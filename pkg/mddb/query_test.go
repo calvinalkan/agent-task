@@ -26,9 +26,9 @@ func Test_Open_RebuildsIndex_When_UserVersionMissing(t *testing.T) {
 		t.Fatalf("user_version: %v", err)
 	}
 
-	// Combined version = internal(1) * 10000 + user(1) = 10001
-	if version != 10001 {
-		t.Fatalf("user_version = %d, want 10001", version)
+	// Fingerprint-based version should be non-zero after WAL replay triggers reindex.
+	if version == 0 {
+		t.Fatal("user_version = 0, want non-zero fingerprint")
 	}
 
 	if count := countDocs(t, db); count != 1 {
@@ -45,7 +45,7 @@ func Test_GetByPrefix_Returns_Single_Doc_When_ShortID_Matches(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	doc := putTestDoc(t.Context(), t, s, newTestDoc(t, "Test Doc"))
+	doc := createTestDoc(t.Context(), t, s, newTestDoc(t, "Test Doc"))
 
 	// Use first 4 chars of short_id as prefix
 	prefix := doc.DocShort[:4]
@@ -77,7 +77,7 @@ func Test_GetByPrefix_Returns_Single_Doc_When_ID_Prefix_Matches(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	doc := putTestDoc(t.Context(), t, s, newTestDoc(t, "Test Doc"))
+	doc := createTestDoc(t.Context(), t, s, newTestDoc(t, "Test Doc"))
 
 	// Use first 8 chars of ID as prefix
 	prefix := doc.DocID[:8]
@@ -105,7 +105,7 @@ func Test_GetByPrefix_Returns_Empty_When_No_Match(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	putTestDoc(t.Context(), t, s, newTestDoc(t, "Test Doc"))
+	createTestDoc(t.Context(), t, s, newTestDoc(t, "Test Doc"))
 
 	results, err := s.GetByPrefix(t.Context(), "ZZZZZZ")
 	if err != nil {
@@ -126,8 +126,8 @@ func Test_GetByPrefix_Returns_Multiple_Docs_When_Prefix_Ambiguous(t *testing.T) 
 
 	defer func() { _ = s.Close() }()
 
-	doc1 := putTestDoc(t.Context(), t, s, newTestDoc(t, "Doc One"))
-	doc2 := putTestDoc(t.Context(), t, s, newTestDoc(t, "Doc Two"))
+	doc1 := createTestDoc(t.Context(), t, s, newTestDoc(t, "Doc One"))
+	doc2 := createTestDoc(t.Context(), t, s, newTestDoc(t, "Doc Two"))
 
 	// Both IDs share the same prefix (first 8 chars)
 	prefix := doc1.DocID[:8]
@@ -171,9 +171,9 @@ func Test_Query_Returns_All_Docs_When_No_Filter(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	putTestDoc(t.Context(), t, s, newTestDoc(t, "Doc A"))
-	putTestDoc(t.Context(), t, s, newTestDoc(t, "Doc B"))
-	putTestDoc(t.Context(), t, s, newTestDoc(t, "Doc C"))
+	createTestDoc(t.Context(), t, s, newTestDoc(t, "Doc A"))
+	createTestDoc(t.Context(), t, s, newTestDoc(t, "Doc B"))
+	createTestDoc(t.Context(), t, s, newTestDoc(t, "Doc C"))
 
 	count, err := mddb.Query(t.Context(), s, func(db *sql.DB) (int, error) {
 		var n int
@@ -202,11 +202,11 @@ func Test_Query_Filters_Results_When_Status_Specified(t *testing.T) {
 
 	docOpen := newTestDoc(t, "Open Doc")
 	docOpen.DocStatus = "open"
-	putTestDoc(t.Context(), t, s, docOpen)
+	createTestDoc(t.Context(), t, s, docOpen)
 
 	docClosed := newTestDoc(t, "Closed Doc")
 	docClosed.DocStatus = "closed"
-	putTestDoc(t.Context(), t, s, docClosed)
+	createTestDoc(t.Context(), t, s, docClosed)
 
 	count, err := mddb.Query(t.Context(), s, func(db *sql.DB) (int, error) {
 		var n int
@@ -235,15 +235,15 @@ func Test_Query_Filters_Results_When_Priority_Specified(t *testing.T) {
 
 	docP1 := newTestDoc(t, "Priority 1")
 	docP1.DocPriority = 1
-	putTestDoc(t.Context(), t, s, docP1)
+	createTestDoc(t.Context(), t, s, docP1)
 
 	docP2 := newTestDoc(t, "Priority 2")
 	docP2.DocPriority = 2
-	putTestDoc(t.Context(), t, s, docP2)
+	createTestDoc(t.Context(), t, s, docP2)
 
 	docP3 := newTestDoc(t, "Priority 3")
 	docP3.DocPriority = 3
-	putTestDoc(t.Context(), t, s, docP3)
+	createTestDoc(t.Context(), t, s, docP3)
 
 	count, err := mddb.Query(t.Context(), s, func(db *sql.DB) (int, error) {
 		var n int
@@ -271,7 +271,7 @@ func Test_Query_Limits_Results_When_Limit_Specified(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	for i := range 5 {
-		putTestDoc(t.Context(), t, s, newTestDoc(t, "Doc "+string(rune('A'+i))))
+		createTestDoc(t.Context(), t, s, newTestDoc(t, "Doc "+string(rune('A'+i))))
 	}
 
 	titles, err := mddb.Query(t.Context(), s, func(db *sql.DB) ([]string, error) {
@@ -317,7 +317,7 @@ func Test_Query_Returns_Typed_Results_When_Custom_Struct_Used(t *testing.T) {
 	doc := newTestDoc(t, "Structured Query")
 	doc.DocStatus = "in_progress"
 	doc.DocPriority = 5
-	putTestDoc(t.Context(), t, s, doc)
+	createTestDoc(t.Context(), t, s, doc)
 
 	type result struct {
 		ID       string

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
@@ -35,19 +34,15 @@ type TestDoc struct {
 	DocBody     string `json:"body"`
 }
 
-func (d TestDoc) ID() string      { return d.DocID }
-func (d TestDoc) RelPath() string { return d.DocPath }
-func (d TestDoc) ShortID() string { return d.DocShort }
-func (d TestDoc) MtimeNS() int64  { return d.DocMtime }
-func (d TestDoc) Title() string   { return d.DocTitle }
-func (d TestDoc) Body() string    { return d.DocBody }
-func (TestDoc) Validate() error   { return nil }
+func (d TestDoc) ID() string    { return d.DocID }
+func (d TestDoc) Title() string { return d.DocTitle }
+func (d TestDoc) Body() string  { return d.DocBody }
 func (d TestDoc) Frontmatter() frontmatter.Frontmatter {
-	return frontmatter.Frontmatter{
-		"title":    frontmatter.String(d.DocTitle),
-		"status":   frontmatter.String(d.DocStatus),
-		"priority": frontmatter.Int(d.DocPriority),
-	}
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("status"), frontmatter.StringValue(d.DocStatus))
+	fm.MustSet([]byte("priority"), frontmatter.IntValue(d.DocPriority))
+
+	return fm
 }
 
 // newTestDoc creates a TestDoc with generated ID.
@@ -110,101 +105,27 @@ func pathFromID(id uuid.UUID) string {
 // Config callbacks for TestDoc
 // -----------------------------------------------------------------------------
 
-func parseTestDoc(idStr string, fm frontmatter.Frontmatter, body string, mtimeNS int64) (*TestDoc, error) {
+func documentFromTestDoc(doc mddb.IndexableDocument) (*TestDoc, error) {
+	idStr := string(doc.ID)
+
 	id, err := uuid.Parse(idStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse id: %w", err)
 	}
 
-	title, _ := fm.GetString("title")
-	status, _ := fm.GetString("status")
-	priority, _ := fm.GetInt("priority")
+	status, _ := doc.Frontmatter.GetString([]byte("status"))
+	priority, _ := doc.Frontmatter.GetInt([]byte("priority"))
 
 	return &TestDoc{
 		DocID:       idStr,
 		DocShort:    shortIDFromUUID(id),
 		DocPath:     pathFromID(id),
-		DocMtime:    mtimeNS,
-		DocTitle:    title,
+		DocMtime:    doc.MtimeNS,
+		DocTitle:    string(doc.Title),
 		DocStatus:   status,
 		DocPriority: priority,
-		DocBody:     body,
+		DocBody:     string(doc.Body),
 	}, nil
-}
-
-func recreateTestIndex(ctx context.Context, tx *sql.Tx, tableName string) error {
-	stmts := []string{
-		"DROP TABLE IF EXISTS " + tableName,
-		fmt.Sprintf(`CREATE TABLE %s (
-			id TEXT PRIMARY KEY,
-			short_id TEXT NOT NULL,
-			path TEXT NOT NULL,
-			mtime_ns INTEGER NOT NULL,
-			title TEXT NOT NULL,
-			status TEXT NOT NULL,
-			priority INTEGER NOT NULL,
-			body TEXT NOT NULL
-		) WITHOUT ROWID`, tableName),
-		fmt.Sprintf("CREATE INDEX idx_%s_short_id ON %s(short_id)", tableName, tableName),
-	}
-
-	for _, stmt := range stmts {
-		_, err := tx.ExecContext(ctx, stmt)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-type testDocStmts struct {
-	insert *sql.Stmt
-	del    *sql.Stmt
-}
-
-func prepareTestDocStmts(ctx context.Context, tx *sql.Tx, tableName string) (mddb.PreparedStatements[TestDoc], error) {
-	insert, err := tx.PrepareContext(ctx, fmt.Sprintf(`
-		INSERT OR REPLACE INTO %s (id, short_id, path, mtime_ns, title, status, priority, body)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, tableName))
-	if err != nil {
-		return nil, err
-	}
-
-	success := false
-
-	defer func() {
-		if !success {
-			_ = insert.Close()
-		}
-	}()
-
-	del, err := tx.PrepareContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", tableName))
-	if err != nil {
-		return nil, err
-	}
-
-	success = true
-
-	return &testDocStmts{insert: insert, del: del}, nil
-}
-
-func (s *testDocStmts) Upsert(ctx context.Context, doc *TestDoc) error {
-	_, err := s.insert.ExecContext(ctx,
-		doc.DocID, doc.DocShort, doc.DocPath, doc.DocMtime,
-		doc.DocTitle, doc.DocStatus, doc.DocPriority, doc.DocBody)
-
-	return err
-}
-
-func (s *testDocStmts) Delete(ctx context.Context, id string) error {
-	_, err := s.del.ExecContext(ctx, id)
-
-	return err
-}
-
-func (s *testDocStmts) Close() error {
-	return errors.Join(s.insert.Close(), s.del.Close())
 }
 
 // -----------------------------------------------------------------------------
@@ -233,13 +154,35 @@ func testConfig(dir string, opts ...testOpt) mddb.Config[TestDoc] {
 	}
 
 	return mddb.Config[TestDoc]{
-		Dir:           dir,
-		TableName:     testTableName,
-		LockTimeout:   o.lockTimeout,
-		SchemaVersion: 1,
-		Parse:         parseTestDoc,
-		RecreateIndex: recreateTestIndex,
-		Prepare:       prepareTestDocStmts,
+		BaseDir:      dir,
+		DocumentFrom: documentFromTestDoc,
+		LockTimeout:  o.lockTimeout,
+		SQLSchema: mddb.NewBaseSQLSchema(testTableName).
+			Text("status", true).
+			Int("priority", true).
+			Text("body", false),
+		RelPathFromID: func(id string) string {
+			uid, err := uuid.Parse(id)
+			if err != nil {
+				return ""
+			}
+
+			return pathFromID(uid)
+		},
+		ShortIDFromID: func(id string) string {
+			uid, err := uuid.Parse(id)
+			if err != nil {
+				return ""
+			}
+
+			return shortIDFromUUID(uid)
+		},
+		SQLColumnValues: func(doc mddb.IndexableDocument) []any {
+			status, _ := doc.Frontmatter.GetString([]byte("status"))
+			priority, _ := doc.Frontmatter.GetInt([]byte("priority"))
+
+			return []any{status, priority, string(doc.Body)}
+		},
 	}
 }
 
@@ -255,8 +198,8 @@ func openTestStore(t *testing.T, dir string, opts ...testOpt) *mddb.MDDB[TestDoc
 	return s
 }
 
-// putTestDoc creates a transaction, puts a doc, and commits.
-func putTestDoc(ctx context.Context, t *testing.T, s *mddb.MDDB[TestDoc], doc *TestDoc) *TestDoc {
+// createTestDoc creates a transaction, creates a doc, and commits.
+func createTestDoc(ctx context.Context, t *testing.T, s *mddb.MDDB[TestDoc], doc *TestDoc) *TestDoc {
 	t.Helper()
 
 	tx, err := s.Begin(ctx)
@@ -264,9 +207,9 @@ func putTestDoc(ctx context.Context, t *testing.T, s *mddb.MDDB[TestDoc], doc *T
 		t.Fatalf("begin: %v", err)
 	}
 
-	result, err := tx.Put(doc)
+	result, err := tx.Create(doc)
 	if err != nil {
-		t.Fatalf("put: %v", err)
+		t.Fatalf("create: %v", err)
 	}
 
 	err = tx.Commit(ctx)
@@ -282,7 +225,7 @@ func writeTestDocFile(t *testing.T, dir string, doc *TestDoc) {
 	t.Helper()
 
 	s := openTestStore(t, dir)
-	putTestDoc(t.Context(), t, s, doc)
+	createTestDoc(t.Context(), t, s, doc)
 
 	err := s.Close()
 	if err != nil {
@@ -360,7 +303,9 @@ const (
 	testWalFooterSize = 32
 )
 
-const testSchemaVersion = 10001
+// testSchemaVersion is a dummy value for doc frontmatter in tests.
+// The actual schema fingerprint is stored in PRAGMA user_version, not in docs.
+const testSchemaVersion = 1
 
 var testWalCRC32C = crc32.MakeTable(crc32.Castagnoli)
 
@@ -504,15 +449,14 @@ func makeWalDeleteRecord(id string, path string) walRecord {
 }
 
 func renderDocContent(doc *TestDoc) string {
-	fm := frontmatter.Frontmatter{
-		"id":             frontmatter.String(doc.DocID),
-		"schema_version": frontmatter.Int(testSchemaVersion),
-		"title":          frontmatter.String(doc.DocTitle),
-		"status":         frontmatter.String(doc.DocStatus),
-		"priority":       frontmatter.Int(doc.DocPriority),
-	}
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("id"), frontmatter.StringValue(doc.DocID))
+	fm.MustSet([]byte("schema_version"), frontmatter.IntValue(testSchemaVersion))
+	fm.MustSet([]byte("title"), frontmatter.StringValue(doc.DocTitle))
+	fm.MustSet([]byte("status"), frontmatter.StringValue(doc.DocStatus))
+	fm.MustSet([]byte("priority"), frontmatter.IntValue(doc.DocPriority))
 
-	yamlStr, err := fm.MarshalYAML()
+	yamlStr, err := fm.MarshalYAML(frontmatter.WithKeyPriority([]byte("id"), []byte("schema_version"), []byte("title")))
 	if err != nil {
 		panic(err)
 	}

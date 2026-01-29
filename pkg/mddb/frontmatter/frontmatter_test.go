@@ -1,10 +1,7 @@
 package frontmatter_test
 
 import (
-	"bytes"
 	"fmt"
-	"io"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -30,20 +27,22 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 				"priority: 2",
 				"flag: true",
 				"owner: 'ops team'",
-				"note: \"\"",
+				"note_hash: \"with#comment\"",
+				"note_empty: \"\"",
 				"empty: ''",
 			}, "\n"),
 			tail: "# Title\n",
 			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
-				requireScalarString(t, fm, "id", "018f5f25-7e7d-7f0a-8c5c-123456789abc")
-				requireScalarInt(t, fm, "schema_version", 1)
-				requireScalarString(t, fm, "status", "open")
-				requireScalarInt(t, fm, "priority", 2)
-				requireScalarBool(t, fm, "flag", true)
-				requireScalarString(t, fm, "owner", "ops team")
-				requireScalarString(t, fm, "note", "")
-				requireScalarString(t, fm, "empty", "")
+				requireScalarString(t, fm, []byte("id"), "018f5f25-7e7d-7f0a-8c5c-123456789abc")
+				requireScalarInt(t, fm, []byte("schema_version"), 1)
+				requireScalarString(t, fm, []byte("status"), "open")
+				requireScalarInt(t, fm, []byte("priority"), 2)
+				requireScalarBool(t, fm, []byte("flag"), true)
+				requireScalarString(t, fm, []byte("owner"), "ops team")
+				requireScalarString(t, fm, []byte("note_hash"), "with#comment")
+				requireScalarString(t, fm, []byte("note_empty"), "")
+				requireScalarString(t, fm, []byte("empty"), "")
 			},
 		},
 		{
@@ -62,12 +61,12 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 			tail: "body text\n",
 			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
-				requireList(t, fm, "blocked-by", []string{"abc", "def"})
-				requireList(t, fm, "tags", []string{"ops", "on-call"})
-				requireObject(t, fm, "meta", map[string]frontmatter.Scalar{
-					"owner":   {Kind: frontmatter.ScalarString, String: "alice"},
-					"retries": {Kind: frontmatter.ScalarInt, Int: 3},
-					"urgent":  {Kind: frontmatter.ScalarBool, Bool: false},
+				requireList(t, fm, []byte("blocked-by"), []string{"abc", "def"})
+				requireList(t, fm, []byte("tags"), []string{"ops", "on-call"})
+				requireObject(t, fm, []byte("meta"), map[string]any{
+					"owner":   "alice",
+					"retries": int64(3),
+					"urgent":  false,
 				})
 			},
 		},
@@ -77,7 +76,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 			tail: "",
 			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
-				requireList(t, fm, "blocked-by", []string{})
+				requireList(t, fm, []byte("blocked-by"), []string{})
 			},
 		},
 		{
@@ -90,8 +89,8 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 			tail: "",
 			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
-				requireList(t, fm, "blocked-by", []string{"abc"})
-				requireScalarString(t, fm, "status", "open")
+				requireList(t, fm, []byte("blocked-by"), []string{"abc"})
+				requireScalarString(t, fm, []byte("status"), "open")
 			},
 		},
 		{
@@ -104,10 +103,10 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 			tail: "",
 			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
-				requireObject(t, fm, "meta", map[string]frontmatter.Scalar{
-					"owner": {Kind: frontmatter.ScalarString, String: "alice"},
+				requireObject(t, fm, []byte("meta"), map[string]any{
+					"owner": "alice",
 				})
-				requireScalarString(t, fm, "status", "open")
+				requireScalarString(t, fm, []byte("status"), "open")
 			},
 		},
 		{
@@ -118,7 +117,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 			tail: "",
 			check: func(t *testing.T, fm frontmatter.Frontmatter) {
 				t.Helper()
-				requireScalarInt(t, fm, "delta", -12)
+				requireScalarInt(t, fm, []byte("delta"), -12)
 			},
 		},
 	}
@@ -129,7 +128,7 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 
 			payload := wrapFrontmatter(tc.fm, tc.tail)
 
-			fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
+			fm, tail, err := frontmatter.ParseBytes([]byte(payload))
 			if err != nil {
 				t.Fatalf("parse frontmatter: %v", err)
 			}
@@ -143,17 +142,44 @@ func Test_FrontmatterParser_ReturnsValues_When_SubsetValid(t *testing.T) {
 	}
 }
 
-// Contract: frontmatter marshal keeps delimiter defaults and key ordering stable.
+// Contract: frontmatter marshal keeps delimiter defaults and key ordering stable (alphabetical).
 func Test_Frontmatter_MarshalYAML_Returns_Delimited_Output_When_Defaults(t *testing.T) {
 	t.Parallel()
 
-	fm := frontmatter.Frontmatter{
-		"type":           {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "task"}},
-		"id":             {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "123"}},
-		"schema_version": {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 1}},
-		"status":         {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "open"}},
-		"priority":       {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 2}},
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("type"), frontmatter.StringValue("task"))
+	fm.MustSet([]byte("id"), frontmatter.StringValue("123"))
+	fm.MustSet([]byte("schema_version"), frontmatter.IntValue(1))
+	fm.MustSet([]byte("status"), frontmatter.StringValue("open"))
+	fm.MustSet([]byte("priority"), frontmatter.IntValue(2))
+
+	got, err := fm.MarshalYAML()
+	if err != nil {
+		t.Fatalf("marshal yaml: %v", err)
 	}
+
+	// Keys sorted alphabetically
+	want := strings.Join([]string{
+		"---",
+		"id: \"123\"",
+		"priority: 2",
+		"schema_version: 1",
+		"status: open",
+		"type: task",
+		"---",
+		"",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("yaml output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+}
+
+// Contract: frontmatter marshal allows empty frontmatter.
+func Test_Frontmatter_MarshalYAML_Allows_EmptyFrontmatter(t *testing.T) {
+	t.Parallel()
+
+	var fm frontmatter.Frontmatter
 
 	got, err := fm.MarshalYAML()
 	if err != nil {
@@ -162,11 +188,6 @@ func Test_Frontmatter_MarshalYAML_Returns_Delimited_Output_When_Defaults(t *test
 
 	want := strings.Join([]string{
 		"---",
-		"id: \"123\"",
-		"schema_version: 1",
-		"priority: 2",
-		"status: open",
-		"type: task",
 		"---",
 		"",
 	}, "\n")
@@ -180,11 +201,10 @@ func Test_Frontmatter_MarshalYAML_Returns_Delimited_Output_When_Defaults(t *test
 func Test_Frontmatter_MarshalYAML_Omits_Delimiters_When_Option_Set(t *testing.T) {
 	t.Parallel()
 
-	fm := frontmatter.Frontmatter{
-		"id":             {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "123"}},
-		"schema_version": {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 1}},
-		"status":         {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "open"}},
-	}
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("id"), frontmatter.StringValue("123"))
+	fm.MustSet([]byte("schema_version"), frontmatter.IntValue(1))
+	fm.MustSet([]byte("status"), frontmatter.StringValue("open"))
 
 	got, err := fm.MarshalYAML(frontmatter.WithYAMLDelimiters(false))
 	if err != nil {
@@ -203,19 +223,89 @@ func Test_Frontmatter_MarshalYAML_Omits_Delimiters_When_Option_Set(t *testing.T)
 	}
 }
 
+// Contract: frontmatter marshal rejects duplicate keys in key order options.
+func Test_Frontmatter_MarshalYAML_ReturnsError_When_KeyOrderDuplicates(t *testing.T) {
+	t.Parallel()
+
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("id"), frontmatter.StringValue("123"))
+
+	_, err := fm.MarshalYAML(frontmatter.WithKeyOrder([]byte("id"), []byte("id")))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// Contract: frontmatter marshal rejects invalid keys in key order options.
+func Test_Frontmatter_MarshalYAML_ReturnsError_When_KeyOrderKeyInvalid(t *testing.T) {
+	t.Parallel()
+
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("id"), frontmatter.StringValue("123"))
+
+	_, err := fm.MarshalYAML(frontmatter.WithKeyOrder([]byte("bad:key")))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// Contract: frontmatter marshal rejects duplicate keys in priority options.
+func Test_Frontmatter_MarshalYAML_ReturnsError_When_PriorityKeyDuplicates(t *testing.T) {
+	t.Parallel()
+
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("id"), frontmatter.StringValue("123"))
+
+	_, err := fm.MarshalYAML(frontmatter.WithKeyPriority([]byte("id"), []byte("id")))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// Contract: frontmatter marshal rejects invalid keys in priority options.
+func Test_Frontmatter_MarshalYAML_ReturnsError_When_PriorityKeyInvalid(t *testing.T) {
+	t.Parallel()
+
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("id"), frontmatter.StringValue("123"))
+
+	_, err := fm.MarshalYAML(frontmatter.WithKeyPriority([]byte("bad:key")))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// Contract: frontmatter marshal rejects duplicate keys in object values.
+func Test_Frontmatter_MarshalYAML_ReturnsError_When_ObjectKeysDuplicate(t *testing.T) {
+	t.Parallel()
+
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("meta"), &frontmatter.Value{
+		Kind: frontmatter.ValueObject,
+		Object: []frontmatter.ObjectEntry{
+			{Key: []byte("owner"), Value: frontmatter.Scalar{Kind: frontmatter.ScalarString, Bytes: []byte("alice")}},
+			{Key: []byte("owner"), Value: frontmatter.Scalar{Kind: frontmatter.ScalarString, Bytes: []byte("bob")}},
+		},
+	})
+
+	_, err := fm.MarshalYAML()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 // Contract: frontmatter marshal respects custom key order.
 func Test_Frontmatter_MarshalYAML_Uses_Custom_Key_Order_When_Option_Set(t *testing.T) {
 	t.Parallel()
 
-	fm := frontmatter.Frontmatter{
-		"type":           {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "task"}},
-		"id":             {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "123"}},
-		"schema_version": {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 1}},
-		"status":         {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarString, String: "open"}},
-		"priority":       {Kind: frontmatter.ValueScalar, Scalar: frontmatter.Scalar{Kind: frontmatter.ScalarInt, Int: 2}},
-	}
+	var fm frontmatter.Frontmatter
+	fm.MustSet([]byte("type"), frontmatter.StringValue("task"))
+	fm.MustSet([]byte("id"), frontmatter.StringValue("123"))
+	fm.MustSet([]byte("schema_version"), frontmatter.IntValue(1))
+	fm.MustSet([]byte("status"), frontmatter.StringValue("open"))
+	fm.MustSet([]byte("priority"), frontmatter.IntValue(2))
 
-	got, err := fm.MarshalYAML(frontmatter.WithKeyOrder([]string{"id", "schema_version", "type", "status"}))
+	got, err := fm.MarshalYAML(frontmatter.WithKeyOrder([]byte("id"), []byte("schema_version"), []byte("type"), []byte("status")))
 	if err != nil {
 		t.Fatalf("marshal yaml: %v", err)
 	}
@@ -233,6 +323,34 @@ func Test_Frontmatter_MarshalYAML_Uses_Custom_Key_Order_When_Option_Set(t *testi
 
 	if got != want {
 		t.Fatalf("yaml output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+}
+
+// Contract: Set rejects invalid keys.
+func Test_Frontmatter_Set_ReturnsError_When_KeyInvalid(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		key  []byte
+	}{
+		{name: "empty", key: nil},
+		{name: "whitespace", key: []byte("bad key")},
+		{name: "tab", key: []byte("bad\tkey")},
+		{name: "colon", key: []byte("bad:key")},
+		{name: "newline", key: []byte("bad\nkey")},
+		{name: "carriage", key: []byte("bad\rkey")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var fm frontmatter.Frontmatter
+			if err := fm.Set(tc.key, frontmatter.StringValue("value")); err == nil {
+				t.Fatal("expected error")
+			}
+		})
 	}
 }
 
@@ -262,24 +380,35 @@ func Test_Frontmatter_MarshalYAML_RoundTrips_StringScalars_When_Ambiguous(t *tes
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			fm := frontmatter.Frontmatter{
-				"id":             frontmatter.String("abc"),
-				"schema_version": frontmatter.Int(1),
-				"note":           frontmatter.String(tc.value),
-			}
+			var fm frontmatter.Frontmatter
+			fm.MustSet([]byte("id"), frontmatter.StringValue("abc"))
+			fm.MustSet([]byte("schema_version"), frontmatter.IntValue(1))
+			fm.MustSet([]byte("note"), frontmatter.StringValue(tc.value))
 
 			serialized, err := fm.MarshalYAML()
 			if err != nil {
 				t.Fatalf("marshal yaml: %v", err)
 			}
 
-			parsed, _, err := frontmatter.ParseFrontmatter([]byte(serialized))
+			parsed, _, err := frontmatter.ParseBytes([]byte(serialized))
 			if err != nil {
 				t.Fatalf("parse frontmatter: %v", err)
 			}
 
-			requireScalarString(t, parsed, "note", tc.value)
+			requireScalarString(t, parsed, []byte("note"), tc.value)
 		})
+	}
+}
+
+// Contract: parser rejects quoted empty list items.
+func Test_FrontmatterParser_ReturnsError_When_ListItemEmptyQuoted(t *testing.T) {
+	t.Parallel()
+
+	payload := wrapFrontmatter("tags:"+"\n"+"  - \"\"", "")
+
+	_, _, err := frontmatter.ParseBytes([]byte(payload))
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }
 
@@ -298,6 +427,42 @@ func Test_FrontmatterParser_ReturnsError_When_ShapeInvalid(t *testing.T) {
 		{
 			name: "missing colon",
 			fm:   "id a",
+		},
+		{
+			name: "missing space after colon",
+			fm:   "status:open",
+		},
+		{
+			name: "double space after colon",
+			fm:   "status:  open",
+		},
+		{
+			name: "trailing whitespace after scalar",
+			fm:   "status: open ",
+		},
+		{
+			name: "comment only scalar",
+			fm:   "status: # comment",
+		},
+		{
+			name: "comment only list item",
+			fm:   "blocked-by:\n  - # comment",
+		},
+		{
+			name: "comment only object value",
+			fm:   "meta:\n  owner: # comment",
+		},
+		{
+			name: "inline comment double space",
+			fm:   "status: open  # comment",
+		},
+		{
+			name: "unquoted hash in scalar",
+			fm:   "status: with#comment",
+		},
+		{
+			name: "comment line",
+			fm:   "# comment",
 		},
 		{
 			name: "whitespace in key",
@@ -324,12 +489,24 @@ func Test_FrontmatterParser_ReturnsError_When_ShapeInvalid(t *testing.T) {
 			fm:   "meta:\n  key value",
 		},
 		{
+			name: "object entry double space after colon",
+			fm:   "meta:\n  key:  value",
+		},
+		{
+			name: "object entry trailing whitespace",
+			fm:   "meta:\n  key: value ",
+		},
+		{
 			name: "object duplicate key",
 			fm:   "meta:\n  key: one\n  key: two",
 		},
 		{
 			name: "list item missing marker",
 			fm:   "blocked-by:\n  abc",
+		},
+		{
+			name: "list item extra whitespace",
+			fm:   "blocked-by:\n  -  abc",
 		},
 		{
 			name: "empty list item",
@@ -342,6 +519,18 @@ func Test_FrontmatterParser_ReturnsError_When_ShapeInvalid(t *testing.T) {
 		{
 			name: "inline list empty item",
 			fm:   "blocked-by: [a,,b]",
+		},
+		{
+			name: "inline list missing space after comma",
+			fm:   "blocked-by: [a,b]",
+		},
+		{
+			name: "inline list extra whitespace",
+			fm:   "blocked-by: [a,  b]",
+		},
+		{
+			name: "inline list leading whitespace",
+			fm:   "blocked-by: [ a, b]",
 		},
 		{
 			name: "tab-indented list item",
@@ -375,11 +564,32 @@ func Test_FrontmatterParser_ReturnsError_When_ShapeInvalid(t *testing.T) {
 
 			payload := wrapFrontmatter(tc.fm, "tail\n")
 
-			_, _, err := frontmatter.ParseFrontmatter([]byte(payload))
+			_, _, err := frontmatter.ParseBytes([]byte(payload))
 			if err == nil {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+// Contract: parser should surface comment errors with line numbers.
+func Test_FrontmatterParser_ReturnsError_When_CommentLinePresent(t *testing.T) {
+	t.Parallel()
+
+	payload := wrapFrontmatter("id: 1\n# comment\nstatus: open", "")
+
+	_, _, err := frontmatter.ParseBytes([]byte(payload))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "comments are not supported") {
+		t.Fatalf("expected comment error, got %q", errMsg)
+	}
+
+	if !strings.Contains(errMsg, "line 3") {
+		t.Fatalf("expected line 3 in error, got %q", errMsg)
 	}
 }
 
@@ -419,10 +629,6 @@ func Test_FrontmatterParser_ReturnsError_When_UnsupportedScalar(t *testing.T) {
 			name: "inline list with quoted comma",
 			fm:   "tags: [\"a,b\"]",
 		},
-		{
-			name: "comment line",
-			fm:   "# comment",
-		},
 	}
 
 	for _, tc := range cases {
@@ -431,7 +637,7 @@ func Test_FrontmatterParser_ReturnsError_When_UnsupportedScalar(t *testing.T) {
 
 			payload := wrapFrontmatter(tc.fm, "")
 
-			_, _, err := frontmatter.ParseFrontmatter([]byte(payload))
+			_, _, err := frontmatter.ParseBytes([]byte(payload))
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -451,7 +657,7 @@ func Test_FrontmatterParser_ReturnsError_When_LineLimitExceeded(t *testing.T) {
 	content := strings.TrimSuffix(builder.String(), "\n")
 	payload := wrapFrontmatter(content, "")
 
-	_, _, err := frontmatter.ParseFrontmatter([]byte(payload))
+	_, _, err := frontmatter.ParseBytes([]byte(payload))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -469,7 +675,7 @@ func Test_FrontmatterParser_ReturnsValues_When_LineLimitDisabled(t *testing.T) {
 	content := strings.TrimSuffix(builder.String(), "\n")
 	payload := wrapFrontmatter(content, "")
 
-	_, _, err := frontmatter.ParseFrontmatter([]byte(payload), frontmatter.WithLineLimit(0))
+	_, _, err := frontmatter.ParseBytes([]byte(payload), frontmatter.WithLineLimit(0))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -481,7 +687,7 @@ func Test_FrontmatterParser_ReturnsTail_When_DefaultTrimEnabled(t *testing.T) {
 
 	payload := wrapFrontmatter("status: open", "\n\nBody\n")
 
-	_, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
+	_, tail, err := frontmatter.ParseBytes([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -497,7 +703,7 @@ func Test_FrontmatterParser_ReturnsTail_When_TrimLeadingBlankTailDisabled(t *tes
 
 	payload := wrapFrontmatter("status: open", "\n\nBody\n")
 
-	_, tail, err := frontmatter.ParseFrontmatter([]byte(payload), frontmatter.WithTrimLeadingBlankTail(false))
+	_, tail, err := frontmatter.ParseBytes([]byte(payload), frontmatter.WithTrimLeadingBlankTail(false))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -513,7 +719,7 @@ func Test_FrontmatterParser_ReturnsValues_When_DelimitersOptional(t *testing.T) 
 
 	payload := "status: open\npriority: 2\n"
 
-	fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload), frontmatter.WithRequireDelimiter(false))
+	fm, tail, err := frontmatter.ParseBytes([]byte(payload), frontmatter.WithRequireDelimiter(false))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -522,8 +728,8 @@ func Test_FrontmatterParser_ReturnsValues_When_DelimitersOptional(t *testing.T) 
 		t.Fatalf("expected empty tail, got %q", string(tail))
 	}
 
-	requireScalarString(t, fm, "status", "open")
-	requireScalarInt(t, fm, "priority", 2)
+	requireScalarString(t, fm, []byte("status"), "open")
+	requireScalarInt(t, fm, []byte("priority"), 2)
 }
 
 // Contract: byte parsing requires frontmatter delimiters.
@@ -552,7 +758,7 @@ func Test_FrontmatterParser_ReturnsError_When_DelimitersMissing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, _, err := frontmatter.ParseFrontmatter([]byte(tc.src))
+			_, _, err := frontmatter.ParseBytes([]byte(tc.src))
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -566,7 +772,7 @@ func Test_FrontmatterParser_ReturnsTail_When_NoTrailingNewline(t *testing.T) {
 
 	payload := "---\nstatus: open\n---"
 
-	fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
+	fm, tail, err := frontmatter.ParseBytes([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -575,7 +781,7 @@ func Test_FrontmatterParser_ReturnsTail_When_NoTrailingNewline(t *testing.T) {
 		t.Fatalf("expected empty tail, got %q", string(tail))
 	}
 
-	requireScalarString(t, fm, "status", "open")
+	requireScalarString(t, fm, []byte("status"), "open")
 }
 
 // Contract: parser should stop at the first closing delimiter.
@@ -584,7 +790,7 @@ func Test_FrontmatterParser_ReturnsTail_When_MultipleDelimiters(t *testing.T) {
 
 	payload := "---\nstatus: open\n---\n---\nbody\n"
 
-	fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
+	fm, tail, err := frontmatter.ParseBytes([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -593,36 +799,7 @@ func Test_FrontmatterParser_ReturnsTail_When_MultipleDelimiters(t *testing.T) {
 		t.Fatalf("tail mismatch: got %q", string(tail))
 	}
 
-	requireScalarString(t, fm, "status", "open")
-}
-
-// Contract: reader parsing should honor delimiters and share the same rules.
-func Test_FrontmatterReader_ReturnsValues_When_Delimited(t *testing.T) {
-	t.Parallel()
-
-	payload := wrapFrontmatter(strings.Join([]string{
-		"id: 018f5f25-7e7d-7f0a-8c5c-123456789abc",
-		"schema_version: 1",
-		"status: open",
-	}, "\n"), "# Title\nBody\n")
-
-	fm, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload))
-	if err != nil {
-		t.Fatalf("parse frontmatter: %v", err)
-	}
-
-	body, err := io.ReadAll(tailReader)
-	if err != nil {
-		t.Fatalf("read tail: %v", err)
-	}
-
-	if string(body) != "# Title\nBody\n" {
-		t.Fatalf("tail mismatch: got %q", string(body))
-	}
-
-	requireScalarString(t, fm, "id", "018f5f25-7e7d-7f0a-8c5c-123456789abc")
-	requireScalarInt(t, fm, "schema_version", 1)
-	requireScalarString(t, fm, "status", "open")
+	requireScalarString(t, fm, []byte("status"), "open")
 }
 
 // Contract: byte parser should handle CRLF and preserve tail.
@@ -631,7 +808,7 @@ func Test_FrontmatterParser_ReturnsTail_When_CRLFInput(t *testing.T) {
 
 	payload := "---\r\nstatus: open\r\n---\r\n---\r\nbody\r\n"
 
-	_, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
+	_, tail, err := frontmatter.ParseBytes([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
@@ -647,160 +824,18 @@ func Test_FrontmatterParser_ReturnsEmpty_When_NoKeys(t *testing.T) {
 
 	payload := wrapFrontmatter("", "body\n")
 
-	fm, tail, err := frontmatter.ParseFrontmatter([]byte(payload))
+	fm, tail, err := frontmatter.ParseBytes([]byte(payload))
 	if err != nil {
 		t.Fatalf("parse frontmatter: %v", err)
 	}
 
-	if len(fm) != 0 {
+	if fm.Len() != 0 {
 		t.Fatal("expected empty frontmatter")
 	}
 
 	if string(tail) != "body\n" {
 		t.Fatalf("tail mismatch: got %q", string(tail))
 	}
-}
-
-// Contract: reader parsing should reject missing delimiters and runaway scans.
-func Test_FrontmatterReader_ReturnsError_When_DelimitersMissing(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		src  string
-	}{
-		{
-			name: "empty input",
-			src:  "",
-		},
-		{
-			name: "missing opening delimiter",
-			src:  "id: 1\n---\n",
-		},
-		{
-			name: "missing closing delimiter",
-			src:  "---\nid: 1\n",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			_, _, err := frontmatter.ParseFrontmatterReader(strings.NewReader(tc.src))
-			if err == nil {
-				t.Fatal("expected error")
-			}
-		})
-	}
-}
-
-// Contract: reader parsing should fail once frontmatter exceeds the line cap.
-func Test_FrontmatterReader_ReturnsError_When_LineLimitExceeded(t *testing.T) {
-	t.Parallel()
-
-	var builder strings.Builder
-	builder.WriteString("---\n")
-
-	for i := range 201 {
-		_, _ = fmt.Fprintf(&builder, "k%d: v\n", i)
-	}
-
-	builder.WriteString("---\n")
-
-	_, _, err := frontmatter.ParseFrontmatterReader(strings.NewReader(builder.String()))
-	if err == nil {
-		t.Fatal("expected error")
-	}
-}
-
-// Contract: reader parser should trim leading blank lines when configured.
-func Test_FrontmatterReader_ReturnsTail_When_DefaultTrimEnabled(t *testing.T) {
-	t.Parallel()
-
-	payload := wrapFrontmatter("status: open", "\n\nBody\n")
-
-	_, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload))
-	if err != nil {
-		t.Fatalf("parse frontmatter: %v", err)
-	}
-
-	body, err := io.ReadAll(tailReader)
-	if err != nil {
-		t.Fatalf("read tail: %v", err)
-	}
-
-	if string(body) != "Body\n" {
-		t.Fatalf("tail mismatch: got %q", string(body))
-	}
-}
-
-// Contract: reader parser should preserve leading blank lines when trimming is disabled.
-func Test_FrontmatterReader_ReturnsTail_When_TrimLeadingBlankTailDisabled(t *testing.T) {
-	t.Parallel()
-
-	payload := wrapFrontmatter("status: open", "\n\nBody\n")
-
-	_, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload), frontmatter.WithTrimLeadingBlankTail(false))
-	if err != nil {
-		t.Fatalf("parse frontmatter: %v", err)
-	}
-
-	body, err := io.ReadAll(tailReader)
-	if err != nil {
-		t.Fatalf("read tail: %v", err)
-	}
-
-	if string(body) != "\n\nBody\n" {
-		t.Fatalf("tail mismatch: got %q", string(body))
-	}
-}
-
-// Contract: reader parser should allow frontmatter-only payloads when delimiters are optional.
-func Test_FrontmatterReader_ReturnsValues_When_DelimitersOptional(t *testing.T) {
-	t.Parallel()
-
-	payload := "status: open\npriority: 2\n"
-
-	fm, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload), frontmatter.WithRequireDelimiter(false))
-	if err != nil {
-		t.Fatalf("parse frontmatter: %v", err)
-	}
-
-	body, err := io.ReadAll(tailReader)
-	if err != nil {
-		t.Fatalf("read tail: %v", err)
-	}
-
-	if len(body) != 0 {
-		t.Fatalf("expected empty tail, got %q", string(body))
-	}
-
-	requireScalarString(t, fm, "status", "open")
-	requireScalarInt(t, fm, "priority", 2)
-}
-
-// Contract: reader parser should allow empty tail after closing delimiter.
-func Test_FrontmatterReader_ReturnsEmptyTail_When_NoBody(t *testing.T) {
-	t.Parallel()
-
-	payload := wrapFrontmatter("status: open", "")
-
-	fm, tailReader, err := frontmatter.ParseFrontmatterReader(strings.NewReader(payload))
-	if err != nil {
-		t.Fatalf("parse frontmatter: %v", err)
-	}
-
-	body, err := io.ReadAll(tailReader)
-	if err != nil {
-		t.Fatalf("read tail: %v", err)
-	}
-
-	if len(body) != 0 {
-		t.Fatalf("expected empty tail, got %q", string(body))
-	}
-
-	requireScalarString(t, fm, "status", "open")
 }
 
 func wrapFrontmatter(fmContent string, tail string) string {
@@ -837,13 +872,7 @@ func Benchmark_FrontmatterParser_Parse(b *testing.B) {
 
 	b.Run("bytes", func(b *testing.B) {
 		for range b.N {
-			_, _, _ = frontmatter.ParseFrontmatter(payload)
-		}
-	})
-
-	b.Run("reader", func(b *testing.B) {
-		for range b.N {
-			_, _, _ = frontmatter.ParseFrontmatterReader(bytes.NewReader(payload))
+			_, _, _ = frontmatter.ParseBytes(payload)
 		}
 	})
 
@@ -882,83 +911,104 @@ func Benchmark_FrontmatterParser_Parse(b *testing.B) {
 		b.SetBytes(int64(len(typical)))
 
 		for range b.N {
-			_, _, _ = frontmatter.ParseFrontmatter(typical)
+			_, _, _ = frontmatter.ParseBytes(typical)
 		}
 	})
 }
 
-func requireScalarString(t *testing.T, fm frontmatter.Frontmatter, key, want string) {
+func requireScalarString(t *testing.T, fm frontmatter.Frontmatter, key []byte, want string) {
 	t.Helper()
 
-	value := requireValue(t, fm, key)
-	if value.Kind != frontmatter.ValueScalar {
-		t.Fatalf("%s: expected scalar", key)
-	}
-
-	if value.Scalar.Kind != frontmatter.ScalarString || value.Scalar.String != want {
-		t.Fatalf("%s: expected string %q", key, want)
-	}
-}
-
-func requireScalarInt(t *testing.T, fm frontmatter.Frontmatter, key string, want int64) {
-	t.Helper()
-
-	value := requireValue(t, fm, key)
-	if value.Kind != frontmatter.ValueScalar {
-		t.Fatalf("%s: expected scalar", key)
-	}
-
-	if value.Scalar.Kind != frontmatter.ScalarInt || value.Scalar.Int != want {
-		t.Fatalf("%s: expected int %d", key, want)
-	}
-}
-
-func requireScalarBool(t *testing.T, fm frontmatter.Frontmatter, key string, want bool) {
-	t.Helper()
-
-	value := requireValue(t, fm, key)
-	if value.Kind != frontmatter.ValueScalar {
-		t.Fatalf("%s: expected scalar", key)
-	}
-
-	if value.Scalar.Kind != frontmatter.ScalarBool || value.Scalar.Bool != want {
-		t.Fatalf("%s: expected bool %v", key, want)
-	}
-}
-
-func requireList(t *testing.T, fm frontmatter.Frontmatter, key string, want []string) {
-	t.Helper()
-
-	value := requireValue(t, fm, key)
-	if value.Kind != frontmatter.ValueList {
-		t.Fatalf("%s: expected list", key)
-	}
-
-	if !reflect.DeepEqual(value.List, want) {
-		t.Fatalf("%s: list mismatch: got %v want %v", key, value.List, want)
-	}
-}
-
-func requireObject(t *testing.T, fm frontmatter.Frontmatter, key string, want map[string]frontmatter.Scalar) {
-	t.Helper()
-
-	value := requireValue(t, fm, key)
-	if value.Kind != frontmatter.ValueObject {
-		t.Fatalf("%s: expected object", key)
-	}
-
-	if !reflect.DeepEqual(value.Object, want) {
-		t.Fatalf("%s: object mismatch: got %v want %v", key, value.Object, want)
-	}
-}
-
-func requireValue(t *testing.T, fm frontmatter.Frontmatter, key string) frontmatter.Value {
-	t.Helper()
-
-	value, ok := fm[key]
+	got, ok := fm.GetString(key)
 	if !ok {
-		t.Fatalf("missing key %q", key)
+		t.Fatalf("%s: expected string scalar, key missing or wrong type", string(key))
 	}
 
-	return value
+	if got != want {
+		t.Fatalf("%s: expected %q, got %q", string(key), want, got)
+	}
+}
+
+func requireScalarInt(t *testing.T, fm frontmatter.Frontmatter, key []byte, want int64) {
+	t.Helper()
+
+	got, ok := fm.GetInt(key)
+	if !ok {
+		t.Fatalf("%s: expected int scalar, key missing or wrong type", string(key))
+	}
+
+	if got != want {
+		t.Fatalf("%s: expected %d, got %d", string(key), want, got)
+	}
+}
+
+func requireScalarBool(t *testing.T, fm frontmatter.Frontmatter, key []byte, want bool) {
+	t.Helper()
+
+	got, ok := fm.GetBool(key)
+	if !ok {
+		t.Fatalf("%s: expected bool scalar, key missing or wrong type", string(key))
+	}
+
+	if got != want {
+		t.Fatalf("%s: expected %v, got %v", string(key), want, got)
+	}
+}
+
+func requireList(t *testing.T, fm frontmatter.Frontmatter, key []byte, want []string) {
+	t.Helper()
+
+	got, ok := fm.GetList(key)
+	if !ok {
+		t.Fatalf("%s: expected list, key missing or wrong type", string(key))
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("%s: list length mismatch: got %d want %d", string(key), len(got), len(want))
+	}
+
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("%s[%d]: got %q want %q", string(key), i, got[i], want[i])
+		}
+	}
+}
+
+func requireObject(t *testing.T, fm frontmatter.Frontmatter, key []byte, want map[string]any) {
+	t.Helper()
+
+	entries, ok := fm.GetObject(key)
+	if !ok {
+		t.Fatalf("%s: expected object, key missing or wrong type", string(key))
+	}
+
+	if len(entries) != len(want) {
+		t.Fatalf("%s: object size mismatch: got %d want %d", string(key), len(entries), len(want))
+	}
+
+	for _, entry := range entries {
+		entryKey := string(entry.Key)
+
+		wantVal, exists := want[entryKey]
+		if !exists {
+			t.Fatalf("%s: unexpected key %q", string(key), entryKey)
+		}
+
+		switch wv := wantVal.(type) {
+		case string:
+			if entry.Value.Kind != frontmatter.ScalarString || string(entry.Value.Bytes) != wv {
+				t.Fatalf("%s.%s: expected string %q", string(key), entryKey, wv)
+			}
+		case int64:
+			if entry.Value.Kind != frontmatter.ScalarInt || entry.Value.Int != wv {
+				t.Fatalf("%s.%s: expected int %d", string(key), entryKey, wv)
+			}
+		case bool:
+			if entry.Value.Kind != frontmatter.ScalarBool || entry.Value.Bool != wv {
+				t.Fatalf("%s.%s: expected bool %v", string(key), entryKey, wv)
+			}
+		default:
+			t.Fatalf("%s.%s: unsupported want type %T", string(key), entryKey, wantVal)
+		}
+	}
 }

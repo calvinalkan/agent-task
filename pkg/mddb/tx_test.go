@@ -1,6 +1,7 @@
 package mddb_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -11,7 +12,7 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/mddb"
 )
 
-func Test_Tx_Creates_Doc_When_Put_And_Commit(t *testing.T) {
+func Test_Tx_Creates_Doc_When_Create_And_Commit(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -27,9 +28,9 @@ func Test_Tx_Creates_Doc_When_Put_And_Commit(t *testing.T) {
 
 	doc := newTestDoc(t, "Test Doc")
 
-	result, err := tx.Put(doc)
+	result, err := tx.Create(doc)
 	if err != nil {
-		t.Fatalf("put: %v", err)
+		t.Fatalf("create: %v", err)
 	}
 
 	if result.ID() != doc.DocID {
@@ -92,7 +93,7 @@ func Test_Tx_Creates_Doc_When_Put_And_Commit(t *testing.T) {
 	}
 }
 
-func Test_Tx_Updates_Doc_When_Put_With_Existing_ID(t *testing.T) {
+func Test_Tx_Updates_Doc_When_Update_With_Existing_ID(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -103,7 +104,7 @@ func Test_Tx_Updates_Doc_When_Put_With_Existing_ID(t *testing.T) {
 
 	// Create initial doc
 	doc := newTestDoc(t, "Original Title")
-	putTestDoc(t.Context(), t, s, doc)
+	createTestDoc(t.Context(), t, s, doc)
 
 	// Update doc
 	tx, err := s.Begin(t.Context())
@@ -114,9 +115,9 @@ func Test_Tx_Updates_Doc_When_Put_With_Existing_ID(t *testing.T) {
 	doc.DocTitle = "Updated Title"
 	doc.DocStatus = "closed"
 
-	_, err = tx.Put(doc)
+	_, err = tx.Update(doc)
 	if err != nil {
-		t.Fatalf("put update: %v", err)
+		t.Fatalf("update: %v", err)
 	}
 
 	err = tx.Commit(t.Context())
@@ -156,7 +157,7 @@ func Test_Tx_Removes_Doc_When_Delete_And_Commit(t *testing.T) {
 
 	defer func() { _ = s.Close() }()
 
-	doc := putTestDoc(t.Context(), t, s, newTestDoc(t, "To Delete"))
+	doc := createTestDoc(t.Context(), t, s, newTestDoc(t, "To Delete"))
 	absPath := filepath.Join(dir, doc.DocPath)
 
 	// Verify file exists
@@ -171,7 +172,7 @@ func Test_Tx_Removes_Doc_When_Delete_And_Commit(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	err = tx.Delete(doc.DocID, doc.DocPath)
+	err = tx.Delete(doc.DocID)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -218,9 +219,9 @@ func Test_Tx_Discards_Changes_When_Rollback(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	doc, err := tx.Put(newTestDoc(t, "Should Not Exist"))
+	doc, err := tx.Create(newTestDoc(t, "Should Not Exist"))
 	if err != nil {
-		t.Fatalf("put: %v", err)
+		t.Fatalf("create: %v", err)
 	}
 
 	err = tx.Rollback()
@@ -229,7 +230,7 @@ func Test_Tx_Discards_Changes_When_Rollback(t *testing.T) {
 	}
 
 	// Verify file NOT created
-	absPath := filepath.Join(dir, doc.RelPath())
+	absPath := filepath.Join(dir, doc.DocPath)
 
 	_, err = os.Stat(absPath)
 	if !os.IsNotExist(err) {
@@ -317,12 +318,12 @@ func Test_Tx_Returns_Error_When_Operations_After_Commit(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	_, err = tx.Put(newTestDoc(t, "After Commit"))
+	_, err = tx.Create(newTestDoc(t, "After Commit"))
 	if err == nil || !strings.Contains(err.Error(), "closed") {
-		t.Fatalf("put after commit: got %v, want 'closed'", err)
+		t.Fatalf("create after commit: got %v, want 'closed'", err)
 	}
 
-	err = tx.Delete("01934567-89ab-7def-8123-456789abcdef", "any/path.md")
+	err = tx.Delete("01934567-89ab-7def-8123-456789abcdef")
 	if err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("delete after commit: got %v, want 'closed'", err)
 	}
@@ -352,13 +353,199 @@ func Test_Tx_Returns_Error_When_Operations_After_Rollback(t *testing.T) {
 		t.Fatalf("rollback: %v", err)
 	}
 
-	_, err = tx.Put(newTestDoc(t, "After Rollback"))
+	_, err = tx.Create(newTestDoc(t, "After Rollback"))
 	if err == nil || !strings.Contains(err.Error(), "closed") {
-		t.Fatalf("put after rollback: got %v, want 'closed'", err)
+		t.Fatalf("create after rollback: got %v, want 'closed'", err)
 	}
 }
 
-func Test_Tx_Succeeds_When_Delete_Nonexistent_Doc(t *testing.T) {
+func Test_Tx_Keeps_Other_Ops_When_Delete_NotFound(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	s := openTestStore(t, dir)
+
+	defer func() { _ = s.Close() }()
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	docA := newTestDoc(t, "Alpha")
+
+	_, err = tx.Create(docA)
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+
+	missing := newTestDoc(t, "Missing")
+
+	err = tx.Delete(missing.DocID)
+	if err == nil || !errors.Is(err, mddb.ErrNotFound) {
+		t.Fatalf("delete: got %v, want ErrNotFound", err)
+	}
+
+	docB := newTestDoc(t, "Beta")
+
+	_, err = tx.Create(docB)
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+
+	err = tx.Commit(t.Context())
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	_, err = s.Get(t.Context(), docA.DocID)
+	if err != nil {
+		t.Fatalf("get a: %v", err)
+	}
+
+	_, err = s.Get(t.Context(), docB.DocID)
+	if err != nil {
+		t.Fatalf("get b: %v", err)
+	}
+}
+
+func Test_Tx_Calls_AfterDelete_When_Delete_Commits(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	var gotID string
+
+	cfg := testConfig(dir)
+	cfg.AfterDelete = func(_ context.Context, _ *sql.Tx, id string) error {
+		gotID = id
+
+		return nil
+	}
+
+	s, err := mddb.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	doc := createTestDoc(t.Context(), t, s, newTestDoc(t, "To Delete"))
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	err = tx.Delete(doc.DocID)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	err = tx.Commit(t.Context())
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if gotID != doc.DocID {
+		t.Fatalf("after delete id = %q, want %q", gotID, doc.DocID)
+	}
+}
+
+func Test_Tx_Returns_ErrCommitIncomplete_When_AfterDelete_Fails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	cfg := testConfig(dir)
+	cfg.AfterDelete = func(_ context.Context, _ *sql.Tx, _ string) error {
+		return errors.New("after delete failed")
+	}
+
+	s, err := mddb.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	doc := createTestDoc(t.Context(), t, s, newTestDoc(t, "To Delete"))
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	err = tx.Delete(doc.DocID)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	err = tx.Commit(t.Context())
+	if err == nil || !errors.Is(err, mddb.ErrCommitIncomplete) {
+		t.Fatalf("commit: got %v, want ErrCommitIncomplete", err)
+	}
+
+	walPath := filepath.Join(dir, ".mddb", "wal")
+
+	info, statErr := os.Stat(walPath)
+	if statErr != nil {
+		t.Fatalf("stat wal: %v", statErr)
+	}
+
+	if info.Size() == 0 {
+		t.Fatalf("wal size = %d, want > 0", info.Size())
+	}
+}
+
+func Test_Tx_Returns_ErrCommitIncomplete_When_AfterPut_Fails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	cfg := testConfig(dir)
+	cfg.AfterPut = func(_ context.Context, _ *sql.Tx, _ *TestDoc) error {
+		return errors.New("after put failed")
+	}
+
+	s, err := mddb.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	doc := newTestDoc(t, "To Create")
+
+	_, err = tx.Create(doc)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	err = tx.Commit(t.Context())
+	if err == nil || !errors.Is(err, mddb.ErrCommitIncomplete) {
+		t.Fatalf("commit: got %v, want ErrCommitIncomplete", err)
+	}
+
+	walPath := filepath.Join(dir, ".mddb", "wal")
+
+	info, statErr := os.Stat(walPath)
+	if statErr != nil {
+		t.Fatalf("stat wal: %v", statErr)
+	}
+
+	if info.Size() == 0 {
+		t.Fatalf("wal size = %d, want > 0", info.Size())
+	}
+}
+
+func Test_Tx_Returns_ErrNotFound_When_Delete_Nonexistent_Doc(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -374,9 +561,9 @@ func Test_Tx_Succeeds_When_Delete_Nonexistent_Doc(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	err = tx.Delete(nonexistent.DocID, nonexistent.DocPath)
-	if err != nil {
-		t.Fatalf("delete: %v", err)
+	err = tx.Delete(nonexistent.DocID)
+	if err == nil || !errors.Is(err, mddb.ErrNotFound) {
+		t.Fatalf("delete: got %v, want ErrNotFound", err)
 	}
 
 	err = tx.Commit(t.Context())
@@ -385,7 +572,7 @@ func Test_Tx_Succeeds_When_Delete_Nonexistent_Doc(t *testing.T) {
 	}
 }
 
-func Test_Tx_Applies_Last_Put_When_Multiple_Puts_Same_ID(t *testing.T) {
+func Test_Tx_Applies_Last_Create_When_Multiple_Creates_Same_ID(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -401,12 +588,12 @@ func Test_Tx_Applies_Last_Put_When_Multiple_Puts_Same_ID(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	_, err = tx.Put(first)
+	_, err = tx.Create(first)
 	if err != nil {
-		t.Fatalf("first put: %v", err)
+		t.Fatalf("first create: %v", err)
 	}
 
-	// Second put with same ID
+	// Second create with same ID (overwrites in buffer since not committed yet)
 	second := &TestDoc{
 		DocID:       first.DocID,
 		DocShort:    first.DocShort,
@@ -416,9 +603,9 @@ func Test_Tx_Applies_Last_Put_When_Multiple_Puts_Same_ID(t *testing.T) {
 		DocPriority: 3,
 	}
 
-	_, err = tx.Put(second)
+	_, err = tx.Create(second)
 	if err != nil {
-		t.Fatalf("second put: %v", err)
+		t.Fatalf("second create: %v", err)
 	}
 
 	err = tx.Commit(t.Context())
@@ -451,12 +638,12 @@ func Test_Tx_Removes_Doc_When_Put_Then_Delete_Same_ID(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	doc, err := tx.Put(newTestDoc(t, "Will Be Deleted"))
+	doc, err := tx.Create(newTestDoc(t, "Will Be Deleted"))
 	if err != nil {
-		t.Fatalf("put: %v", err)
+		t.Fatalf("create: %v", err)
 	}
 
-	err = tx.Delete(doc.ID(), doc.RelPath())
+	err = tx.Delete(doc.ID())
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -467,7 +654,7 @@ func Test_Tx_Removes_Doc_When_Put_Then_Delete_Same_ID(t *testing.T) {
 	}
 
 	// Verify file doesn't exist
-	absPath := filepath.Join(dir, doc.RelPath())
+	absPath := filepath.Join(dir, doc.DocPath)
 
 	_, err = os.Stat(absPath)
 	if !os.IsNotExist(err) {
@@ -505,12 +692,12 @@ func Test_Tx_Persists_Doc_When_Commit_And_Reopen(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 
-	doc, err := tx.Put(newTestDoc(t, "Persist Test"))
+	doc, err := tx.Create(newTestDoc(t, "Persist Test"))
 	if err != nil {
 		_ = tx.Rollback()
 		_ = s.Close()
 
-		t.Fatalf("put: %v", err)
+		t.Fatalf("create: %v", err)
 	}
 
 	err = tx.Commit(t.Context())
@@ -615,12 +802,12 @@ func Test_Tx_Returns_Error_When_Commit_On_Nil_Tx(t *testing.T) {
 	}
 }
 
-func Test_Tx_Returns_Error_When_Put_On_Nil_Tx(t *testing.T) {
+func Test_Tx_Returns_Error_When_Create_On_Nil_Tx(t *testing.T) {
 	t.Parallel()
 
 	var tx *mddb.Tx[TestDoc]
 
-	_, err := tx.Put(&TestDoc{})
+	_, err := tx.Create(&TestDoc{})
 	if err == nil {
 		t.Fatal("expected error for nil tx")
 	}
@@ -635,123 +822,13 @@ func Test_Tx_Returns_Error_When_Delete_On_Nil_Tx(t *testing.T) {
 
 	var tx *mddb.Tx[TestDoc]
 
-	err := tx.Delete("01934567-89ab-7def-8123-456789abcdef", "any/path.md")
+	err := tx.Delete("01934567-89ab-7def-8123-456789abcdef")
 	if err == nil {
 		t.Fatal("expected error for nil tx")
 	}
 
 	if !strings.Contains(err.Error(), "nil") {
 		t.Fatalf("error = %v, want contains 'nil'", err)
-	}
-}
-
-func Test_Tx_Preserves_Body_When_Put_And_Get(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	s := openTestStore(t, dir)
-
-	defer func() { _ = s.Close() }()
-
-	tx, err := s.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-
-	body := "This is the body.\n\nMultiple paragraphs."
-	doc := newTestDoc(t, "Body Test")
-	doc.DocBody = body
-
-	result, err := tx.Put(doc)
-	if err != nil {
-		t.Fatalf("put: %v", err)
-	}
-
-	err = tx.Commit(t.Context())
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	// Verify body in file
-	absPath := filepath.Join(dir, result.RelPath())
-
-	content := readFileString(t, absPath)
-	if !strings.Contains(content, body) {
-		t.Fatalf("file missing body, content:\n%s", content)
-	}
-
-	// Verify body via Get
-	got, err := s.Get(t.Context(), result.ID())
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-
-	if got.Body() != body {
-		t.Fatalf("body = %q, want %q", got.Body(), body)
-	}
-}
-
-func Test_Tx_Preserves_Body_When_Update_Via_Get_Put(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	s := openTestStore(t, dir)
-
-	defer func() { _ = s.Close() }()
-
-	// Create doc with body
-	body := "Original body content."
-	doc := newTestDoc(t, "Original Title")
-	doc.DocBody = body
-	putTestDoc(t.Context(), t, s, doc)
-
-	// Get, modify, put back
-	got, err := s.Get(t.Context(), doc.DocID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-
-	// Create updated doc (preserve body)
-	updated := &TestDoc{
-		DocID:       got.ID(),
-		DocShort:    got.ShortID(),
-		DocPath:     got.RelPath(),
-		DocMtime:    got.MtimeNS(),
-		DocTitle:    "Modified Title",
-		DocStatus:   got.DocStatus,
-		DocPriority: got.DocPriority,
-		DocBody:     got.Body(),
-	}
-
-	tx, err := s.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-
-	_, err = tx.Put(updated)
-	if err != nil {
-		t.Fatalf("put update: %v", err)
-	}
-
-	err = tx.Commit(t.Context())
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	// Verify body preserved
-	final, err := s.Get(t.Context(), doc.DocID)
-	if err != nil {
-		t.Fatalf("get updated: %v", err)
-	}
-
-	if final.Title() != "Modified Title" {
-		t.Fatalf("title = %q, want Modified Title", final.Title())
-	}
-
-	if final.Body() != body {
-		t.Fatalf("body = %q, want %q", final.Body(), body)
 	}
 }
 
@@ -772,12 +849,63 @@ func Test_Tx_Returns_Error_When_Delete_With_Empty_ID(t *testing.T) {
 	defer func() { _ = tx.Rollback() }()
 
 	// Empty ID should fail
-	err = tx.Delete("", "any/path.md")
+	err = tx.Delete("")
 	if err == nil {
 		t.Fatal("expected error for empty ID")
 	}
 
 	if !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("error = %v, want contains 'empty'", err)
+	}
+}
+
+func Test_Tx_Create_Returns_ErrAlreadyExists_When_Doc_Exists(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	s := openTestStore(t, dir)
+
+	defer func() { _ = s.Close() }()
+
+	// Create initial doc
+	doc := newTestDoc(t, "Existing Doc")
+	createTestDoc(t.Context(), t, s, doc)
+
+	// Try to create again with same ID
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Create(doc)
+	if err == nil || !errors.Is(err, mddb.ErrAlreadyExists) {
+		t.Fatalf("create: got %v, want ErrAlreadyExists", err)
+	}
+}
+
+func Test_Tx_Update_Returns_ErrNotFound_When_Doc_Not_Exists(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	s := openTestStore(t, dir)
+
+	defer func() { _ = s.Close() }()
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
+	doc := newTestDoc(t, "Non-existing Doc")
+
+	_, err = tx.Update(doc)
+	if err == nil || !errors.Is(err, mddb.ErrNotFound) {
+		t.Fatalf("update: got %v, want ErrNotFound", err)
 	}
 }

@@ -13,6 +13,26 @@ import (
 // ErrNotFound indicates the requested document does not exist.
 var ErrNotFound = errors.New("not found")
 
+// GetPrefixRow contains the base fields returned by [MDDB.GetByPrefix].
+// These correspond to just the required SQLite columns that all documents must have.
+// Use [MDDB.Get] to retrieve the full document with body and custom fields.
+type GetPrefixRow struct {
+	// ID is the document's unique identifier.
+	ID string
+
+	// ShortID is the short identifier for human-friendly references.
+	ShortID string
+
+	// Path is the relative file path (relative to data directory).
+	Path string
+
+	// MtimeNS is the file modification time in nanoseconds.
+	MtimeNS int64
+
+	// Title is the document title for display in listings.
+	Title string
+}
+
 // Query executes fn with a read lock held for custom SQL queries.
 //
 // Acquires shared lock, replays pending WAL if needed, then calls fn with
@@ -24,68 +44,64 @@ func Query[T Document, R any](ctx context.Context, s *MDDB[T], fn func(db *sql.D
 	var zero R
 
 	if ctx == nil {
-		return zero, errors.New("query: context is nil")
+		return zero, wrap(errors.New("context is nil"))
 	}
 
 	if s == nil || s.sql == nil || s.wal == nil {
-		return zero, fmt.Errorf("query: %w", ErrClosed)
+		return zero, wrap(ErrClosed)
 	}
 
-	lockCtx, cancel := context.WithTimeout(ctx, s.lockTimeout)
-	defer cancel()
-
-	readLock, err := s.acquireReadLock(ctx, lockCtx)
+	release, err := s.acquireReadLock(ctx)
 	if err != nil {
-		return zero, fmt.Errorf("query: %w", err)
+		return zero, wrap(err)
 	}
 
-	defer func() { _ = readLock.Close() }()
+	defer release()
 
-	return fn(s.sql)
+	result, err := fn(s.sql)
+
+	return result, wrap(err)
 }
 
 // GetByPrefix finds documents by short_id or ID prefix.
 //
-// Returns up to 50 [BaseMeta] matches ordered by ID. Use [MDDB.Get] for full
+// Returns up to 50 [GetPrefixRow] matches ordered by ID. Use [MDDB.Get] for full
 // documents. Empty slice means no match; multiple results means ambiguous prefix.
 //
 // Returns [ErrClosed] if store is closed.
-func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]BaseMeta, error) {
+func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]GetPrefixRow, error) {
 	if ctx == nil {
-		return nil, errors.New("get by prefix: context is nil")
+		return nil, wrap(errors.New("context is nil"))
 	}
 
 	if mddb == nil || mddb.sql == nil || mddb.wal == nil {
-		return nil, fmt.Errorf("get by prefix: %w", ErrClosed)
+		return nil, wrap(ErrClosed)
 	}
 
 	if prefix == "" {
-		return nil, errors.New("get by prefix: prefix is empty")
+		return nil, wrap(errors.New("prefix is empty"))
 	}
 
-	lockCtx, cancel := context.WithTimeout(ctx, mddb.lockTimeout)
-	defer cancel()
-
-	readLock, err := mddb.acquireReadLock(ctx, lockCtx)
+	release, err := mddb.acquireReadLock(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get by prefix: %w", err)
+		return nil, wrap(err)
 	}
 
-	defer func() { _ = readLock.Close() }()
+	defer release()
 
-	query := "SELECT id, short_id, path, mtime_ns, title FROM " + mddb.tableName +
+	query := "SELECT id, short_id, path, mtime_ns, title FROM " + mddb.schema.tableName +
 		" WHERE short_id LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\' ORDER BY id LIMIT 50"
 
 	pattern := escapeLike(prefix) + "%"
 
 	rows, err := mddb.sql.QueryContext(ctx, query, pattern, pattern)
 	if err != nil {
-		return nil, fmt.Errorf("get by prefix: query: %w", err)
+		return nil, wrap(fmt.Errorf("sqlite: %w", err))
 	}
 
 	defer func() { _ = rows.Close() }()
 
-	var results []BaseMeta
+	var results []GetPrefixRow
 
 	for rows.Next() {
 		var (
@@ -98,10 +114,10 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]BaseMeta
 
 		scanErr := rows.Scan(&idStr, &shortID, &path, &mtimeNS, &title)
 		if scanErr != nil {
-			return nil, fmt.Errorf("get by prefix: scan: %w", scanErr)
+			return nil, wrap(fmt.Errorf("sqlite: %w", scanErr))
 		}
 
-		results = append(results, BaseMeta{
+		results = append(results, GetPrefixRow{
 			ID:      idStr,
 			ShortID: shortID,
 			Path:    path,
@@ -112,7 +128,7 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]BaseMeta
 
 	err = rows.Err()
 	if err != nil {
-		return nil, fmt.Errorf("get by prefix: rows: %w", err)
+		return nil, wrap(fmt.Errorf("sqlite: %w", err))
 	}
 
 	return results, nil
@@ -120,84 +136,86 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]BaseMeta
 
 // Get retrieves a document by full ID.
 //
-// Looks up path in SQLite, reads file, parses via [Config.Parse].
+// Looks up path in SQLite, reads file, builds via [Config.DocumentFrom].
 // For prefix lookup, use [MDDB.GetByPrefix] first.
 //
 // Returns [ErrNotFound] if document doesn't exist or file is missing.
-// Returns [ErrClosed] if store is closed.
+// Returns [ErrClosed] if mddb is closed.
 func (mddb *MDDB[T]) Get(ctx context.Context, id string) (*T, error) {
 	if ctx == nil {
-		return nil, errors.New("get: context is nil")
+		return nil, wrap(errors.New("context is nil"), withID(id))
 	}
 
 	if mddb == nil || mddb.sql == nil || mddb.wal == nil {
-		return nil, fmt.Errorf("get: %w", ErrClosed)
+		return nil, wrap(ErrClosed, withID(id))
 	}
 
 	if id == "" {
-		return nil, errors.New("get: id is empty")
+		return nil, wrap(ErrEmptyID)
 	}
 
-	lockCtx, cancel := context.WithTimeout(ctx, mddb.lockTimeout)
-	defer cancel()
-
-	readLock, err := mddb.acquireReadLock(ctx, lockCtx)
+	release, err := mddb.acquireReadLock(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get: %w", err)
+		return nil, wrap(err, withID(id))
 	}
 
-	defer func() { _ = readLock.Close() }()
+	defer release()
 
 	// We need to find the path. Query SQLite for it.
 	var path string
 
-	query := "SELECT path FROM " + mddb.tableName + " WHERE id = ?"
+	query := "SELECT path FROM " + mddb.schema.tableName + " WHERE id = ?"
 	row := mddb.sql.QueryRowContext(ctx, query, id)
 
 	err = row.Scan(&path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("get %s: %w", id, ErrNotFound)
+			return nil, wrap(ErrNotFound, withID(id))
 		}
 
-		return nil, fmt.Errorf("get %s: scan: %w", id, err)
+		return nil, wrap(fmt.Errorf("sqlite: %w", err), withID(id))
 	}
 
 	err = mddb.validateRelPath(path)
 	if err != nil {
-		return nil, fmt.Errorf("get %s: invalid path %q: %w", id, path, err)
+		return nil, wrap(fmt.Errorf("%w: path %q", err, path), withID(id))
 	}
 
-	return mddb.readDocumentFile(ctx, id, path)
+	doc, err := mddb.readDocumentFile(id, path)
+	if err != nil {
+		return nil, wrap(err, withID(id), withPath(path))
+	}
+
+	return doc, nil
 }
 
 // readDocumentFile reads and parses a document from its path.
-func (mddb *MDDB[T]) readDocumentFile(_ context.Context, expectedID string, relPath string) (*T, error) {
+func (mddb *MDDB[T]) readDocumentFile(expectedID string, relPath string) (*T, error) {
 	absPath := filepath.Join(mddb.dataDir, relPath)
 
 	info, err := mddb.fs.Stat(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("get %s: %w", expectedID, ErrNotFound)
+			return nil, ErrNotFound
 		}
 
-		return nil, fmt.Errorf("get: stat %s: %w", relPath, err)
+		return nil, fmt.Errorf("fs: %w", err)
 	}
 
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("get %s: not a regular file: %w", expectedID, ErrNotFound)
+		return nil, ErrNotFound
 	}
 
 	data, err := mddb.fs.ReadFile(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("get: read %s: %w", relPath, err)
+		return nil, fmt.Errorf("fs: %w", err)
 	}
 
 	mtimeNS := info.ModTime().UnixNano()
 
-	doc, err := mddb.parseDocumentContent(relPath, data, mtimeNS, expectedID)
+	doc, err := mddb.parseDocument(relPath, data, mtimeNS, expectedID)
 	if err != nil {
-		return nil, fmt.Errorf("get: parse: %w", err)
+		return nil, err
 	}
 
 	return doc, nil
