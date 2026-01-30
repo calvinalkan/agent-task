@@ -63,6 +63,49 @@ func Test_Reindex_Builds_SQLite_Index_When_Docs_Valid(t *testing.T) {
 	}
 }
 
+func Test_Reindex_Binds_TextColumns_When_UsingBorrowedBytes(t *testing.T) {
+	t.Parallel()
+
+	// Guard: we rely on unsafe.String for TEXT binding (not BLOB) during inserts.
+	// go-sqlite3 currently uses sqlite3_bind_text + SQLITE_TRANSIENT for strings.
+	// If the driver ever changes this behavior, comparisons would break.
+	dir := t.TempDir()
+
+	doc := newTestDoc(t, "Alpha")
+	writeTestDocFile(t, dir, doc)
+
+	s := openTestStore(t, dir)
+	defer func() { _ = s.Close() }()
+
+	_, err := s.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+
+	db := openIndex(t, dir)
+	defer func() { _ = db.Close() }()
+
+	var typeofID string
+	row := db.QueryRow("SELECT typeof(id) FROM "+testTableName+" WHERE id = ?", doc.DocID)
+	if err := row.Scan(&typeofID); err != nil {
+		t.Fatalf("typeof(id): %v", err)
+	}
+
+	if typeofID != "text" {
+		t.Fatalf("typeof(id) = %q, want text", typeofID)
+	}
+
+	var count int
+	row = db.QueryRow("SELECT COUNT(*) FROM "+testTableName+" WHERE id = ?", doc.DocID)
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+
+	if count != 1 {
+		t.Fatalf("count = %d, want 1", count)
+	}
+}
+
 func Test_Reindex_Calls_AfterBulkIndex_When_Reindexing(t *testing.T) {
 	t.Parallel()
 

@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/calvinalkan/fileproc"
 
@@ -122,7 +124,7 @@ func (mddb *MDDB[T]) reindexLocked(ctx context.Context) (int, error) {
 		return 0, scanErr
 	}
 
-	indexed, err := mddb.rebuildIndex(ctx, entries)
+	indexed, err := mddb.rebuildIndexTemp(ctx, entries)
 	if err != nil {
 		return 0, err
 	}
@@ -212,10 +214,85 @@ func (mddb *MDDB[T]) scanDocumentFiles(ctx context.Context) ([]*IndexableDocumen
 	return nil, &IndexScanError{Issues: issues}
 }
 
-// rebuildIndex drops and recreates the index table, then bulk inserts all documents.
-// Runs in a single transaction so failures leave the old index intact.
-func (mddb *MDDB[T]) rebuildIndex(ctx context.Context, entries []*IndexableDocument) (int, error) {
-	tx, err := mddb.sql.BeginTx(ctx, nil)
+// rebuildIndexTemp rebuilds the index into a temp DB and atomically swaps it in.
+//
+// Why:
+//   - Rebuilds are fully derived from markdown files (source of truth).
+//   - We can use unsafe SQLite pragmas for speed without risking corruption.
+//   - The temp DB is swapped in atomically, so readers see either old or new index.
+func (mddb *MDDB[T]) rebuildIndexTemp(ctx context.Context, entries []*IndexableDocument) (int, error) {
+	mddbDir := filepath.Dir(mddb.lockPath)
+	indexPath := filepath.Join(mddbDir, "index.sqlite")
+	tmpPath := indexPath + ".tmp"
+
+	// Clean up any stale temp DB from a previous crash before rebuilding.
+	if err := mddb.removeFileIfExists(tmpPath); err != nil {
+		return 0, fmt.Errorf("fs: remove temp index: %w", err)
+	}
+
+	if err := mddb.removeFileIfExists(tmpPath + "-wal"); err != nil {
+		return 0, fmt.Errorf("fs: remove temp wal: %w", err)
+	}
+
+	if err := mddb.removeFileIfExists(tmpPath + "-shm"); err != nil {
+		return 0, fmt.Errorf("fs: remove temp shm: %w", err)
+	}
+
+	// Build into a fresh temp DB with unsafe pragmas (fast, disposable).
+	tmpDB, err := openSqliteUnsafe(ctx, tmpPath)
+	if err != nil {
+		return 0, err
+	}
+
+	var removeErr error
+
+	defer func() {
+		removeErr = errors.Join(removeErr, mddb.fs.Remove(tmpPath))
+	}()
+
+	indexed, rebuildErr := mddb.rebuildIndexOnDB(ctx, tmpDB, entries, false)
+	closeErr := tmpDB.Close()
+
+	if rebuildErr != nil {
+		return 0, rebuildErr
+	}
+
+	if closeErr != nil {
+		return 0, fmt.Errorf("sqlite: close temp index: %w", closeErr)
+	}
+
+	// Close current DB before swap. Windows disallows renaming open files.
+	oldDB := mddb.sql
+	if closeOldErr := oldDB.Close(); closeOldErr != nil {
+		return 0, fmt.Errorf("sqlite: close old index: %w", closeOldErr)
+	}
+
+	// Atomically replace old index with the rebuilt temp DB.
+	if renameErr := mddb.fs.Rename(tmpPath, indexPath); renameErr != nil {
+		// Best-effort reopen old DB so the store stays usable.
+		reopen, reopenErr := openSqlite(ctx, indexPath)
+		if reopenErr == nil {
+			mddb.sql = reopen
+		}
+
+		return 0, fmt.Errorf("fs: swap index: %w", renameErr)
+	}
+
+	// Reopen the swapped DB with safe runtime pragmas.
+	newDB, err := openSqlite(ctx, indexPath)
+	if err != nil {
+		return 0, err
+	}
+
+	mddb.sql = newDB
+
+	return indexed, nil
+}
+
+// rebuildIndexOnDB drops and recreates the index table, then bulk inserts all documents.
+// Runs in a single transaction so failures leave the target DB untouched.
+func (mddb *MDDB[T]) rebuildIndexOnDB(ctx context.Context, db *sql.DB, entries []*IndexableDocument, replace bool) (int, error) {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: begin txn: %w", err)
 	}
@@ -245,7 +322,7 @@ func (mddb *MDDB[T]) rebuildIndex(ctx context.Context, entries []*IndexableDocum
 	}
 
 	if len(entries) > 0 {
-		err = mddb.bulkInsertDocs(ctx, tx, entries)
+		err = mddb.bulkInsertDocs(ctx, tx, entries, replace)
 		if err != nil {
 			return 0, err
 		}
@@ -267,16 +344,60 @@ func (mddb *MDDB[T]) rebuildIndex(ctx context.Context, entries []*IndexableDocum
 	return len(entries), nil
 }
 
+// openSqliteUnsafe opens a temporary index DB for rebuilds using unsafe pragmas.
+//
+// Why:
+//   - Reindex rebuilds are derived entirely from markdown files.
+//   - Temp DB is disposable; crash means rerun rebuild.
+//   - Unsafe pragmas (journal OFF, sync OFF) are much faster.
+func openSqliteUnsafe(ctx context.Context, path string) (*sql.DB, error) {
+	if path == "" {
+		return nil, errors.New("sqlite: path is empty")
+	}
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: open: %w", err)
+	}
+
+	// Single connection ensures pragma consistency and avoids lock churn.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	err = db.PingContext(ctx)
+	if err != nil {
+		_ = db.Close()
+
+		return nil, fmt.Errorf("sqlite: ping: %w", err)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		PRAGMA journal_mode = OFF;
+		PRAGMA synchronous = OFF;
+		PRAGMA locking_mode = EXCLUSIVE;
+		PRAGMA temp_store = MEMORY;
+		PRAGMA foreign_keys = OFF;
+		PRAGMA cache_size = 100000;
+	`)
+	if err != nil {
+		_ = db.Close()
+
+		return nil, fmt.Errorf("sqlite: apply unsafe pragmas: %w", err)
+	}
+
+	return db, nil
+}
+
 // 50-100 seems to be the optimum for SQLite with CGO.
 const indexInsertBatchSize = 50
 
 // bulkInsertDocs inserts documents in batches for efficiency.
 // Uses prepared statements to reduce parse overhead.
-func (mddb *MDDB[T]) bulkInsertDocs(ctx context.Context, tx *sql.Tx, entries []*IndexableDocument) error {
+func (mddb *MDDB[T]) bulkInsertDocs(ctx context.Context, tx *sql.Tx, entries []*IndexableDocument, withReplace bool) error {
 	colCount := len(mddb.schema.columnNames())
 
 	// Pre-compile statement for full batches (the common case).
-	batchStmt, err := mddb.prepareUpsertStmt(ctx, tx, indexInsertBatchSize)
+	batchStmt, err := mddb.prepareUpsertStmt(ctx, tx, indexInsertBatchSize, withReplace)
 	if err != nil {
 		return err
 	}
@@ -301,7 +422,7 @@ func (mddb *MDDB[T]) bulkInsertDocs(ctx context.Context, tx *sql.Tx, entries []*
 
 		isRemainderStmt := len(batch) < indexInsertBatchSize
 		if isRemainderStmt {
-			stmt, err = mddb.prepareUpsertStmt(ctx, tx, len(batch))
+			stmt, err = mddb.prepareUpsertStmt(ctx, tx, len(batch), withReplace)
 			if err != nil {
 				return err
 			}
@@ -334,6 +455,15 @@ func (mddb *MDDB[T]) bulkInsertDocs(ctx context.Context, tx *sql.Tx, entries []*
 				return fmt.Errorf("after bulk index: %w", err)
 			}
 		}
+	}
+
+	return nil
+}
+
+func (mddb *MDDB[T]) removeFileIfExists(path string) error {
+	err := mddb.fs.Remove(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("fs: remove: %w", err)
 	}
 
 	return nil

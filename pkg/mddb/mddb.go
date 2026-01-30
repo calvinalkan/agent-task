@@ -417,19 +417,7 @@ func openSqlite(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("sqlite: ping: %w", err)
 	}
 
-	err = applyPragmas(ctx, db)
-	if err != nil {
-		_ = db.Close()
-
-		return nil, err
-	}
-
-	return db, nil
-}
-
-// applyPragmas configures the SQLite connection using a single batch statement.
-func applyPragmas(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx, fmt.Sprintf(`
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
 		PRAGMA busy_timeout = %d;
 		PRAGMA journal_mode = WAL;
 		PRAGMA synchronous = FULL;
@@ -438,10 +426,12 @@ func applyPragmas(ctx context.Context, db *sql.DB) error {
 		PRAGMA temp_store = MEMORY;
 	`, sqliteBusyTimeout))
 	if err != nil {
-		return fmt.Errorf("sqlite: apply pragmas: %w", err)
+		_ = db.Close()
+
+		return nil, fmt.Errorf("sqlite: apply pragmas: %w", err)
 	}
 
-	return nil
+	return db, nil
 }
 
 // storedSchemaVersion reads the current SQLite PRAGMA user_version.

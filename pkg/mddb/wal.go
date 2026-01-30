@@ -398,7 +398,7 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 	if len(putDocs) > 0 {
 		colCount := len(mddb.schema.columnNames())
 
-		stmt, prepErr := mddb.prepareUpsertStmt(ctx, tx, 1)
+		stmt, prepErr := mddb.prepareUpsertStmt(ctx, tx, 1, true)
 		if prepErr != nil {
 			return prepErr
 		}

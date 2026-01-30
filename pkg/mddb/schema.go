@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"sort"
 	"strings"
+	"unsafe"
 )
 
 // ColumnType represents SQLite storage classes.
@@ -401,11 +402,14 @@ func isValidIdentifier(s string) bool {
 	return true
 }
 
-// prepareUpsertStmt prepares an INSERT OR REPLACE statement for bulk inserts.
+// prepareUpsertStmt prepares an INSERT statement for bulk inserts.
 // The statement accepts (rows * columnCount) placeholders, allowing multiple
 // documents to be inserted in a single exec call for better performance.
-func (mddb *MDDB[T]) prepareUpsertStmt(ctx context.Context, tx *sql.Tx, rows int) (*sql.Stmt, error) {
-	sqlStr := _buildUpsertSQL(mddb.schema.tableName, mddb.schema.columnNames(), rows)
+//
+// replace=true uses INSERT OR REPLACE for in-place updates (WAL/Tx writes).
+// replace=false uses INSERT for rebuilds into a fresh DB (faster, no conflicts).
+func (mddb *MDDB[T]) prepareUpsertStmt(ctx context.Context, tx *sql.Tx, rows int, replace bool) (*sql.Stmt, error) {
+	sqlStr := _buildUpsertSQL(mddb.schema.tableName, mddb.schema.columnNames(), rows, replace)
 
 	stmt, err := tx.PrepareContext(ctx, sqlStr)
 	if err != nil {
@@ -435,11 +439,22 @@ func (mddb *MDDB[T]) fillBatchUpsertSQLArgs(docs []IndexableDocument, colCount i
 // First 5 slots are base columns (id, short_id, path, mtime_ns, title),
 // remaining slots are filled by Config.SQLColumnValues for user columns.
 func (mddb *MDDB[T]) _fillDocUpsertSQLArgs(doc *IndexableDocument, dest []any) error {
-	dest[0] = string(doc.ID)
-	dest[1] = string(doc.ShortID)
-	dest[2] = string(doc.RelPath)
+	// Use unsafe.String to avoid one allocation per field on hot-path inserts.
+	//
+	// Why unsafe.String:
+	//   - []byte binds as BLOB (wrong type affinity, breaks = comparisons with TEXT).
+	//   - string([]byte) allocates; unsafe.String creates a view without copying.
+	//   - go-sqlite3 still allocates internally ([]byte(string)), but we save one alloc per field.
+	//
+	// Why it's safe:
+	//   - doc fields are borrowed and remain valid for the duration of this batch.
+	//   - go-sqlite3 uses SQLITE_TRANSIENT, so SQLite copies before bind returns.
+	//   - The string views don't escape this function.
+	dest[0] = unsafe.String(unsafe.SliceData(doc.ID), len(doc.ID))
+	dest[1] = unsafe.String(unsafe.SliceData(doc.ShortID), len(doc.ShortID))
+	dest[2] = unsafe.String(unsafe.SliceData(doc.RelPath), len(doc.RelPath))
 	dest[3] = doc.MtimeNS
-	dest[4] = string(doc.Title)
+	dest[4] = unsafe.String(unsafe.SliceData(doc.Title), len(doc.Title))
 
 	userColCount := mddb.schema.userColumnCount()
 	if userColCount == 0 {
@@ -455,17 +470,33 @@ func (mddb *MDDB[T]) _fillDocUpsertSQLArgs(doc *IndexableDocument, dest []any) e
 		return fmt.Errorf("column values: expected %d values, got %d", userColCount, len(userVals))
 	}
 
-	copy(dest[5:], userVals)
+	for i, val := range userVals {
+		switch v := val.(type) {
+		case []byte:
+			// Convert borrowed []byte to TEXT (same reasoning as base columns above).
+			dest[5+i] = unsafe.String(unsafe.SliceData(v), len(v))
+		default:
+			dest[5+i] = val
+		}
+	}
 
 	return nil
 }
 
-// buildUpsertSQL generates an INSERT OR REPLACE statement with multiple value rows.
-// Example for 2 rows, 3 columns: INSERT OR REPLACE INTO t (a,b,c) VALUES (?,?,?), (?,?,?)
-func _buildUpsertSQL(table string, columns []string, rows int) string {
+// buildUpsertSQL generates an INSERT statement with multiple value rows.
+// Example for 2 rows, 3 columns: INSERT INTO t (a,b,c) VALUES (?,?,?), (?,?,?)
+//
+// replace=true uses INSERT OR REPLACE (for in-place updates).
+// replace=false uses INSERT (for fresh rebuilds).
+func _buildUpsertSQL(table string, columns []string, rows int, replace bool) string {
 	var b strings.Builder
 
-	b.WriteString("INSERT OR REPLACE INTO ")
+	if replace {
+		b.WriteString("INSERT OR REPLACE INTO ")
+	} else {
+		b.WriteString("INSERT INTO ")
+	}
+
 	b.WriteString(table)
 	b.WriteString(" (")
 

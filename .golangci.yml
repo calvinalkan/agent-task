@@ -356,7 +356,7 @@ linters:
         linters:
           - gosec
       # unsafe.String creates a view for zero-alloc comparison; safe because source outlives comparison
-      - path: pkg/mddb/validate\.go
+      - path: pkg/mddb/(validate|schema)\.go
         text: "G103"
         linters:
           - gosec
