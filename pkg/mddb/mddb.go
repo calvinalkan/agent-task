@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // sqlite3 driver
@@ -65,6 +66,7 @@ type MDDB[T Document] struct {
 	wal         fs.File
 	lockPath    string
 	lockTimeout time.Duration
+	closed      atomic.Bool
 
 	// mu guards in-process concurrent access to the MDDB.
 	//
@@ -93,15 +95,15 @@ type MDDB[T Document] struct {
 // WAL recovery, reindex failures, or lock timeout.
 func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if ctx == nil {
-		return nil, wrap(errors.New("context is nil"))
+		return nil, withContext(errors.New("context is nil"), "", "")
 	}
 
 	if cfg.BaseDir == "" {
-		return nil, wrap(errors.New("Config.BaseDir is required"))
+		return nil, withContext(errors.New("Config.BaseDir is required"), "", "")
 	}
 
 	if cfg.DocumentFrom == nil {
-		return nil, wrap(errors.New("Config.DocumentFrom is required"))
+		return nil, withContext(errors.New("Config.DocumentFrom is required"), "", "")
 	}
 
 	// Default path layout: flat (id.md)
@@ -122,13 +124,13 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 
 	// Validate schema
 	if err := schema.validate(); err != nil {
-		return nil, wrap(err)
+		return nil, withContext(err, "", "")
 	}
 
 	// If schema has user columns, SQLColumnValues is required
 	userColCount := schema.userColumnCount()
 	if userColCount > 0 && cfg.SQLColumnValues == nil {
-		return nil, wrap(errors.New("Config.SQLColumnValues is required when SQLSchema has user columns"))
+		return nil, withContext(errors.New("Config.SQLColumnValues is required when SQLSchema has user columns"), "", "")
 	}
 
 	// Default parse options: no line limit, require opening delimiter
@@ -153,21 +155,21 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 
 	err := fsReal.MkdirAll(mddbDir, 0o750)
 	if err != nil {
-		return nil, wrap(fmt.Errorf("fs: mkdir %s: %w", mddbDir, err))
+		return nil, withContext(fmt.Errorf("fs: mkdir %s: %w", mddbDir, err), "", "")
 	}
 
 	walPath := filepath.Join(mddbDir, "wal")
 
 	walFile, err := fsReal.OpenFile(walPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		return nil, wrap(fmt.Errorf("fs: open wal %s: %w", walPath, err))
+		return nil, withContext(fmt.Errorf("fs: open wal %s: %w", walPath, err), "", "")
 	}
 
 	sqlite, err := openSqlite(ctx, filepath.Join(mddbDir, "index.sqlite"))
 	if err != nil {
 		_ = walFile.Close()
 
-		return nil, wrap(err)
+		return nil, withContext(err, "", "")
 	}
 
 	mddb := &MDDB[T]{
@@ -187,7 +189,7 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if err != nil {
 		_ = mddb.Close()
 
-		return nil, wrap(err)
+		return nil, withContext(err, "", "")
 	}
 
 	expectedVersion := int(schema.fingerprint())
@@ -197,7 +199,7 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if err != nil {
 		_ = mddb.Close()
 
-		return nil, wrap(err)
+		return nil, withContext(err, "", "")
 	}
 
 	if !versionMismatch && walSize == 0 {
@@ -211,7 +213,7 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if err != nil {
 		_ = mddb.Close()
 
-		return nil, wrap(fmt.Errorf("lock: wal: %w", err))
+		return nil, withContext(fmt.Errorf("lock: wal: %w", err), "", "")
 	}
 
 	if versionMismatch {
@@ -229,7 +231,7 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 			closeErr = fmt.Errorf("lock: unlock wal: %w", closeErr)
 		}
 
-		return nil, wrap(errors.Join(err, closeErr))
+		return nil, withContext(errors.Join(err, closeErr), "", "")
 	}
 
 	return mddb, nil
@@ -245,6 +247,12 @@ func (mddb *MDDB[T]) Close() error {
 	// Wait for all in-flight operations (readers and writers) to complete.
 	mddb.mu.Lock()
 	defer mddb.mu.Unlock()
+
+	if mddb.closed.Load() {
+		return nil
+	}
+
+	mddb.closed.Store(true)
 
 	var errs []error
 
@@ -266,7 +274,7 @@ func (mddb *MDDB[T]) Close() error {
 		mddb.wal = nil
 	}
 
-	return wrap(errors.Join(errs...))
+	return withContext(errors.Join(errs...), "", "")
 }
 
 func (mddb *MDDB[T]) walSize() (int64, error) {
@@ -283,6 +291,12 @@ func (mddb *MDDB[T]) walSize() (int64, error) {
 // function that must be called to unlock both.
 func (mddb *MDDB[T]) acquireReadLock(ctx context.Context) (func(), error) {
 	mddb.mu.RLock()
+
+	if mddb.closed.Load() || mddb.sql == nil || mddb.wal == nil {
+		mddb.mu.RUnlock()
+
+		return nil, ErrClosed
+	}
 
 	lockCtx, cancel := context.WithTimeout(ctx, mddb.lockTimeout)
 	defer cancel()
@@ -348,6 +362,12 @@ func (mddb *MDDB[T]) acquireReadLock(ctx context.Context) (func(), error) {
 // function that must be called to unlock both.
 func (mddb *MDDB[T]) acquireWriteLock(ctx context.Context) (func(), error) {
 	mddb.mu.Lock()
+
+	if mddb.closed.Load() || mddb.sql == nil || mddb.wal == nil {
+		mddb.mu.Unlock()
+
+		return nil, ErrClosed
+	}
 
 	lockCtx, cancel := context.WithTimeout(ctx, mddb.lockTimeout)
 	defer cancel()

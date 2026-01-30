@@ -15,7 +15,6 @@ import (
 //   - Identify and locate documents (ID)
 //   - Display in listings (Title)
 //   - Serialize to markdown files (Frontmatter, Body)
-//   - Validate before writing (Validate)
 //
 // mddb calls these methods during [Tx.Create] / [Tx.Update] to marshal your document to disk.
 // The resulting file looks like:
@@ -68,7 +67,7 @@ type Document interface {
 	//
 	// Example:
 	//
-	//	func (t *Ticket) Frontmatter() frontmatter.Frontmatter {
+	//	func (t Ticket) Frontmatter() frontmatter.Frontmatter {
 	//	    var fm frontmatter.Frontmatter
 	//	    fm.MustSet([]byte("status"), frontmatter.StringValue(t.Status))
 	//	    fm.MustSet([]byte("priority"), frontmatter.IntValue(t.Priority))

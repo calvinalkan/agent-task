@@ -9,7 +9,7 @@ frontmatter: invalid yaml (doc_id=abc123 doc_path=tickets/abc.md)
            ^               ^             ^
            |               |             |
      lower level       public API    public API
-     (subsystem)       (wrap)        (wrap)
+     (subsystem)     (withContext)  (withContext)
 ```
 
 - **Error message first** - what went wrong, with subsystem prefix
@@ -20,7 +20,7 @@ frontmatter: invalid yaml (doc_id=abc123 doc_path=tickets/abc.md)
 
 ### Lower Levels (internal helpers)
 
-Use `fmt.Errorf` with subsystem prefix. No `wrap()`.
+Use `fmt.Errorf` with subsystem prefix. No `withContext()`.
 
 ```go
 // parseIndexable - internal helper
@@ -57,7 +57,10 @@ func (mddb *MDDB[T]) parseIndexable(...) (IndexableDocument, error) {
 
 ### Public API (exported methods)
 
-Use `wrap()` with `withID()` and `withPath()`. Values must be **known and valid**.
+Use `withContext()` with id/path at the boundary. Values must be **known and valid**.
+
+Behavior:
+- If err is already `*Error`, `withContext()` fills missing fields only (does not overwrite).
 
 ```go
 // Get - public API
@@ -67,12 +70,12 @@ func (mddb *MDDB[T]) Get(ctx context.Context, id string) (*T, error) {
     
     path, err := mddb.lookupPath(id)
     if err != nil {
-        return nil, wrap(err, withID(id))
+        return nil, withContext(err, id, "")
     }
     
     doc, err := mddb.readDocumentFile(id, path)
     if err != nil {
-        return nil, wrap(err, withID(id), withPath(path))
+        return nil, withContext(err, id, path)
     }
     
     return doc, nil
@@ -105,43 +108,43 @@ if err != nil {
 }
 ```
 
-### 2. wrap() only at public API boundaries
+### 2. withContext() only at public API boundaries
 
 ```go
 // ✓ Good - public API adds context
 func (mddb *MDDB[T]) Get(id string) (*T, error) {
     doc, err := mddb.internal(id, path)
     if err != nil {
-        return nil, wrap(err, withID(id), withPath(path))
+        return nil, withContext(err, id, path)
     }
     return doc, nil
 }
 
-// ✗ Bad - internal helper using wrap
+// ✗ Bad - internal helper using withContext
 func (mddb *MDDB[T]) internal(id, path string) (*T, error) {
     if err != nil {
-        return nil, wrap(err, withID(id), withPath(path))  // Don't do this
+        return nil, withContext(err, id, path)  // Don't do this
     }
 }
 ```
 
-### 3. withID/withPath use validated values only
+### 3. withContext uses validated values only
 
-The ID and Path in `wrap()` should be values the caller knows and trusts:
+The ID and Path in `withContext()` should be values the caller knows and trusts:
 
 ```go
 // ✓ Good - id is what caller requested
 func (mddb *MDDB[T]) Get(id string) (*T, error) {
-    return nil, wrap(err, withID(id))  // id came from caller
+    return nil, withContext(err, id, "")  // id came from caller
 }
 
 // ✓ Good - path is from trusted source (sqlite index)
 path := lookupPathFromIndex(id)
-return nil, wrap(err, withPath(path))
+return nil, withContext(err, "", path)
 
 // ✗ Bad - id parsed from untrusted file content
 id := parseIDFromFile(content)  // might be invalid/malformed
-return nil, wrap(err, withID(id))  // Don't use unvalidated values
+return nil, withContext(err, id, "")  // Don't use unvalidated values
 ```
 
 For unvalidated/malformed values, include them in the error **message** instead:
@@ -213,7 +216,7 @@ Output format: `<cause> (doc_id=X doc_path=Y)`
 "frontmatter: yaml: line 5: mapping values not allowed"
 
 // Public API wraps:
-wrap(err, withID("abc123"), withPath("tickets/abc.md"))
+withContext(err, "abc123", "tickets/abc.md")
 
 // Final output:
 "frontmatter: yaml: line 5: mapping values not allowed (doc_id=abc123 doc_path=tickets/abc.md)"
@@ -229,7 +232,7 @@ wrap(err, withID("abc123"), withPath("tickets/abc.md"))
 "sqlite: no rows"
 
 // Public API wraps:
-wrap(ErrNotFound, withID("xyz789"))
+withContext(ErrNotFound, "xyz789", "")
 
 // Final output:
 "not found (doc_id=xyz789)"
@@ -258,7 +261,7 @@ wrap(ErrNotFound, withID("xyz789"))
 // Check finds ID already exists
 
 // Public API:
-wrap(ErrAlreadyExists, withID("abc123"), withPath("tickets/abc.md"))
+withContext(ErrAlreadyExists, "abc123", "tickets/abc.md")
 
 // Final output:
 "already exists (doc_id=abc123 doc_path=tickets/abc.md)"

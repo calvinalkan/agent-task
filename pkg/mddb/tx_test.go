@@ -93,6 +93,98 @@ func Test_Tx_Creates_Doc_When_Create_And_Commit(t *testing.T) {
 	}
 }
 
+func Test_Tx_Create_Returns_Error_When_Path_Is_Directory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	s := openTestStore(t, dir)
+
+	defer func() { _ = s.Close() }()
+
+	doc := newTestDoc(t, "Test Doc")
+	absPath := filepath.Join(dir, doc.DocPath)
+
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o750); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+
+	if err := os.Mkdir(absPath, 0o750); err != nil {
+		t.Fatalf("mkdir doc path: %v", err)
+	}
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Create(doc)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var mErr *mddb.Error
+	if !errors.As(err, &mErr) {
+		t.Fatalf("error type = %T, want *mddb.Error", err)
+	}
+
+	if mErr.Path != doc.DocPath {
+		t.Fatalf("path = %q, want %q", mErr.Path, doc.DocPath)
+	}
+
+	if !strings.Contains(mErr.Err.Error(), "not a regular file") {
+		t.Fatalf("error = %v, want regular file error", err)
+	}
+}
+
+func Test_Tx_Create_Returns_Error_When_Index_Query_Fails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	s := openTestStore(t, dir)
+
+	defer func() { _ = s.Close() }()
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.DB().ExecContext(t.Context(), "DROP TABLE "+testTableName)
+	if err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+
+	doc := newTestDoc(t, "Test Doc")
+
+	_, err = tx.Create(doc)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var mErr *mddb.Error
+	if !errors.As(err, &mErr) {
+		t.Fatalf("error type = %T, want *mddb.Error", err)
+	}
+
+	if mErr.ID != doc.DocID {
+		t.Fatalf("id = %q, want %q", mErr.ID, doc.DocID)
+	}
+
+	if mErr.Path != doc.DocPath {
+		t.Fatalf("path = %q, want %q", mErr.Path, doc.DocPath)
+	}
+
+	if !strings.Contains(mErr.Err.Error(), "sqlite:") {
+		t.Fatalf("error = %v, want sqlite error", err)
+	}
+}
+
 func Test_Tx_Updates_Doc_When_Update_With_Existing_ID(t *testing.T) {
 	t.Parallel()
 

@@ -99,123 +99,25 @@ func (e *Error) cause() string {
 	return e.Err.Error()
 }
 
-// errOpt configures an [Error] during construction via [wrap].
-type errOpt func(*Error)
-
-// withID attaches a document ID to the error.
-//
-// Use when:
-//   - The document's ID is known (parsed from frontmatter)
-//   - Looking up a document by ID (use the requested ID)
-//   - The ID helps locate which document failed
-//
-// Example:
-//
-//	return wrap(err, withID(doc.ID()))
-//	return wrap(ErrNotFound, withID(requestedID))
-func withID(id string) errOpt {
-	return func(e *Error) { e.ID = id }
-}
-
-// withPath attaches a document's relative path to the error.
-//
-// Use when:
-//   - The document's path is known (relative to data directory)
-//   - Scanning/parsing files where path is available before ID
-//   - The path helps locate which file failed
-//
-// This should be the relative path (e.g., "tickets/abc.md"), not the
-// absolute filesystem path. Filesystem errors (os.PathError) already
-// contain the absolute path in their message.
-//
-// Example:
-//
-//	return wrap(err, withPath(relPath))
-//	return wrap(err, withID(id), withPath(relPath))
-func withPath(path string) errOpt {
-	return func(e *Error) { e.Path = path }
-}
-
-// wrap creates an [*Error] with optional document context.
-//
-// Use at API boundaries to attach document context to errors. The context
-// helps users identify which document caused the failure.
-//
-// Behavior:
-//   - Returns nil if err is nil
-//   - Returns err unchanged if it's already [*Error] with no new options
-//   - Inherits ID/Path from inner [*Error] when wrapping (can override)
-//   - Unwraps inner [*Error] to avoid duplicate suffixes in message
-//
-// When to use:
-//
-//	// At public API boundaries - attach context you have
-//	func (db *MDDB) Get(id string) (*Doc, error) {
-//	    doc, err := db.load(id)
-//	    if err != nil {
-//	        return nil, wrap(err, withID(id))
-//	    }
-//	    return doc, nil
-//	}
-//
-//	// When parsing - path first, ID when available
-//	func parse(path string, data []byte) error {
-//	    id, err := parseID(data)
-//	    if err != nil {
-//	        return wrap(err, withPath(path))  // ID not yet known
-//	    }
-//	    if err := validate(data); err != nil {
-//	        return wrap(err, withID(id), withPath(path))  // both known
-//	    }
-//	    return nil
-//	}
-//
-//	// Propagating without adding context (ensures *Error type)
-//	if err != nil {
-//	    return wrap(err)
-//	}
-//
-// Context inheritance:
-//
-//	inner := wrap(err, withPath("foo.md"))
-//	outer := wrap(inner, withID("abc"))
-//	// outer.Error() = "something failed (doc_id=abc doc_path=foo.md)"
-//
-// Overriding inherited context:
-//
-//	inner := wrap(err, withID("old"))
-//	outer := wrap(inner, withID("new"))
-//	// outer.ID = "new" (overridden)
-func wrap(err error, opts ...errOpt) error {
+// withContext attaches document context at API boundaries and returns *Error.
+// If err is already *Error, missing fields are filled in-place (existing values preserved).
+func withContext(err error, id string, path string) error {
 	if err == nil {
 		return nil
 	}
 
-	// Check if err is directly *Error (not buried in chain via fmt.Errorf etc).
-	// Use type assertion, not errors.As, to avoid finding *Error through wrappers.
 	existing := &Error{}
-	isDirectError := errors.As(err, &existing)
+	if errors.As(err, &existing) {
+		if existing.ID == "" && id != "" {
+			existing.ID = id
+		}
 
-	// Don't double-wrap if already our error type and no new context.
-	if isDirectError && len(opts) == 0 {
+		if existing.Path == "" && path != "" {
+			existing.Path = path
+		}
+
 		return existing
 	}
 
-	e := &Error{Err: err}
-
-	// Inherit context from direct *Error and unwrap to avoid duplication.
-	// We copy the context (ID, Path) and point to its cause, skipping
-	// the intermediate *Error wrapper.
-	if isDirectError {
-		e.ID = existing.ID
-		e.Path = existing.Path
-		e.Err = existing.Err
-	}
-
-	// Apply caller's options (can override inherited values).
-	for _, opt := range opts {
-		opt(e)
-	}
-
-	return e
+	return &Error{ID: id, Path: path, Err: err}
 }

@@ -12,7 +12,7 @@ import (
 // buffer except ShortID which is derived.
 //
 // This is a lower-level helper - returns errors with subsystem prefix only.
-// Public APIs (Get, Reindex) add structured context via wrap().
+// Public APIs (Get, Reindex) add structured context via withContext().
 //
 // Validates:
 //   - Frontmatter structure and required fields (id, title)
@@ -65,7 +65,7 @@ func (mddb *MDDB[T]) parseIndexable(fsRelPath []byte, content []byte, mtimeNS in
 // then converts via Config.DocumentFrom.
 //
 // This is a lower-level helper - returns errors with subsystem prefix only.
-// Public APIs add structured context via wrap().
+// Public APIs add structured context via withContext().
 func (mddb *MDDB[T]) parseDocument(fsRelPath string, content []byte, mtimeNS int64, expectedID string) (*T, error) {
 	indexable, err := mddb.parseIndexable([]byte(fsRelPath), content, mtimeNS, expectedID)
 	if err != nil {

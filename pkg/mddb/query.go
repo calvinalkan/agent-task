@@ -44,23 +44,23 @@ func Query[T Document, R any](ctx context.Context, s *MDDB[T], fn func(db *sql.D
 	var zero R
 
 	if ctx == nil {
-		return zero, wrap(errors.New("context is nil"))
+		return zero, withContext(errors.New("context is nil"), "", "")
 	}
 
-	if s == nil || s.sql == nil || s.wal == nil {
-		return zero, wrap(ErrClosed)
+	if s == nil || s.closed.Load() {
+		return zero, withContext(ErrClosed, "", "")
 	}
 
 	release, err := s.acquireReadLock(ctx)
 	if err != nil {
-		return zero, wrap(err)
+		return zero, withContext(err, "", "")
 	}
 
 	defer release()
 
 	result, err := fn(s.sql)
 
-	return result, wrap(err)
+	return result, withContext(err, "", "")
 }
 
 // GetByPrefix finds documents by short_id or ID prefix.
@@ -71,20 +71,20 @@ func Query[T Document, R any](ctx context.Context, s *MDDB[T], fn func(db *sql.D
 // Returns [ErrClosed] if store is closed.
 func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]GetPrefixRow, error) {
 	if ctx == nil {
-		return nil, wrap(errors.New("context is nil"))
+		return nil, withContext(errors.New("context is nil"), "", "")
 	}
 
-	if mddb == nil || mddb.sql == nil || mddb.wal == nil {
-		return nil, wrap(ErrClosed)
+	if mddb == nil || mddb.closed.Load() {
+		return nil, withContext(ErrClosed, "", "")
 	}
 
 	if prefix == "" {
-		return nil, wrap(errors.New("prefix is empty"))
+		return nil, withContext(errors.New("prefix is empty"), "", "")
 	}
 
 	release, err := mddb.acquireReadLock(ctx)
 	if err != nil {
-		return nil, wrap(err)
+		return nil, withContext(err, "", "")
 	}
 
 	defer release()
@@ -96,7 +96,7 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]GetPrefi
 
 	rows, err := mddb.sql.QueryContext(ctx, query, pattern, pattern)
 	if err != nil {
-		return nil, wrap(fmt.Errorf("sqlite: %w", err))
+		return nil, withContext(fmt.Errorf("sqlite: %w", err), "", "")
 	}
 
 	defer func() { _ = rows.Close() }()
@@ -114,7 +114,7 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]GetPrefi
 
 		scanErr := rows.Scan(&idStr, &shortID, &path, &mtimeNS, &title)
 		if scanErr != nil {
-			return nil, wrap(fmt.Errorf("sqlite: %w", scanErr))
+			return nil, withContext(fmt.Errorf("sqlite: %w", scanErr), "", "")
 		}
 
 		results = append(results, GetPrefixRow{
@@ -128,7 +128,7 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]GetPrefi
 
 	err = rows.Err()
 	if err != nil {
-		return nil, wrap(fmt.Errorf("sqlite: %w", err))
+		return nil, withContext(fmt.Errorf("sqlite: %w", err), "", "")
 	}
 
 	return results, nil
@@ -143,20 +143,20 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]GetPrefi
 // Returns [ErrClosed] if mddb is closed.
 func (mddb *MDDB[T]) Get(ctx context.Context, id string) (*T, error) {
 	if ctx == nil {
-		return nil, wrap(errors.New("context is nil"), withID(id))
+		return nil, withContext(errors.New("context is nil"), id, "")
 	}
 
-	if mddb == nil || mddb.sql == nil || mddb.wal == nil {
-		return nil, wrap(ErrClosed, withID(id))
+	if mddb == nil || mddb.closed.Load() {
+		return nil, withContext(ErrClosed, id, "")
 	}
 
 	if id == "" {
-		return nil, wrap(ErrEmptyID)
+		return nil, withContext(ErrEmptyID, "", "")
 	}
 
 	release, err := mddb.acquireReadLock(ctx)
 	if err != nil {
-		return nil, wrap(err, withID(id))
+		return nil, withContext(err, id, "")
 	}
 
 	defer release()
@@ -170,20 +170,20 @@ func (mddb *MDDB[T]) Get(ctx context.Context, id string) (*T, error) {
 	err = row.Scan(&path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, wrap(ErrNotFound, withID(id))
+			return nil, withContext(ErrNotFound, id, "")
 		}
 
-		return nil, wrap(fmt.Errorf("sqlite: %w", err), withID(id))
+		return nil, withContext(fmt.Errorf("sqlite: %w", err), id, "")
 	}
 
 	err = mddb.validateRelPath(path)
 	if err != nil {
-		return nil, wrap(fmt.Errorf("%w: path %q", err, path), withID(id))
+		return nil, withContext(fmt.Errorf("%w: path %q", err, path), id, "")
 	}
 
 	doc, err := mddb.readDocumentFile(id, path)
 	if err != nil {
-		return nil, wrap(err, withID(id), withPath(path))
+		return nil, withContext(err, id, path)
 	}
 
 	return doc, nil

@@ -38,6 +38,29 @@
 // or explicitly via [MDDB.Reindex]. See [Config.SQLSchema] for schema definition
 // and [Config.AfterRecreateSchema] for related tables.
 //
+// # Transactions
+//
+// All writes go through [Tx]. A transaction can include multiple Create/Update/Delete
+// operations across different documents; last operation per ID wins. Commit applies
+// all buffered operations as a single logical unit.
+//
+// # WAL and Crash Recovery
+//
+// Commits are staged through a write-ahead log (WAL) stored as JSON in ".mddb/wal".
+// Commit order: WAL fsync (durable) → file writes → SQLite index update. If a crash
+// happens after WAL fsync but before apply finishes, the WAL is replayed on the next
+// [Open] or read. If replay fails, the WAL is readable JSON for manual recovery.
+//
+// # Tradeoffs / Notes
+//
+//   - Markdown files are the source of truth; SQLite is an ephemeral cache.
+//   - Schema changes can trigger reindex; related tables must be recreated in hooks.
+//   - WAL replay expects a compatible schema. If schema changes with a pending WAL,
+//     recovery can fail; users may delete the WAL and reindex manually.
+//   - Frontmatter parsing is a strict YAML subset (see [frontmatter] package docs).
+//   - Single-writer model: one writer holds the exclusive lock; concurrent readers
+//     are allowed, but writers block readers and readers block writers.
+//
 // # Example Usage
 //
 //	type Ticket struct {
@@ -45,10 +68,10 @@
 //	    priority int64
 //	}
 //
-//	func (t *Ticket) ID() string    { return t.id }
-//	func (t *Ticket) Title() string { return t.title }
-//	func (t *Ticket) Body() string  { return t.body }
-//	func (t *Ticket) Frontmatter() frontmatter.Frontmatter {
+//	func (t Ticket) ID() string    { return t.id }
+//	func (t Ticket) Title() string { return t.title }
+//	func (t Ticket) Body() string  { return t.body }
+//	func (t Ticket) Frontmatter() frontmatter.Frontmatter {
 //	    var fm frontmatter.Frontmatter
 //	    fm.MustSet([]byte("status"), frontmatter.StringValue(t.status))
 //	    fm.MustSet([]byte("priority"), frontmatter.IntValue(t.priority))

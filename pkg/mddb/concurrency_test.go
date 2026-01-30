@@ -211,6 +211,139 @@ func Test_GetByPrefix_Returns_Error_When_Exclusive_Lock_Held(t *testing.T) {
 	}
 }
 
+func Test_Get_Returns_Closed_When_Close_Concurrent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	s := openTestStore(t, dir, withTestLockTimeout())
+
+	doc := newTestDoc(t, "Test Doc")
+	createTestDoc(t.Context(), t, s, doc)
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		<-start
+
+		_ = s.Close()
+
+		close(done)
+	}()
+
+	close(start)
+
+	for range 50 {
+		_, err := s.Get(t.Context(), doc.DocID)
+		if err == nil {
+			continue
+		}
+
+		if !errors.Is(err, mddb.ErrClosed) {
+			t.Fatalf("get error = %v, want ErrClosed", err)
+		}
+	}
+
+	<-done
+
+	_, err := s.Get(t.Context(), doc.DocID)
+	if err == nil || !errors.Is(err, mddb.ErrClosed) {
+		t.Fatalf("get after close = %v, want ErrClosed", err)
+	}
+}
+
+func Test_Query_Returns_Closed_When_Close_Concurrent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	s := openTestStore(t, dir, withTestLockTimeout())
+
+	doc := newTestDoc(t, "Test Doc")
+	createTestDoc(t.Context(), t, s, doc)
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		<-start
+
+		_ = s.Close()
+
+		close(done)
+	}()
+
+	close(start)
+
+	for range 50 {
+		_, err := mddb.Query(t.Context(), s, func(db *sql.DB) (int, error) {
+			var n int
+
+			scanErr := db.QueryRow("SELECT COUNT(*) FROM " + testTableName).Scan(&n)
+
+			return n, scanErr
+		})
+		if err == nil {
+			continue
+		}
+
+		if !errors.Is(err, mddb.ErrClosed) {
+			t.Fatalf("query error = %v, want ErrClosed", err)
+		}
+	}
+
+	<-done
+
+	_, err := mddb.Query(t.Context(), s, func(_ *sql.DB) (int, error) {
+		return 0, nil
+	})
+	if err == nil || !errors.Is(err, mddb.ErrClosed) {
+		t.Fatalf("query after close = %v, want ErrClosed", err)
+	}
+}
+
+func Test_Begin_Returns_Closed_When_Close_Concurrent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	s := openTestStore(t, dir, withTestLockTimeout())
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		<-start
+
+		_ = s.Close()
+
+		close(done)
+	}()
+
+	close(start)
+
+	for range 50 {
+		tx, err := s.Begin(t.Context())
+		if err == nil {
+			_ = tx.Rollback()
+
+			continue
+		}
+
+		if !errors.Is(err, mddb.ErrClosed) {
+			t.Fatalf("begin error = %v, want ErrClosed", err)
+		}
+	}
+
+	<-done
+
+	_, err := s.Begin(t.Context())
+	if err == nil || !errors.Is(err, mddb.ErrClosed) {
+		t.Fatalf("begin after close = %v, want ErrClosed", err)
+	}
+}
+
 func Test_Multiple_Readers_Succeed_When_Called_Concurrently(t *testing.T) {
 	t.Parallel()
 

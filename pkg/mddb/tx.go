@@ -47,16 +47,16 @@ type Tx[T Document] struct {
 // WAL replay failures.
 func (mddb *MDDB[T]) Begin(ctx context.Context) (*Tx[T], error) {
 	if ctx == nil {
-		return nil, wrap(errors.New("context is nil"))
+		return nil, withContext(errors.New("context is nil"), "", "")
 	}
 
-	if mddb == nil || mddb.sql == nil || mddb.wal == nil {
-		return nil, wrap(ErrClosed)
+	if mddb == nil || mddb.closed.Load() {
+		return nil, withContext(ErrClosed, "", "")
 	}
 
 	release, err := mddb.acquireWriteLock(ctx)
 	if err != nil {
-		return nil, wrap(err)
+		return nil, withContext(err, "", "")
 	}
 
 	return &Tx[T]{
@@ -76,17 +76,27 @@ func (mddb *MDDB[T]) Begin(ctx context.Context) (*Tx[T], error) {
 func (tx *Tx[T]) Create(doc *T) (*T, error) {
 	id, path, err := tx.validateForWrite(doc)
 	if err != nil {
-		return nil, wrap(err, withID(id), withPath(path))
+		return nil, withContext(err, id, path)
 	}
 
 	// Check index first (fast path)
-	if tx.existsInIndex(id) {
-		return nil, wrap(ErrAlreadyExists, withID(id), withPath(path))
+	exists, err := tx.existsInIndex(id)
+	if err != nil {
+		return nil, withContext(err, id, path)
+	}
+
+	if exists {
+		return nil, withContext(ErrAlreadyExists, id, path)
 	}
 
 	// Check filesystem (source of truth)
-	if tx.fileExists(path) {
-		return nil, wrap(ErrAlreadyExists, withID(id), withPath(path))
+	exists, err = tx.fileExists(path)
+	if err != nil {
+		return nil, withContext(err, id, path)
+	}
+
+	if exists {
+		return nil, withContext(ErrAlreadyExists, id, path)
 	}
 
 	tx.bufferPut(id, path, doc)
@@ -102,17 +112,27 @@ func (tx *Tx[T]) Create(doc *T) (*T, error) {
 func (tx *Tx[T]) Update(doc *T) (*T, error) {
 	id, path, err := tx.validateForWrite(doc)
 	if err != nil {
-		return nil, wrap(err, withID(id), withPath(path))
+		return nil, withContext(err, id, path)
 	}
 
 	// Check index first (fast path)
-	if !tx.existsInIndex(id) {
-		return nil, wrap(ErrNotFound, withID(id), withPath(path))
+	exists, err := tx.existsInIndex(id)
+	if err != nil {
+		return nil, withContext(err, id, path)
+	}
+
+	if !exists {
+		return nil, withContext(ErrNotFound, id, path)
 	}
 
 	// Check filesystem (source of truth)
-	if !tx.fileExists(path) {
-		return nil, wrap(ErrNotFound, withID(id), withPath(path))
+	exists, err = tx.fileExists(path)
+	if err != nil {
+		return nil, withContext(err, id, path)
+	}
+
+	if !exists {
+		return nil, withContext(ErrNotFound, id, path)
 	}
 
 	tx.bufferPut(id, path, doc)
@@ -153,22 +173,42 @@ func (tx *Tx[T]) validateForWrite(doc *T) (string, string, error) {
 }
 
 // existsInIndex checks if a document ID exists in the SQLite index.
-func (tx *Tx[T]) existsInIndex(id string) bool {
+func (tx *Tx[T]) existsInIndex(id string) (bool, error) {
 	var exists bool
 
 	query := fmt.Sprintf("SELECT 1 FROM %s WHERE id = ? LIMIT 1", tx.store.schema.tableName)
 	row := tx.store.sql.QueryRowContext(tx.ctx, query, id)
-	_ = row.Scan(&exists)
 
-	return exists
+	err := row.Scan(&exists)
+	if err == nil {
+		return true, nil
+	}
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("sqlite: %w", err)
 }
 
 // fileExists checks if a document file exists on disk.
-func (tx *Tx[T]) fileExists(path string) bool {
+func (tx *Tx[T]) fileExists(path string) (bool, error) {
 	absPath := filepath.Join(tx.store.dataDir, path)
-	_, err := tx.store.fs.Stat(absPath)
 
-	return err == nil
+	info, err := tx.store.fs.Stat(absPath)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return false, fmt.Errorf("fs: path %s is not a regular file", absPath)
+		}
+
+		return true, nil
+	}
+
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("fs: %w", err)
 }
 
 // bufferPut adds a put operation to the transaction buffer.
@@ -186,29 +226,29 @@ func (tx *Tx[T]) bufferPut(id, path string, doc *T) {
 // Returns [ErrNotFound] if the document file does not exist.
 func (tx *Tx[T]) Delete(id string) error {
 	if tx == nil {
-		return wrap(errors.New("tx is nil"), withID(id))
+		return withContext(errors.New("tx is nil"), id, "")
 	}
 
 	if tx.closed {
-		return wrap(errors.New("transaction closed"), withID(id))
+		return withContext(errors.New("transaction closed"), id, "")
 	}
 
 	if id == "" {
-		return wrap(ErrEmptyID)
+		return withContext(ErrEmptyID, "", "")
 	}
 
 	if tx.store.cfg.RelPathFromID == nil {
-		return wrap(errors.New("RelPathFromID is nil"), withID(id))
+		return withContext(errors.New("RelPathFromID is nil"), id, "")
 	}
 
 	path := tx.store.cfg.RelPathFromID(id)
 	if path == "" {
-		return wrap(ErrEmptyPath, withID(id))
+		return withContext(ErrEmptyPath, id, "")
 	}
 
 	err := tx.store.validateRelPath(path)
 	if err != nil {
-		return wrap(fmt.Errorf("%w: path %q", err, path), withID(id))
+		return withContext(fmt.Errorf("%w: path %q", err, path), id, "")
 	}
 
 	if existing, ok := tx.ops[id]; ok {
@@ -216,7 +256,7 @@ func (tx *Tx[T]) Delete(id string) error {
 		case walOpPut:
 			// Allow delete-after-put without touching disk; preserves atomic intent.
 			if existing.Path != "" && existing.Path != path {
-				return wrap(fmt.Errorf("path mismatch %q != %q", existing.Path, path), withID(id), withPath(path))
+				return withContext(fmt.Errorf("path mismatch %q != %q", existing.Path, path), id, path)
 			}
 		case walOpDelete:
 			return nil
@@ -227,10 +267,10 @@ func (tx *Tx[T]) Delete(id string) error {
 		_, statErr := tx.store.fs.Stat(absPath)
 		if statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
-				return wrap(ErrNotFound, withID(id), withPath(path))
+				return withContext(ErrNotFound, id, path)
 			}
 
-			return wrap(fmt.Errorf("fs: %w", statErr), withID(id), withPath(path))
+			return withContext(fmt.Errorf("fs: %w", statErr), id, path)
 		}
 	}
 
@@ -251,11 +291,11 @@ func (tx *Tx[T]) Delete(id string) error {
 // Returns [ErrCommitIncomplete] if WAL was durable but apply/index failed.
 func (tx *Tx[T]) Commit(ctx context.Context) error {
 	if tx == nil {
-		return wrap(errors.New("tx is nil"))
+		return withContext(errors.New("tx is nil"), "", "")
 	}
 
 	if tx.closed {
-		return wrap(errors.New("transaction closed"))
+		return withContext(errors.New("transaction closed"), "", "")
 	}
 
 	tx.closed = true
@@ -279,12 +319,12 @@ func (tx *Tx[T]) Commit(ctx context.Context) error {
 	// Snapshot markdown content before WAL write so recovery replays exact bytes.
 	err := tx.materializeOps(ops)
 	if err != nil {
-		return wrap(err)
+		return withContext(err, "", "")
 	}
 
 	err = tx.writeWAL(ops)
 	if err != nil {
-		return wrap(err)
+		return withContext(err, "", "")
 	}
 
 	// WAL fsync is the durable commit point; finish apply even if ctx is canceled.
@@ -292,12 +332,12 @@ func (tx *Tx[T]) Commit(ctx context.Context) error {
 
 	err = tx.store.applyOpsToFS(applyCtx, ops)
 	if err != nil {
-		return wrap(fmt.Errorf("wal: %w: %w", ErrCommitIncomplete, err))
+		return withContext(fmt.Errorf("wal: %w: %w", ErrCommitIncomplete, err), "", "")
 	}
 
 	err = tx.store.updateSqliteIndexFromOps(applyCtx, ops)
 	if err != nil {
-		return wrap(fmt.Errorf("wal: %w: %w", ErrCommitIncomplete, err))
+		return withContext(fmt.Errorf("wal: %w: %w", ErrCommitIncomplete, err), "", "")
 	}
 
 	// Ignore truncate errors - commit already succeeded, replay is idempotent.

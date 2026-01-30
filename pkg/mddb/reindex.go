@@ -69,20 +69,24 @@ func (e *IndexScanError) Error() string {
 // fail validation; use [errors.As] to inspect Issues for details.
 func (mddb *MDDB[T]) Reindex(ctx context.Context) (int, error) {
 	if ctx == nil {
-		return 0, wrap(errors.New("context is nil"))
+		return 0, withContext(errors.New("context is nil"), "", "")
 	}
 
-	if mddb == nil || mddb.sql == nil || mddb.wal == nil {
-		return 0, wrap(ErrClosed)
+	if mddb == nil || mddb.closed.Load() {
+		return 0, withContext(ErrClosed, "", "")
 	}
 
 	if err := ctx.Err(); err != nil {
-		return 0, wrap(fmt.Errorf("canceled: %w", context.Cause(ctx)))
+		return 0, withContext(fmt.Errorf("canceled: %w", context.Cause(ctx)), "", "")
 	}
 
 	// In-process lock first (fast), then cross-process flock (slower).
 	mddb.mu.Lock()
 	defer mddb.mu.Unlock()
+
+	if mddb.closed.Load() || mddb.sql == nil || mddb.wal == nil {
+		return 0, withContext(ErrClosed, "", "")
+	}
 
 	// Acquire exclusive WAL lock before modifying index. This prevents concurrent
 	// writers from corrupting state during the rebuild.
@@ -91,14 +95,14 @@ func (mddb *MDDB[T]) Reindex(ctx context.Context) (int, error) {
 
 	lock, err := mddb.locker.LockWithTimeout(lockCtx, mddb.lockPath)
 	if err != nil {
-		return 0, wrap(fmt.Errorf("lock: wal: %w", err))
+		return 0, withContext(fmt.Errorf("lock: wal: %w", err), "", "")
 	}
 
 	defer func() { _ = lock.Close() }()
 
 	indexed, err := mddb.reindexLocked(ctx)
 	if err != nil {
-		return 0, wrap(err)
+		return 0, withContext(err, "", "")
 	}
 
 	return indexed, nil
