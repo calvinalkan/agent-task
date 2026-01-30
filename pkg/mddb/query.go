@@ -29,6 +29,9 @@ type GetPrefixRow struct {
 	// MtimeNS is the file modification time in nanoseconds.
 	MtimeNS int64
 
+	// SizeBytes is the file size in bytes.
+	SizeBytes int64
+
 	// Title is the document title for display in listings.
 	Title string
 }
@@ -89,7 +92,7 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]GetPrefi
 
 	defer release()
 
-	query := "SELECT id, short_id, path, mtime_ns, title FROM " + mddb.schema.tableName +
+	query := "SELECT id, short_id, path, mtime_ns, size_bytes, title FROM " + mddb.schema.tableName +
 		" WHERE short_id LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\' ORDER BY id LIMIT 50"
 
 	pattern := escapeLike(prefix) + "%"
@@ -105,24 +108,26 @@ func (mddb *MDDB[T]) GetByPrefix(ctx context.Context, prefix string) ([]GetPrefi
 
 	for rows.Next() {
 		var (
-			idStr   string
-			shortID string
-			path    string
-			mtimeNS int64
-			title   string
+			idStr     string
+			shortID   string
+			path      string
+			mtimeNS   int64
+			sizeBytes int64
+			title     string
 		)
 
-		scanErr := rows.Scan(&idStr, &shortID, &path, &mtimeNS, &title)
+		scanErr := rows.Scan(&idStr, &shortID, &path, &mtimeNS, &sizeBytes, &title)
 		if scanErr != nil {
 			return nil, withContext(fmt.Errorf("sqlite: %w", scanErr), "", "")
 		}
 
 		results = append(results, GetPrefixRow{
-			ID:      idStr,
-			ShortID: shortID,
-			Path:    path,
-			MtimeNS: mtimeNS,
-			Title:   title,
+			ID:        idStr,
+			ShortID:   shortID,
+			Path:      path,
+			MtimeNS:   mtimeNS,
+			SizeBytes: sizeBytes,
+			Title:     title,
 		})
 	}
 
@@ -212,8 +217,9 @@ func (mddb *MDDB[T]) readDocumentFile(expectedID string, relPath string) (*T, er
 	}
 
 	mtimeNS := info.ModTime().UnixNano()
+	sizeBytes := info.Size()
 
-	doc, err := mddb.parseDocument(relPath, data, mtimeNS, expectedID)
+	doc, err := mddb.parseDocument(relPath, data, mtimeNS, sizeBytes, expectedID)
 	if err != nil {
 		return nil, err
 	}

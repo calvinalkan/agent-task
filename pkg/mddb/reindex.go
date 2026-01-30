@@ -25,6 +25,9 @@ import (
 //   - ID, ShortID, RelPath, Title, Body: byte slices pointing into file buffer
 //   - Frontmatter: with borrowed keys and values (not copied)
 //
+// Non-borrowed fields:
+//   - MtimeNS, SizeBytes: copied scalars
+//
 // Safe operations during callback:
 //   - Pass to sql.Stmt.Exec() - SQLite driver copies the bytes
 //   - Convert to string: string(doc.ID) - Go copies the data
@@ -38,6 +41,7 @@ type IndexableDocument struct {
 	ShortID     []byte                  // Short ID for prefix search (borrowed)
 	RelPath     []byte                  // Relative file path (borrowed)
 	MtimeNS     int64                   // File modification time in nanoseconds
+	SizeBytes   int64                   // File size in bytes
 	Title       []byte                  // Document title (borrowed)
 	Body        []byte                  // Markdown body after frontmatter (borrowed)
 	Frontmatter frontmatter.Frontmatter // All frontmatter fields (borrowed)
@@ -165,7 +169,7 @@ func (mddb *MDDB[T]) scanDocumentFiles(ctx context.Context) ([]*IndexableDocumen
 			return nil, fmt.Errorf("fs: read file: %w", err)
 		}
 
-		parsed, err := mddb.parseIndexable(relPath, data, stat.ModTime, "")
+		parsed, err := mddb.parseIndexable(relPath, data, stat.ModTime, stat.Size, "")
 		if err != nil {
 			return nil, err
 		}
@@ -329,7 +333,9 @@ func (mddb *MDDB[T]) rebuildIndexOnDB(ctx context.Context, db *sql.DB, entries [
 	}
 
 	// Store schema fingerprint so Open() can detect mismatches.
-	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", mddb.schema.fingerprint()))
+	version := schemaVersion(mddb.schema.fingerprint())
+
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: set user_version: %w", err)
 	}

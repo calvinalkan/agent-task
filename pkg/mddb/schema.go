@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"sort"
 	"strings"
 	"unsafe"
@@ -57,6 +58,8 @@ type SQLSchema struct {
 	indexes   []indexDef
 }
 
+const baseColumnCount = 6
+
 // NewBaseSQLSchema creates a schema with the required base columns.
 func NewBaseSQLSchema(tableName string) *SQLSchema {
 	return &SQLSchema{
@@ -66,6 +69,7 @@ func NewBaseSQLSchema(tableName string) *SQLSchema {
 			{name: "short_id", typ: ColText, notNull: true},
 			{name: "path", typ: ColText, notNull: true},
 			{name: "mtime_ns", typ: ColInt, notNull: true},
+			{name: "size_bytes", typ: ColInt, notNull: true},
 			{name: "title", typ: ColText, notNull: true},
 		},
 		indexes: []indexDef{
@@ -158,11 +162,11 @@ func (s *SQLSchema) columnNames() []string {
 
 // userColumnCount returns the number of user-defined columns (after base columns).
 func (s *SQLSchema) userColumnCount() int {
-	if len(s.columns) <= 5 {
+	if len(s.columns) <= baseColumnCount {
 		return 0
 	}
 
-	return len(s.columns) - 5
+	return len(s.columns) - baseColumnCount
 }
 
 // validate ensures base columns still exist, no duplicates, and valid identifiers.
@@ -176,11 +180,12 @@ func (s *SQLSchema) validate() error {
 	}
 
 	required := map[string]bool{
-		"id":       false,
-		"short_id": false,
-		"path":     false,
-		"mtime_ns": false,
-		"title":    false,
+		"id":         false,
+		"short_id":   false,
+		"path":       false,
+		"mtime_ns":   false,
+		"size_bytes": false,
+		"title":      false,
 	}
 
 	seen := make(map[string]struct{}, len(s.columns))
@@ -279,6 +284,12 @@ func (s *SQLSchema) fingerprint() uint32 {
 	}
 
 	return h.Sum32()
+}
+
+// schemaVersion converts the unsigned schema fingerprint to SQLite's signed
+// 32-bit user_version range. We keep values positive by masking to 31 bits.
+func schemaVersion(fingerprint uint32) int64 {
+	return int64(fingerprint & math.MaxInt32)
 }
 
 // buildCreateTableSQL generates the CREATE TABLE statement.
@@ -436,7 +447,7 @@ func (mddb *MDDB[T]) fillBatchUpsertSQLArgs(docs []IndexableDocument, colCount i
 }
 
 // _fillDocUpsertSQLArgs populates dest with SQL arguments for a single document.
-// First 5 slots are base columns (id, short_id, path, mtime_ns, title),
+// First slots are base columns (id, short_id, path, mtime_ns, size_bytes, title),
 // remaining slots are filled by Config.SQLColumnValues for user columns.
 func (mddb *MDDB[T]) _fillDocUpsertSQLArgs(doc *IndexableDocument, dest []any) error {
 	// Use unsafe.String to avoid one allocation per field on hot-path inserts.
@@ -454,7 +465,8 @@ func (mddb *MDDB[T]) _fillDocUpsertSQLArgs(doc *IndexableDocument, dest []any) e
 	dest[1] = unsafe.String(unsafe.SliceData(doc.ShortID), len(doc.ShortID))
 	dest[2] = unsafe.String(unsafe.SliceData(doc.RelPath), len(doc.RelPath))
 	dest[3] = doc.MtimeNS
-	dest[4] = unsafe.String(unsafe.SliceData(doc.Title), len(doc.Title))
+	dest[4] = doc.SizeBytes
+	dest[5] = unsafe.String(unsafe.SliceData(doc.Title), len(doc.Title))
 
 	userColCount := mddb.schema.userColumnCount()
 	if userColCount == 0 {
@@ -474,9 +486,9 @@ func (mddb *MDDB[T]) _fillDocUpsertSQLArgs(doc *IndexableDocument, dest []any) e
 		switch v := val.(type) {
 		case []byte:
 			// Convert borrowed []byte to TEXT (same reasoning as base columns above).
-			dest[5+i] = unsafe.String(unsafe.SliceData(v), len(v))
+			dest[baseColumnCount+i] = unsafe.String(unsafe.SliceData(v), len(v))
 		default:
-			dest[5+i] = val
+			dest[baseColumnCount+i] = val
 		}
 	}
 

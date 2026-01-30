@@ -61,6 +61,33 @@ func Test_Reindex_Builds_SQLite_Index_When_Docs_Valid(t *testing.T) {
 	if count := countDocs(t, db); count != 2 {
 		t.Fatalf("doc count = %d, want 2", count)
 	}
+
+	assertSize := func(doc *TestDoc) {
+		t.Helper()
+
+		absPath := filepath.Join(dir, doc.DocPath)
+
+		info, err := os.Stat(absPath)
+		if err != nil {
+			t.Fatalf("stat %s: %v", absPath, err)
+		}
+
+		var size int64
+
+		row := db.QueryRow("SELECT size_bytes FROM "+testTableName+" WHERE id = ?", doc.DocID)
+
+		err = row.Scan(&size)
+		if err != nil {
+			t.Fatalf("query size_bytes for %s: %v", doc.DocID, err)
+		}
+
+		if size != info.Size() {
+			t.Fatalf("size_bytes for %s = %d, want %d", doc.DocID, size, info.Size())
+		}
+	}
+
+	assertSize(docA)
+	assertSize(docB)
 }
 
 func Test_Reindex_Binds_TextColumns_When_UsingBorrowedBytes(t *testing.T) {
@@ -75,6 +102,7 @@ func Test_Reindex_Binds_TextColumns_When_UsingBorrowedBytes(t *testing.T) {
 	writeTestDocFile(t, dir, doc)
 
 	s := openTestStore(t, dir)
+
 	defer func() { _ = s.Close() }()
 
 	_, err := s.Reindex(t.Context())
@@ -83,9 +111,11 @@ func Test_Reindex_Binds_TextColumns_When_UsingBorrowedBytes(t *testing.T) {
 	}
 
 	db := openIndex(t, dir)
+
 	defer func() { _ = db.Close() }()
 
 	var typeofID string
+
 	row := db.QueryRow("SELECT typeof(id) FROM "+testTableName+" WHERE id = ?", doc.DocID)
 	if err := row.Scan(&typeofID); err != nil {
 		t.Fatalf("typeof(id): %v", err)
@@ -96,6 +126,7 @@ func Test_Reindex_Binds_TextColumns_When_UsingBorrowedBytes(t *testing.T) {
 	}
 
 	var count int
+
 	row = db.QueryRow("SELECT COUNT(*) FROM "+testTableName+" WHERE id = ?", doc.DocID)
 	if err := row.Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)

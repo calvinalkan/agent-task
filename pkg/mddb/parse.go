@@ -18,7 +18,7 @@ import (
 //   - Frontmatter structure and required fields (id, title)
 //   - Derived path matches actual file path (prevents orphaned files)
 //   - ShortID derivation succeeds
-func (mddb *MDDB[T]) parseIndexable(fsRelPath []byte, content []byte, mtimeNS int64, expectedID string) (IndexableDocument, error) {
+func (mddb *MDDB[T]) parseIndexable(fsRelPath []byte, content []byte, mtimeNS int64, sizeBytes int64, expectedID string) (IndexableDocument, error) {
 	fm, tail, err := frontmatter.ParseBytes(content, mddb.cfg.ParseOptions...)
 	if err != nil {
 		return IndexableDocument{}, fmt.Errorf("frontmatter: %w", err)
@@ -54,6 +54,7 @@ func (mddb *MDDB[T]) parseIndexable(fsRelPath []byte, content []byte, mtimeNS in
 		ShortID:     []byte(shortID),
 		RelPath:     fsRelPath,
 		MtimeNS:     mtimeNS,
+		SizeBytes:   sizeBytes,
 		Title:       titleBytes,
 		Body:        tail,
 		Frontmatter: fm,
@@ -66,8 +67,8 @@ func (mddb *MDDB[T]) parseIndexable(fsRelPath []byte, content []byte, mtimeNS in
 //
 // This is a lower-level helper - returns errors with subsystem prefix only.
 // Public APIs add structured context via withContext().
-func (mddb *MDDB[T]) parseDocument(fsRelPath string, content []byte, mtimeNS int64, expectedID string) (*T, error) {
-	indexable, err := mddb.parseIndexable([]byte(fsRelPath), content, mtimeNS, expectedID)
+func (mddb *MDDB[T]) parseDocument(fsRelPath string, content []byte, mtimeNS int64, sizeBytes int64, expectedID string) (*T, error) {
+	indexable, err := mddb.parseIndexable([]byte(fsRelPath), content, mtimeNS, sizeBytes, expectedID)
 	if err != nil {
 		return nil, err
 	}

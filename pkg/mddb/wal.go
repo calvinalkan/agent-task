@@ -365,7 +365,7 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 			}
 
 			// Re-parse from WAL content to avoid relying on in-memory Doc serialization.
-			parsed, parseErr := mddb.parseIndexable([]byte(op.Path), []byte(op.Content), info.ModTime().UnixNano(), op.ID)
+			parsed, parseErr := mddb.parseIndexable([]byte(op.Path), []byte(op.Content), info.ModTime().UnixNano(), info.Size(), op.ID)
 			if parseErr != nil {
 				return fmt.Errorf("wal: parse document %s: %w", op.Path, parseErr)
 			}
@@ -376,7 +376,7 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 				if op.Doc != nil {
 					afterDocs = append(afterDocs, op.Doc)
 				} else {
-					doc, docErr := mddb.parseDocument(op.Path, []byte(op.Content), info.ModTime().UnixNano(), op.ID)
+					doc, docErr := mddb.parseDocument(op.Path, []byte(op.Content), info.ModTime().UnixNano(), info.Size(), op.ID)
 					if docErr != nil {
 						return fmt.Errorf("wal: parse document %s: %w", op.Path, docErr)
 					}

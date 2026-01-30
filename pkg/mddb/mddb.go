@@ -192,8 +192,8 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 		return nil, withContext(err, "", "")
 	}
 
-	expectedVersion := int(schema.fingerprint())
-	versionMismatch := storedVersion != expectedVersion
+	expectedVersion := schemaVersion(schema.fingerprint())
+	versionMismatch := int64(storedVersion) != expectedVersion
 
 	walSize, err := mddb.walSize()
 	if err != nil {

@@ -157,7 +157,7 @@ type Config[T Document] struct {
 	// Use [Config.AfterRecreateSchema] and [Config.AfterBulkIndex] to populate
 	// related tables (tags, FTS, etc.) that need different structure than the main table.
 	//
-	// Base columns (id, short_id, path, mtime_ns, title) are included automatically.
+	// Base columns (id, short_id, path, mtime_ns, size_bytes, title) are included automatically.
 	// Add custom columns for fields you want to query or filter on:
 	//
 	//	SQLSchema: mddb.NewBaseSchema("tickets").
@@ -172,8 +172,8 @@ type Config[T Document] struct {
 	// SQLColumnValues extracts user-defined column values from a document for indexing.
 	//
 	// Called during [Tx.Commit] and [MDDB.Reindex] to populate custom columns in
-	// the SQLite index. Base columns (id, short_id, path, mtime_ns, title) are
-	// handled automatically.
+	// the SQLite index. Base columns (id, short_id, path, mtime_ns, size_bytes, title)
+	// are handled automatically.
 	//
 	// Return values in the SAME ORDER as columns were defined in SQLSchema:
 	//

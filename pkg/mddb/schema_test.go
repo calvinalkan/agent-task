@@ -19,6 +19,7 @@ func Test_Schema_Creates_Base_Table_SQL_When_Called(t *testing.T) {
 		"short_id TEXT NOT NULL",
 		"path TEXT NOT NULL",
 		"mtime_ns INTEGER NOT NULL",
+		"size_bytes INTEGER NOT NULL",
 		"title TEXT NOT NULL",
 		"WITHOUT ROWID",
 	}
