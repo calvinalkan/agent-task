@@ -5,88 +5,141 @@ This document describes the error handling conventions for the mddb package.
 ## Gold Standard
 
 ```
-frontmatter: invalid yaml (doc_id=abc123 doc_path=tickets/abc.md)
-           ^               ^             ^
-           |               |             |
-     lower level       public API    public API
-     (subsystem)     (withContext)  (withContext)
+read document: fs: open: no such file (doc_id=abc123 doc_path=tickets/abc.md)
+      ^        ^                              ^             ^
+      |        |                              |             |
+    verb    subsystem                     public API    public API
+  (caller)  (external)                   (withContext)  (withContext)
 ```
 
-- **Error message first** - what went wrong, with subsystem prefix
+```
+recover wal: replay ops: sqlite: UNIQUE constraint failed
+     ^           ^          ^
+     |           |          |
+   verb        verb      subsystem
+ (caller)    (caller)    (external)
+```
+
+- **Verb first** - what operation was being attempted
+- **Subsystem prefix** - which external system failed
 - **Document context at end** - structured fields for programmatic access
 - **No duplication** - context added once at the right level
 
-## Two-Level Pattern
+## Core Principles
 
-### Lower Levels (internal helpers)
+### 1. Callers wrap what they call (verb prefix)
 
-Use `fmt.Errorf` with subsystem prefix. No `withContext()`.
+When calling an internal function, wrap with a verb describing what you were doing:
 
 ```go
-// parseIndexable - internal helper
-func (mddb *MDDB[T]) parseIndexable(...) (IndexableDocument, error) {
-    fm, tail, err := frontmatter.ParseBytes(content, ...)
-    if err != nil {
-        return IndexableDocument{}, fmt.Errorf("frontmatter: %w", err)
+// ✓ Good - caller describes what it was doing
+doc, err := mddb.readDocumentFile(id, path)
+if err != nil {
+    return nil, fmt.Errorf("read document: %w", err)
+}
+
+// ✓ Good - verb describes the action
+doc, err := mddb.parseDocument(relPath, data, mtime, size, expectedID)
+if err != nil {
+    return nil, fmt.Errorf("parse document: %w", err)
+}
+
+// ✓ Good - helper calling helper, no wrap needed if it doesn't add useful context
+func (mddb *MDDB[T]) fillBatchUpsertArgs(docs []IndexableDocument, dest []any) error {
+    for i := range docs {
+        err := mddb.fillDocArgs(&docs[i], dest[i*colCount:(i+1)*colCount])
+        if err != nil {
+            return err  // pass through, wrapping adds no useful info
+        }
     }
-    
-    if !hasID {
-        return IndexableDocument{}, fmt.Errorf("frontmatter: %w", ErrMissingID)
-    }
-    
-    if len(titleBytes) == 0 {
-        return IndexableDocument{}, fmt.Errorf("frontmatter: %w", ErrEmptyTitle)
-    }
-    
-    // validation error from another internal helper
-    if err := mddb.validatePath(path); err != nil {
-        return IndexableDocument{}, err  // pass through, already has context
-    }
-    
-    return doc, nil
+    return nil
 }
 ```
 
-**Subsystem prefixes:**
-- `frontmatter:` - YAML/frontmatter parsing
-- `sqlite:` - database operations  
-- `fs:` - filesystem operations
-- `wal:` - write-ahead log operations
-- `lock:` - file locking operations
-- `json:` - JSON encoding/decoding
+### 2. Children never add their own name
 
-### Public API (exported methods)
+A function should never prefix errors with its own name - that's the caller's job.
 
-Use `withContext()` with id/path at the boundary. Values must be **known and valid**.
+### 3. First function to receive data adds context
 
-Behavior:
-- If err is already `*Error`, `withContext()` fills missing fields only (does not overwrite).
+When data (like a path, ID, etc.) is passed from parent to child, only the **first function** to receive it should add it to errors. Children should not re-add context they received from their caller:
 
 ```go
-// Get - public API
-func (mddb *MDDB[T]) Get(ctx context.Context, id string) (*T, error) {
-    // id = what caller asked for (known, valid)
-    // path = from sqlite lookup (known, valid)
-    
-    path, err := mddb.lookupPath(id)
-    if err != nil {
-        return nil, withContext(err, id, "")
+// ✓ Good - parent adds path context, child does not repeat it
+func (mddb *MDDB[T]) deriveAndValidate(id string, ...) (string, string, error) {
+    path := mddb.cfg.RelPathFromID(id)
+    if err := mddb.validateRelPath(path); err != nil {
+        return "", "", fmt.Errorf("invalid path %q: %w", path, err)  // first to have path
     }
-    
-    doc, err := mddb.readDocumentFile(id, path)
-    if err != nil {
-        return nil, withContext(err, id, path)
+}
+
+func (mddb *MDDB[T]) validateRelPath(path string) error {
+    if path == "" {
+        return errors.New("empty")  // no path in message - caller adds it
     }
-    
-    return doc, nil
+    if !strings.HasSuffix(path, ".md") {
+        return errors.New("must end with .md")  // no path - caller adds it
+    }
+}
+
+// ✗ Bad - child repeats path that parent will also add
+func (mddb *MDDB[T]) validateRelPath(path string) error {
+    if path == "" {
+        return fmt.Errorf("path %q: empty", path)  // parent already adds this!
+    }
 }
 ```
 
-## Rules
+**Exception:** External libraries (stdlib, third-party) may already include context like paths in their errors. Don't duplicate it:
 
-### 1. Subsystem prefix at the call site
+```go
+// ✓ Good - os.ReadFile already includes path in error, don't add again
+data, err := os.ReadFile(absPath)
+if err != nil {
+    return fmt.Errorf("fs: %w", err)  // just subsystem prefix, path is in err
+}
 
-When calling into a subsystem (external package or distinct internal module), add the prefix:
+// ✗ Bad - duplicates path that os.ReadFile already included
+data, err := os.ReadFile(absPath)
+if err != nil {
+    return fmt.Errorf("fs: read %s: %w", absPath, err)  // path appears twice!
+}
+```
+
+```go
+// ✗ Bad - function adding its own name
+func (mddb *MDDB[T]) readDocumentFile(...) (*T, error) {
+    if err != nil {
+        return nil, fmt.Errorf("readDocumentFile: %w", err)
+    }
+}
+
+// ✗ Bad - "open" is semantically the function's name (openSqlite)
+func openSqlite(ctx context.Context, path string) (*sql.DB, error) {
+    db, err := sql.Open("sqlite3", path)
+    if err != nil {
+        return nil, fmt.Errorf("sqlite: open: %w", err)
+    }
+    
+    // ✓ Good - "apply pragmas" is a distinct operation within the function
+    _, err = db.ExecContext(ctx, "PRAGMA busy_timeout = ...")
+    if err != nil {
+        return nil, fmt.Errorf("sqlite: apply pragmas: %w", err)
+    }
+}
+
+// ✓ Good - function returns error with subsystem prefix, caller adds verb
+func (mddb *MDDB[T]) readDocumentFile(...) (*T, error) {
+    data, err := mddb.fs.ReadFile(absPath)
+    if err != nil {
+        return nil, fmt.Errorf("fs: %w", err)  // subsystem prefix only
+    }
+}
+```
+
+### 4. External calls get subsystem prefix
+
+When calling external packages or distinct subsystems, add a subsystem prefix:
 
 ```go
 // Calling frontmatter package
@@ -108,178 +161,188 @@ if err != nil {
 }
 ```
 
-### 2. withContext() only at public API boundaries
+**Subsystem prefixes:**
+- `frontmatter:` - YAML/frontmatter parsing
+- `sqlite:` - database operations  
+- `fs:` - filesystem operations
+- `wal:` - write-ahead log operations
+- `lock:` - file locking operations
+- `json:` - JSON encoding/decoding
+
+Only use a subsystem prefix when you actually called that subsystem:
 
 ```go
-// ✓ Good - public API adds context
-func (mddb *MDDB[T]) Get(id string) (*T, error) {
-    doc, err := mddb.internal(id, path)
+// ✗ Bad - no sqlite call was made, this is just validation
+if rows <= 0 {
+    return nil, errors.New("sqlite: delete rows must be positive")
+}
+
+// ✓ Good - validation error, no prefix needed
+if rows <= 0 {
+    return nil, errors.New("delete rows must be positive")
+}
+```
+
+### 5. withContext() only at public API boundaries
+
+`withContext()` adds document ID and path. Only use it at public API boundaries, and only when you have valid values to add:
+
+```go
+// ✓ Good - public API adds document context
+func (mddb *MDDB[T]) Get(ctx context.Context, id string) (*T, error) {
+    doc, err := mddb.readDocumentFile(id, path)
     if err != nil {
-        return nil, withContext(err, id, path)
+        return nil, withContext(fmt.Errorf("read document: %w", err), id, path)
     }
     return doc, nil
 }
 
+// ✗ Bad - withContext with empty strings (pointless)
+return nil, withContext(err, "", "")  // Don't do this
+
 // ✗ Bad - internal helper using withContext
-func (mddb *MDDB[T]) internal(id, path string) (*T, error) {
+func (mddb *MDDB[T]) internal(...) (*T, error) {
+    return nil, withContext(err, id, path)  // Don't do this
+}
+```
+
+## Complete Example
+
+Here's how errors flow through the call stack:
+
+```go
+// Public API - adds document context
+func (mddb *MDDB[T]) Get(ctx context.Context, id string) (*T, error) {
+    // ... lookup path from sqlite ...
+    
+    doc, err := mddb.readDocumentFile(id, path)
     if err != nil {
-        return nil, withContext(err, id, path)  // Don't do this
+        // Wrap with verb, then add document context
+        return nil, withContext(fmt.Errorf("read document: %w", err), id, path)
     }
-}
-```
-
-### 3. withContext uses validated values only
-
-The ID and Path in `withContext()` should be values the caller knows and trusts:
-
-```go
-// ✓ Good - id is what caller requested
-func (mddb *MDDB[T]) Get(id string) (*T, error) {
-    return nil, withContext(err, id, "")  // id came from caller
+    return doc, nil
 }
 
-// ✓ Good - path is from trusted source (sqlite index)
-path := lookupPathFromIndex(id)
-return nil, withContext(err, "", path)
+// Internal helper - uses subsystem prefixes, no withContext
+func (mddb *MDDB[T]) readDocumentFile(expectedID string, relPath string) (*T, error) {
+    absPath := filepath.Join(mddb.dataDir, relPath)
 
-// ✗ Bad - id parsed from untrusted file content
-id := parseIDFromFile(content)  // might be invalid/malformed
-return nil, withContext(err, id, "")  // Don't use unvalidated values
-```
+    info, err := mddb.fs.Stat(absPath)
+    if err != nil {
+        return nil, fmt.Errorf("fs: %w", err)  // subsystem prefix
+    }
 
-For unvalidated/malformed values, include them in the error **message** instead:
+    data, err := mddb.fs.ReadFile(absPath)
+    if err != nil {
+        return nil, fmt.Errorf("fs: %w", err)  // subsystem prefix
+    }
 
-```go
-// ✓ Good - malformed value in message, not in structured field
-rawID := parseIDFromFile(content)
-if !isValid(rawID) {
-    return fmt.Errorf("frontmatter: invalid id format %q", rawID)
+    doc, err := mddb.parseDocument(relPath, data, mtimeNS, sizeBytes, expectedID)
+    if err != nil {
+        return nil, fmt.Errorf("parse document: %w", err)  // verb prefix for internal call
+    }
+
+    return doc, nil
 }
-```
 
-### 4. Pass through when context already present
-
-If a lower level already added appropriate context, just return the error:
-
-```go
+// Lower-level helper - subsystem prefixes only
 func (mddb *MDDB[T]) parseDocument(...) (*T, error) {
-    indexable, err := mddb.parseIndexable(...)
+    fm, tail, err := frontmatter.ParseBytes(content, ...)
     if err != nil {
-        return nil, err  // Already has subsystem prefix, pass through
-    }
-    // ...
-}
-```
-
-### 5. Reindex/scanning - only path available
-
-During scanning, there's no "requested ID" - only the file path:
-
-```go
-func (mddb *MDDB[T]) scanFiles(ctx context.Context) ([]*Error, error) {
-    var issues []*Error
-    
-    for _, path := range files {
-        doc, err := mddb.parseIndexable(path, content)
-        if err != nil {
-            // Only path is known/valid - no requested ID exists
-            issues = append(issues, &Error{Path: path, Err: err})
-        }
+        return nil, fmt.Errorf("frontmatter: %w", err)
     }
     
-    return issues, nil
+    doc, err := mddb.cfg.DocumentFrom(...)
+    if err != nil {
+        return nil, fmt.Errorf("DocumentFrom: %w", err)
+    }
+    
+    return doc, nil
 }
 ```
 
-## Error Type
+**Final error output:**
+```
+read document: parse document: frontmatter: yaml: line 5: invalid syntax (doc_id=abc123 doc_path=tickets/abc.md)
+```
+
+### Operational errors (no document context)
 
 ```go
-type Error struct {
-    ID   string  // Document ID (validated, from caller or index)
-    Path string  // Document path relative to data dir (validated)
-    Err  error   // Underlying cause with subsystem prefix
+// Store is closed - no document involved
+return zero, ErrClosed
+
+// Lock acquisition failed - no document involved  
+return zero, err  // err already has "lock: write: ..." prefix
+
+// Context canceled - no document involved
+return zero, fmt.Errorf("canceled: %w", context.Cause(ctx))
+```
+
+## Joining Multiple Errors
+
+Use `errors.Join` when a path can produce multiple errors (e.g., partial cleanup, multiple validations):
+
+```go
+// ✓ Good - collecting errors during cleanup
+func (mddb *MDDB[T]) Close() error {
+    var sqlErr, walErr error
+    
+    if mddb.sql != nil {
+        sqlErr = mddb.sql.Close()
+    }
+    if mddb.wal != nil {
+        walErr = mddb.wal.Close()
+    }
+    
+    return errors.Join(sqlErr, walErr)  // nil if both nil
+}
+
+// ✓ Good - operation failed, cleanup also failed
+result, err := doOperation()
+if err != nil {
+    cleanupErr := cleanup()
+    return errors.Join(err, cleanupErr)
 }
 ```
 
-Output format: `<cause> (doc_id=X doc_path=Y)`
+## Sentinel Errors
 
-## Examples
-
-### Get by ID - found but parse fails
+Only use sentinel errors when the caller can take **specific action** based on them:
 
 ```go
-// User calls: db.Get(ctx, "abc123")
-// Path looked up from sqlite: "tickets/abc.md"
-// File exists but has invalid YAML
+// ✓ Good - caller can handle "not found" differently (e.g., create new)
+var ErrNotFound = errors.New("not found")
 
-// Lower level returns:
-"frontmatter: yaml: line 5: mapping values not allowed"
+// ✓ Good - caller can handle "closed" differently (e.g., reopen)
+var ErrClosed = errors.New("closed")
 
-// Public API wraps:
-withContext(err, "abc123", "tickets/abc.md")
+// ✓ Good - caller can handle "already exists" differently (e.g., update instead)
+var ErrAlreadyExists = errors.New("already exists")
 
-// Final output:
-"frontmatter: yaml: line 5: mapping values not allowed (doc_id=abc123 doc_path=tickets/abc.md)"
+// ✗ Bad - caller can't do anything useful with this
+var ErrInvalidYAML = errors.New("invalid yaml")  // Just let the error bubble up
+
+// ✗ Bad - too specific, caller can't act on it
+var ErrMissingTitle = errors.New("missing title")  // Use fmt.Errorf instead
 ```
 
-### Get by ID - not found
-
-```go
-// User calls: db.Get(ctx, "xyz789")  
-// sqlite lookup returns no rows
-
-// Lower level returns:
-"sqlite: no rows"
-
-// Public API wraps:
-withContext(ErrNotFound, "xyz789", "")
-
-// Final output:
-"not found (doc_id=xyz789)"
-```
-
-### Reindex - file with invalid frontmatter
-
-```go
-// Scanning finds file: "tickets/broken.md"
-// No requested ID - we're discovering files
-
-// Lower level returns:
-"frontmatter: missing id"
-
-// Reindex collects:
-&Error{Path: "tickets/broken.md", Err: err}
-
-// Final output:
-"frontmatter: missing id (doc_path=tickets/broken.md)"
-```
-
-### Create - duplicate ID
-
-```go
-// User calls: tx.Create(&doc) where doc.ID() = "abc123"
-// Check finds ID already exists
-
-// Public API:
-withContext(ErrAlreadyExists, "abc123", "tickets/abc.md")
-
-// Final output:
-"already exists (doc_id=abc123 doc_path=tickets/abc.md)"
-```
+**Rules:**
+- Never export sentinel errors unless callers need `errors.Is()` checks
+- Prefer `fmt.Errorf("frontmatter: %w", err)` over custom sentinels for parse/validation errors
+- If you can't imagine a caller's `if errors.Is(err, X)` block doing something useful, don't create the sentinel
 
 ## Checking Errors
 
 Use standard Go error handling:
 
 ```go
-// Check for sentinel errors
+// Check for sentinel errors (only when you can act on them)
 if errors.Is(err, mddb.ErrNotFound) {
-    // handle not found
+    // handle not found - e.g., create new document
 }
 
-// Extract structured context
-var mErr *mddb.Error
-if errors.As(err, &mErr) {
-    fmt.Printf("failed for doc %s at %s\n", mErr.ID, mErr.Path)
+if errors.Is(err, mddb.ErrClosed) {
+    // handle closed - e.g., reopen store
 }
 ```

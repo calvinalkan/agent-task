@@ -26,11 +26,11 @@ func (mddb *MDDB[T]) parseIndexable(fsRelPath []byte, content []byte, mtimeNS in
 
 	idBytes, ok := fm.GetBytes(frontmatterKeyID)
 	if !ok {
-		return IndexableDocument{}, fmt.Errorf("frontmatter: %w", ErrMissingID)
+		return IndexableDocument{}, errors.New("frontmatter: missing id field")
 	}
 
 	if len(idBytes) == 0 {
-		return IndexableDocument{}, fmt.Errorf("frontmatter: %w", ErrEmptyID)
+		return IndexableDocument{}, fmt.Errorf("frontmatter: %w", errEmptyID)
 	}
 
 	id := string(idBytes)
@@ -39,14 +39,18 @@ func (mddb *MDDB[T]) parseIndexable(fsRelPath []byte, content []byte, mtimeNS in
 		return IndexableDocument{}, fmt.Errorf("frontmatter: id mismatch: expected %q, got %q", expectedID, id)
 	}
 
-	titleBytes, _ := fm.GetBytes(frontmatterKeyTitle)
+	titleBytes, ok := fm.GetBytes(frontmatterKeyTitle)
+	if !ok {
+		return IndexableDocument{}, errors.New("frontmatter: missing title field")
+	}
+
 	if len(titleBytes) == 0 {
-		return IndexableDocument{}, fmt.Errorf("frontmatter: %w", ErrEmptyTitle)
+		return IndexableDocument{}, fmt.Errorf("frontmatter: %w", errEmptyTitle)
 	}
 
 	_, shortID, err := mddb.deriveAndValidate(id, fsRelPath)
 	if err != nil {
-		return IndexableDocument{}, err // Already has context from deriveAndValidate
+		return IndexableDocument{}, err // caller adds doc context
 	}
 
 	return IndexableDocument{

@@ -10,12 +10,10 @@ import (
 
 // Validation errors for document fields.
 var (
-	ErrMissingID    = errors.New("missing id")
-	ErrEmptyID      = errors.New("id is empty")
-	ErrEmptyShortID = errors.New("short id is empty")
-	ErrEmptyPath    = errors.New("path is empty")
-	ErrEmptyTitle   = errors.New("title is empty")
-	ErrInvalidPath  = errors.New("invalid path")
+	errEmptyID      = errors.New("id is empty")
+	errEmptyShortID = errors.New("short id is empty")
+	errEmptyPath    = errors.New("derived path is empty")
+	errEmptyTitle   = errors.New("title is empty")
 )
 
 // validateDocument checks a Document before Create/Update.
@@ -23,11 +21,11 @@ var (
 func (mddb *MDDB[T]) validateDocument(d Document) (string, string, error) {
 	id := d.ID()
 	if id == "" {
-		return "", "", ErrEmptyID
+		return "", "", errEmptyID
 	}
 
 	if d.Title() == "" {
-		return id, "", ErrEmptyTitle
+		return id, "", errEmptyTitle
 	}
 
 	path, _, err := mddb.deriveAndValidate(id, nil)
@@ -43,33 +41,33 @@ func (mddb *MDDB[T]) validateDocument(d Document) (string, string, error) {
 // Returns derived path and shortID.
 //
 // expectPath is borrowed and only used for comparison (not stored).
-func (mddb *MDDB[T]) deriveAndValidate(id string, expectPath []byte) (string, string, error) {
+func (mddb *MDDB[T]) deriveAndValidate(id string, fsPath []byte) (string, string, error) {
 	if mddb.cfg.RelPathFromID == nil {
-		return "", "", errors.New("RelPathFromID is nil")
+		return "", "", errors.New("Config.RelPathFromID is nil")
 	}
 
 	path := mddb.cfg.RelPathFromID(id)
 	if path == "" {
-		return "", "", ErrEmptyPath
+		return "", "", errEmptyPath
 	}
 
 	if err := mddb.validateRelPath(path); err != nil {
-		return "", "", fmt.Errorf("%w: path %q", err, path)
+		return "", "", err
 	}
 
 	// Compare without allocating: unsafe.String creates a view, not a copy.
 	// Safe because expectPath outlives this comparison and result isn't stored.
-	if len(expectPath) > 0 && path != unsafe.String(unsafe.SliceData(expectPath), len(expectPath)) {
-		return "", "", fmt.Errorf("path mismatch: file at %q, derived %q", expectPath, path)
+	if len(fsPath) > 0 && path != unsafe.String(unsafe.SliceData(fsPath), len(fsPath)) {
+		return "", "", fmt.Errorf("path mismatch: derived %q", path)
 	}
 
 	if mddb.cfg.ShortIDFromID == nil {
-		return "", "", errors.New("ShortIDFromID is nil")
+		return "", "", errors.New("Config.ShortIDFromID is nil")
 	}
 
 	shortID := mddb.cfg.ShortIDFromID(id)
 	if shortID == "" {
-		return "", "", ErrEmptyShortID
+		return "", "", errEmptyShortID
 	}
 
 	return path, shortID, nil
@@ -78,38 +76,38 @@ func (mddb *MDDB[T]) deriveAndValidate(id string, expectPath []byte) (string, st
 // validateRelPath checks path format: relative, clean, ends with .md, no escape.
 func (mddb *MDDB[T]) validateRelPath(path string) error {
 	if path == "" {
-		return fmt.Errorf("%w: empty", ErrInvalidPath)
+		return errors.New("is empty")
 	}
 
 	if filepath.IsAbs(path) {
-		return fmt.Errorf("%w: absolute path", ErrInvalidPath)
+		return errors.New("must be relative")
 	}
 
 	if filepath.Clean(path) != path {
-		return fmt.Errorf("%w: path must be clean", ErrInvalidPath)
+		return errors.New("must be clean")
 	}
 
 	if path == "." || path == ".." {
-		return fmt.Errorf("%w: path must be a file", ErrInvalidPath)
+		return errors.New("must be a file")
 	}
 
 	if strings.HasPrefix(path, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("%w: path escapes data dir", ErrInvalidPath)
+		return errors.New("escapes data dir")
 	}
 
 	if !strings.HasSuffix(path, ".md") {
-		return fmt.Errorf("%w: path must end with .md", ErrInvalidPath)
+		return errors.New("must end with .md")
 	}
 
 	absPath := filepath.Join(mddb.dataDir, path)
 
 	rel, err := filepath.Rel(mddb.dataDir, absPath)
 	if err != nil {
-		return fmt.Errorf("%w: rel: %w", ErrInvalidPath, err)
+		return fmt.Errorf("fs: %w", err)
 	}
 
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("%w: path escapes data dir", ErrInvalidPath)
+		return errors.New("escapes data dir")
 	}
 
 	return nil

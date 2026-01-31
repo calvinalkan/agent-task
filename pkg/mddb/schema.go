@@ -150,6 +150,35 @@ func (s *SQLSchema) SQL() (string, []string) {
 	return s.buildCreateTableSQL(), s.buildCreateIndexSQL()
 }
 
+func (s *SQLSchema) selectIndexMetaSQL() string {
+	var b strings.Builder
+
+	b.WriteString("SELECT id, path, mtime_ns, size_bytes FROM ")
+	b.WriteString(s.tableName)
+
+	return b.String()
+}
+
+func (s *SQLSchema) deleteByIDSQL(rows int) string {
+	var b strings.Builder
+
+	b.WriteString("DELETE FROM ")
+	b.WriteString(s.tableName)
+	b.WriteString(" WHERE id IN (")
+
+	for i := range rows {
+		if i > 0 {
+			b.WriteString(",")
+		}
+
+		b.WriteString("?")
+	}
+
+	b.WriteString(")")
+
+	return b.String()
+}
+
 // columnNames returns all column names in order.
 func (s *SQLSchema) columnNames() []string {
 	names := make([]string, len(s.columns))
@@ -172,11 +201,11 @@ func (s *SQLSchema) userColumnCount() int {
 // validate ensures base columns still exist, no duplicates, and valid identifiers.
 func (s *SQLSchema) validate() error {
 	if s.tableName == "" {
-		return errors.New("schema: table name is required")
+		return errors.New("table name is required")
 	}
 
 	if !isValidIdentifier(s.tableName) {
-		return fmt.Errorf("schema: invalid table name %q: must be lowercase a-z and underscore", s.tableName)
+		return fmt.Errorf("invalid table name %q: must be lowercase a-z and underscore", s.tableName)
 	}
 
 	required := map[string]bool{
@@ -192,11 +221,11 @@ func (s *SQLSchema) validate() error {
 
 	for _, col := range s.columns {
 		if !isValidIdentifier(col.name) {
-			return fmt.Errorf("schema: invalid column name %q: must be lowercase a-z and underscore", col.name)
+			return fmt.Errorf("invalid column name %q: must be lowercase a-z and underscore", col.name)
 		}
 
 		if _, ok := seen[col.name]; ok {
-			return fmt.Errorf("schema: duplicate column %q", col.name)
+			return fmt.Errorf("duplicate column %q", col.name)
 		}
 
 		seen[col.name] = struct{}{}
@@ -208,7 +237,7 @@ func (s *SQLSchema) validate() error {
 
 	for name, found := range required {
 		if !found {
-			return fmt.Errorf("schema: missing required column %q", name)
+			return fmt.Errorf("missing required column %q", name)
 		}
 	}
 
@@ -216,7 +245,7 @@ func (s *SQLSchema) validate() error {
 	for _, idx := range s.indexes {
 		for _, col := range idx.columns {
 			if _, ok := seen[col]; !ok {
-				return fmt.Errorf("schema: index references unknown column %q", col)
+				return fmt.Errorf("index references unknown column %q", col)
 			}
 		}
 	}
@@ -227,7 +256,7 @@ func (s *SQLSchema) validate() error {
 // fingerprint computes a hash of the schema structure for version detection.
 // Order-independent: columns and indexes are sorted by name before hashing.
 // Used to detect schema changes that require reindexing.
-func (s *SQLSchema) fingerprint() uint32 {
+func (s *SQLSchema) fingerprint() int64 {
 	h := fnv.New32a()
 
 	// fnv Write never returns an error, but we explicitly ignore for lint.
@@ -283,13 +312,9 @@ func (s *SQLSchema) fingerprint() uint32 {
 		}
 	}
 
-	return h.Sum32()
-}
-
-// schemaVersion converts the unsigned schema fingerprint to SQLite's signed
-// 32-bit user_version range. We keep values positive by masking to 31 bits.
-func schemaVersion(fingerprint uint32) int64 {
-	return int64(fingerprint & math.MaxInt32)
+	// converts the unsigned schema fingerprint to SQLite's signed
+	// 32-bit user_version range. We keep values positive by masking to 31 bits.
+	return int64(h.Sum32() & math.MaxInt32)
 }
 
 // buildCreateTableSQL generates the CREATE TABLE statement.
@@ -398,7 +423,8 @@ func (s *SQLSchema) recreate(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// isValidIdentifier checks if s is a valid SQL identifier (a-z, underscore only).
+// isValidIdentifier checks if string is a valid SQL identifier (a-z, underscore only).
+// This is only a small subset of whats allowed in Sqlite, but it keeps things simple.
 func isValidIdentifier(s string) bool {
 	if s == "" {
 		return false
@@ -424,7 +450,20 @@ func (mddb *MDDB[T]) prepareUpsertStmt(ctx context.Context, tx *sql.Tx, rows int
 
 	stmt, err := tx.PrepareContext(ctx, sqlStr)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: prepare upsert statement: %w", err)
+		return nil, fmt.Errorf("sqlite: %w", err)
+	}
+
+	return stmt, nil
+}
+
+func (mddb *MDDB[T]) prepareDeleteByIDStmt(ctx context.Context, tx *sql.Tx, rows int) (*sql.Stmt, error) {
+	if rows <= 0 {
+		return nil, errors.New("delete rows must be positive")
+	}
+
+	stmt, err := tx.PrepareContext(ctx, mddb.schema.deleteByIDSQL(rows))
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: %w", err)
 	}
 
 	return stmt, nil
@@ -479,7 +518,7 @@ func (mddb *MDDB[T]) _fillDocUpsertSQLArgs(doc *IndexableDocument, dest []any) e
 
 	userVals := mddb.cfg.SQLColumnValues(*doc)
 	if len(userVals) != userColCount {
-		return fmt.Errorf("column values: expected %d values, got %d", userColCount, len(userVals))
+		return fmt.Errorf("SQLColumnValues: expected %d values, got %d", userColCount, len(userVals))
 	}
 
 	for i, val := range userVals {

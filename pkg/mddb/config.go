@@ -303,14 +303,15 @@ type Config[T Document] struct {
 	// Optional. Error triggers transaction rollback.
 	AfterRecreateSchema func(ctx context.Context, tx *sql.Tx) error
 
-	// AfterBulkIndex populates related tables during reindex.
+	// AfterBulkIndex populates related tables during full reindex.
 	//
 	// Called after each batch of documents is inserted into the main table during
 	// [MDDB.Reindex]. Batch size is exactly 50 documents (except final batch).
 	// Use to populate related tables (tags, FTS) from the indexed documents.
 	//
 	// NOT called during [Tx.Commit] - use [Config.AfterPut] for that.
-	// If you have related tables, implement both callbacks.
+	// NOT called during [MDDB.ReindexIncremental] - use [Config.AfterIncrementalIndex]
+	// for incremental syncs.
 	//
 	// Receives [IndexableDocument] (not *T) to avoid parsing overhead and byte
 	// copying during bulk operations. Extract values directly from frontmatter.
@@ -320,4 +321,15 @@ type Config[T Document] struct {
 	//
 	// Optional. Error triggers transaction rollback.
 	AfterBulkIndex func(ctx context.Context, tx *sql.Tx, batch []IndexableDocument) error
+
+	// AfterIncrementalIndex populates related tables during incremental reindex.
+	//
+	// Called after each incremental batch:
+	//   - Upsert batches: upserts populated, deletedIDs empty.
+	//   - Delete batches: deletedIDs populated, upserts empty.
+	//
+	// Either slice may be empty. If there are no changes, the hook is not called.
+	//
+	// Optional. Error triggers transaction rollback.
+	AfterIncrementalIndex func(ctx context.Context, tx *sql.Tx, upserts []IndexableDocument, deletedIDs []string) error
 }

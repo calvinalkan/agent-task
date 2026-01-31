@@ -17,26 +17,6 @@ import (
 	"github.com/calvinalkan/agent-task/pkg/mddb/frontmatter"
 )
 
-const (
-	defaultWalLockTimeout = 10 * time.Second
-	defaultTableName      = "documents"
-	// sqliteBusyTimeout is the time SQLite waits when the database is locked.
-	// After this, operations return SQLITE_BUSY.
-	sqliteBusyTimeout = 10000 // milliseconds
-)
-
-var (
-	// frontmatterKeyID is the "id" frontmatter key.
-	// Do not modify; reuse to avoid per-call allocations in hot paths.
-	frontmatterKeyID = []byte("id")
-	// frontmatterKeySchemaVersion is the "schema_version" frontmatter key.
-	// Do not modify; reuse to avoid per-call allocations in hot paths.
-	frontmatterKeySchemaVersion = []byte("schema_version")
-	// frontmatterKeyTitle is the "title" frontmatter key.
-	// Do not modify; reuse to avoid per-call allocations in hot paths.
-	frontmatterKeyTitle = []byte("title")
-)
-
 // ErrClosed indicates an operation was attempted on a closed MDDB.
 var ErrClosed = errors.New("mddb closed")
 
@@ -95,15 +75,15 @@ type MDDB[T Document] struct {
 // WAL recovery, reindex failures, or lock timeout.
 func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	if ctx == nil {
-		return nil, withContext(errors.New("context is nil"), "", "")
+		return nil, errors.New("context is nil")
 	}
 
 	if cfg.BaseDir == "" {
-		return nil, withContext(errors.New("Config.BaseDir is required"), "", "")
+		return nil, errors.New("Config.BaseDir is required")
 	}
 
 	if cfg.DocumentFrom == nil {
-		return nil, withContext(errors.New("Config.DocumentFrom is required"), "", "")
+		return nil, errors.New("Config.DocumentFrom is required")
 	}
 
 	// Default path layout: flat (id.md)
@@ -122,18 +102,16 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 		schema = NewBaseSQLSchema(defaultTableName)
 	}
 
-	// Validate schema
 	if err := schema.validate(); err != nil {
-		return nil, withContext(err, "", "")
+		return nil, fmt.Errorf("validating schema: %w", err)
 	}
 
 	// If schema has user columns, SQLColumnValues is required
 	userColCount := schema.userColumnCount()
 	if userColCount > 0 && cfg.SQLColumnValues == nil {
-		return nil, withContext(errors.New("Config.SQLColumnValues is required when SQLSchema has user columns"), "", "")
+		return nil, errors.New("Config.SQLColumnValues is required when SQLSchema has user columns")
 	}
 
-	// Default parse options: no line limit, require opening delimiter
 	if cfg.ParseOptions == nil {
 		cfg.ParseOptions = []frontmatter.ParseOption{
 			frontmatter.WithLineLimit(0),
@@ -155,21 +133,24 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 
 	err := fsReal.MkdirAll(mddbDir, 0o750)
 	if err != nil {
-		return nil, withContext(fmt.Errorf("fs: mkdir %s: %w", mddbDir, err), "", "")
+		return nil, fmt.Errorf("creating internal mddb dir: fs: %w", err)
 	}
 
 	walPath := filepath.Join(mddbDir, "wal")
 
 	walFile, err := fsReal.OpenFile(walPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		return nil, withContext(fmt.Errorf("fs: open wal %s: %w", walPath, err), "", "")
+		return nil, fmt.Errorf("opening wal: fs: %w", err)
 	}
 
 	sqlite, err := openSqlite(ctx, filepath.Join(mddbDir, "index.sqlite"))
 	if err != nil {
-		_ = walFile.Close()
+		closeErr := walFile.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("fs: close wal: %w", closeErr)
+		}
 
-		return nil, withContext(err, "", "")
+		return nil, errors.Join(fmt.Errorf("open: %w", err), closeErr)
 	}
 
 	mddb := &MDDB[T]{
@@ -185,53 +166,51 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 		lockTimeout: lockTimeout,
 	}
 
-	storedVersion, err := storedSchemaVersion(ctx, sqlite)
+	storedVersion, err := queryUserVersion(ctx, sqlite)
 	if err != nil {
-		_ = mddb.Close()
+		closeErr := mddb.Close()
 
-		return nil, withContext(err, "", "")
+		return nil, errors.Join(fmt.Errorf("querying schema version: %w", err), closeErr)
 	}
 
-	expectedVersion := schemaVersion(schema.fingerprint())
+	expectedVersion := schema.fingerprint()
 	versionMismatch := int64(storedVersion) != expectedVersion
 
 	walSize, err := mddb.walSize()
 	if err != nil {
-		_ = mddb.Close()
+		closeErr := mddb.Close()
 
-		return nil, withContext(err, "", "")
+		return nil, errors.Join(fmt.Errorf("checking wal size: %w", err), closeErr)
 	}
 
 	if !versionMismatch && walSize == 0 {
+		// No Wal to replay, and same version => return early.
 		return mddb, nil
 	}
 
 	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 
-	lock, err := locker.LockWithTimeout(lockCtx, walPath)
+	release, err := mddb.acquireWriteLockWithWalRecover(lockCtx)
 	if err != nil {
-		_ = mddb.Close()
+		closeErr := mddb.Close()
 
-		return nil, withContext(fmt.Errorf("lock: wal: %w", err), "", "")
+		return nil, errors.Join(fmt.Errorf("acquiring write lock: %w", err), closeErr)
 	}
+	// At this point, a leftover wal is already replayed (inside acquireWriteLock).
+	defer func() { _ = release() }()
 
 	if versionMismatch {
 		_, err = mddb.reindexLocked(ctx)
-	} else {
-		err = mddb.recoverWalLocked(ctx)
-	}
+		if err != nil {
+			// !! must release writer lock before close, because close locks mddb.mu (deadlock)
+			// release is idempotent.
+			_ = release()
 
-	closeErr := lock.Close()
+			closeErr := mddb.Close()
 
-	if err != nil || closeErr != nil {
-		_ = mddb.Close()
-
-		if closeErr != nil {
-			closeErr = fmt.Errorf("lock: unlock wal: %w", closeErr)
+			return nil, errors.Join(fmt.Errorf("reindexing: %w", err), closeErr)
 		}
-
-		return nil, withContext(errors.Join(err, closeErr), "", "")
 	}
 
 	return mddb, nil
@@ -259,7 +238,7 @@ func (mddb *MDDB[T]) Close() error {
 	if mddb.sql != nil {
 		err := mddb.sql.Close()
 		if err != nil {
-			errs = append(errs, fmt.Errorf("sqlite: close: %w", err))
+			errs = append(errs, fmt.Errorf("sqlite: %w", err))
 		}
 
 		mddb.sql = nil
@@ -268,28 +247,51 @@ func (mddb *MDDB[T]) Close() error {
 	if mddb.wal != nil {
 		err := mddb.wal.Close()
 		if err != nil {
-			errs = append(errs, fmt.Errorf("wal: close: %w", err))
+			errs = append(errs, fmt.Errorf("fs: close wal: %w", err))
 		}
 
 		mddb.wal = nil
 	}
 
-	return withContext(errors.Join(errs...), "", "")
+	return errors.Join(errs...)
 }
 
+const (
+	defaultWalLockTimeout = 10 * time.Second
+	defaultTableName      = "documents"
+	// sqliteBusyTimeoutMs is the time SQLite waits when the database is locked.
+	// After this, operations return SQLITE_BUSY.
+	sqliteBusyTimeoutMs = 10000 // milliseconds
+)
+
+var (
+	// frontmatterKeyID is the "id" frontmatter key.
+	// Do not modify; reuse to avoid per-call allocations in hot paths.
+	frontmatterKeyID = []byte("id")
+	// frontmatterKeySchemaVersion is the "schema_version" frontmatter key.
+	// Do not modify; reuse to avoid per-call allocations in hot paths.
+	frontmatterKeySchemaVersion = []byte("schema_version")
+	// frontmatterKeyTitle is the "title" frontmatter key.
+	// Do not modify; reuse to avoid per-call allocations in hot paths.
+	frontmatterKeyTitle = []byte("title")
+)
+
+// walSize() reads the size of the underling (opened) WAL fd.
+// This can be used as a quick check before replaying the wal, but,
+// it's only 100% accurate if holding the [MDDB.aqcuireWriteLock] lock.
 func (mddb *MDDB[T]) walSize() (int64, error) {
 	info, err := mddb.wal.Stat()
 	if err != nil {
-		return 0, fmt.Errorf("wal: stat: %w", err)
+		return 0, fmt.Errorf("wal: %w", err)
 	}
 
 	return info.Size(), nil
 }
 
 // acquireReadLock acquires both the in-process read lock (mu.RLock) and the
-// cross-process file lock, replaying any pending WAL first. Returns a release
-// function that must be called to unlock both.
-func (mddb *MDDB[T]) acquireReadLock(ctx context.Context) (func(), error) {
+// cross-process file lock, replaying any pending WAL first. Returns an
+// idempotent release function that must be called to unlock both.
+func (mddb *MDDB[T]) acquireReadLock(ctx context.Context) (func() error, error) {
 	mddb.mu.RLock()
 
 	if mddb.closed.Load() || mddb.sql == nil || mddb.wal == nil {
@@ -305,25 +307,43 @@ func (mddb *MDDB[T]) acquireReadLock(ctx context.Context) (func(), error) {
 	if err != nil {
 		mddb.mu.RUnlock()
 
-		return nil, fmt.Errorf("lock: read: %w", err)
+		return nil, fmt.Errorf("lock: %w", err)
 	}
 
 	// Check for pending WAL and replay if needed.
 	for {
 		walSize, statErr := mddb.walSize()
 		if statErr != nil {
-			_ = flock.Close()
+			closeErr := flock.Close()
+			if closeErr != nil {
+				closeErr = fmt.Errorf("releasing lock: %w", closeErr)
+			}
 
 			mddb.mu.RUnlock()
 
-			return nil, statErr
+			return nil, errors.Join(statErr, closeErr)
 		}
 
 		if walSize == 0 {
-			return func() {
-				_ = flock.Close()
+			// Idempotent release: prevents panic from double mu.RUnlock()
+			// if caller accidentally invokes release multiple times.
+			var (
+				once     sync.Once
+				closeErr error
+			)
 
-				mddb.mu.RUnlock()
+			return func() error {
+				once.Do(func() {
+					closeErr = flock.Close()
+
+					mddb.mu.RUnlock()
+				})
+
+				if closeErr != nil {
+					return fmt.Errorf("lock: %w", closeErr)
+				}
+
+				return nil
 			}, nil
 		}
 
@@ -334,16 +354,19 @@ func (mddb *MDDB[T]) acquireReadLock(ctx context.Context) (func(), error) {
 		if lockErr != nil {
 			mddb.mu.RUnlock()
 
-			return nil, fmt.Errorf("lock: write: %w", lockErr)
+			return nil, fmt.Errorf("lock: %w", lockErr)
 		}
 
 		err = mddb.recoverWalLocked(ctx)
 		if err != nil {
-			_ = writeLock.Close()
+			closeErr := writeLock.Close()
+			if closeErr != nil {
+				closeErr = fmt.Errorf("releasing lock: %w", closeErr)
+			}
 
 			mddb.mu.RUnlock()
 
-			return nil, err
+			return nil, errors.Join(fmt.Errorf("recovering wal: %w", err), closeErr)
 		}
 
 		_ = writeLock.Close()
@@ -352,15 +375,15 @@ func (mddb *MDDB[T]) acquireReadLock(ctx context.Context) (func(), error) {
 		if err != nil {
 			mddb.mu.RUnlock()
 
-			return nil, fmt.Errorf("lock: read: %w", err)
+			return nil, fmt.Errorf("lock: %w", err)
 		}
 	}
 }
 
-// acquireWriteLock acquires both the in-process write lock (mu.Lock) and the
-// cross-process file lock, replaying any pending WAL first. Returns a release
-// function that must be called to unlock both.
-func (mddb *MDDB[T]) acquireWriteLock(ctx context.Context) (func(), error) {
+// acquireWriteLockWithWalRecover acquires both the in-process write lock (mu.Lock) and the
+// cross-process file lock, replaying any pending WAL first. Returns an
+// idempotent release function that must be called to unlock both.
+func (mddb *MDDB[T]) acquireWriteLockWithWalRecover(ctx context.Context) (func() error, error) {
 	mddb.mu.Lock()
 
 	if mddb.closed.Load() || mddb.sql == nil || mddb.wal == nil {
@@ -376,34 +399,52 @@ func (mddb *MDDB[T]) acquireWriteLock(ctx context.Context) (func(), error) {
 	if err != nil {
 		mddb.mu.Unlock()
 
-		return nil, fmt.Errorf("lock: write: %w", err)
+		return nil, fmt.Errorf("lock: %w", err)
 	}
 
 	err = mddb.recoverWalLocked(ctx)
 	if err != nil {
-		_ = flock.Close()
+		closeErr := flock.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("releasing lock: %w", closeErr)
+		}
 
 		mddb.mu.Unlock()
 
-		return nil, err
+		return nil, errors.Join(fmt.Errorf("recovering wal: %w", err), closeErr)
 	}
 
-	return func() {
-		_ = flock.Close()
+	// Idempotent release: prevents panic from double mu.Unlock()
+	// if caller accidentally invokes release multiple times.
+	var (
+		once     sync.Once
+		closeErr error
+	)
 
-		mddb.mu.Unlock()
+	return func() error {
+		once.Do(func() {
+			closeErr = flock.Close()
+
+			mddb.mu.Unlock()
+		})
+
+		if closeErr != nil {
+			return fmt.Errorf("lock: %w", closeErr)
+		}
+
+		return nil
 	}, nil
 }
 
 // openSqlite opens the derived index database and applies the configured pragmas.
 func openSqlite(ctx context.Context, path string) (*sql.DB, error) {
 	if path == "" {
-		return nil, errors.New("sqlite: path is empty")
+		return nil, errors.New("path is empty")
 	}
 
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: open: %w", err)
+		return nil, fmt.Errorf("sqlite: %w", err)
 	}
 
 	// Ensure per-connection PRAGMAs apply consistently.
@@ -412,9 +453,12 @@ func openSqlite(ctx context.Context, path string) (*sql.DB, error) {
 
 	err = db.PingContext(ctx)
 	if err != nil {
-		_ = db.Close()
+		closeErr := db.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("sqlite: close: %w", closeErr)
+		}
 
-		return nil, fmt.Errorf("sqlite: ping: %w", err)
+		return nil, errors.Join(fmt.Errorf("sqlite: ping: %w", err), closeErr)
 	}
 
 	_, err = db.ExecContext(ctx, fmt.Sprintf(`
@@ -424,25 +468,28 @@ func openSqlite(ctx context.Context, path string) (*sql.DB, error) {
 		PRAGMA mmap_size = 268435456;
 		PRAGMA cache_size = -20000;
 		PRAGMA temp_store = MEMORY;
-	`, sqliteBusyTimeout))
+	`, sqliteBusyTimeoutMs))
 	if err != nil {
-		_ = db.Close()
+		closeErr := db.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("sqlite: close: %w", closeErr)
+		}
 
-		return nil, fmt.Errorf("sqlite: apply pragmas: %w", err)
+		return nil, errors.Join(fmt.Errorf("sqlite: apply pragmas: %w", err), closeErr)
 	}
 
 	return db, nil
 }
 
-// storedSchemaVersion reads the current SQLite PRAGMA user_version.
-func storedSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+// queryUserVersion reads the current SQLite PRAGMA user_version.
+func queryUserVersion(ctx context.Context, db *sql.DB) (int, error) {
 	row := db.QueryRowContext(ctx, "PRAGMA user_version")
 
 	var version int
 
 	err := row.Scan(&version)
 	if err != nil {
-		return 0, fmt.Errorf("sqlite: user_version: %w", err)
+		return 0, fmt.Errorf("sqlite: %w", err)
 	}
 
 	return version, nil

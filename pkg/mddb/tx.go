@@ -31,9 +31,9 @@ var ErrAlreadyExists = errors.New("already exists")
 // Commit writes WAL (crash-safe), then files, then index. Crash after WAL
 // write is recovered on next [Open] or read.
 type Tx[T Document] struct {
-	store   *MDDB[T]
+	mddb    *MDDB[T]
 	ctx     context.Context
-	release func()
+	release func() error
 	ops     map[string]walOp[T] // keyed by ID, last op wins
 	closed  bool
 }
@@ -47,20 +47,20 @@ type Tx[T Document] struct {
 // WAL replay failures.
 func (mddb *MDDB[T]) Begin(ctx context.Context) (*Tx[T], error) {
 	if ctx == nil {
-		return nil, withContext(errors.New("context is nil"), "", "")
+		return nil, errors.New("context is nil")
 	}
 
 	if mddb == nil || mddb.closed.Load() {
-		return nil, withContext(ErrClosed, "", "")
+		return nil, ErrClosed
 	}
 
-	release, err := mddb.acquireWriteLock(ctx)
+	release, err := mddb.acquireWriteLockWithWalRecover(ctx)
 	if err != nil {
-		return nil, withContext(err, "", "")
+		return nil, fmt.Errorf("acquiring write lock: %w", err)
 	}
 
 	return &Tx[T]{
-		store:   mddb,
+		mddb:    mddb,
 		ctx:     ctx,
 		release: release,
 		ops:     make(map[string]walOp[T]),
@@ -76,13 +76,13 @@ func (mddb *MDDB[T]) Begin(ctx context.Context) (*Tx[T], error) {
 func (tx *Tx[T]) Create(doc *T) (*T, error) {
 	id, path, err := tx.validateForWrite(doc)
 	if err != nil {
-		return nil, withContext(err, id, path)
+		return nil, withContext(fmt.Errorf("validating: %w", err), id, path)
 	}
 
 	// Check index first (fast path)
 	exists, err := tx.existsInIndex(id)
 	if err != nil {
-		return nil, withContext(err, id, path)
+		return nil, withContext(fmt.Errorf("checking index: %w", err), id, path)
 	}
 
 	if exists {
@@ -92,7 +92,7 @@ func (tx *Tx[T]) Create(doc *T) (*T, error) {
 	// Check filesystem (source of truth)
 	exists, err = tx.fileExists(path)
 	if err != nil {
-		return nil, withContext(err, id, path)
+		return nil, withContext(fmt.Errorf("checking file: %w", err), id, path)
 	}
 
 	if exists {
@@ -112,13 +112,13 @@ func (tx *Tx[T]) Create(doc *T) (*T, error) {
 func (tx *Tx[T]) Update(doc *T) (*T, error) {
 	id, path, err := tx.validateForWrite(doc)
 	if err != nil {
-		return nil, withContext(err, id, path)
+		return nil, withContext(fmt.Errorf("validating: %w", err), id, path)
 	}
 
 	// Check index first (fast path)
 	exists, err := tx.existsInIndex(id)
 	if err != nil {
-		return nil, withContext(err, id, path)
+		return nil, withContext(fmt.Errorf("checking index: %w", err), id, path)
 	}
 
 	if !exists {
@@ -128,7 +128,7 @@ func (tx *Tx[T]) Update(doc *T) (*T, error) {
 	// Check filesystem (source of truth)
 	exists, err = tx.fileExists(path)
 	if err != nil {
-		return nil, withContext(err, id, path)
+		return nil, withContext(fmt.Errorf("checking file: %w", err), id, path)
 	}
 
 	if !exists {
@@ -160,13 +160,13 @@ func (tx *Tx[T]) validateForWrite(doc *T) (string, string, error) {
 		return "", "", errors.New("type assertion to Document failed")
 	}
 
-	id, path, err := tx.store.validateDocument(d)
+	id, path, err := tx.mddb.validateDocument(d)
 	if err != nil {
 		return id, "", err
 	}
 
 	if existing, ok := tx.ops[id]; ok && existing.Path != "" && existing.Path != path {
-		return id, "", fmt.Errorf("path mismatch %q != %q", existing.Path, path)
+		return id, "", fmt.Errorf("path mismatch for existing buffered document %q != %q", existing.Path, path)
 	}
 
 	return id, path, nil
@@ -176,8 +176,8 @@ func (tx *Tx[T]) validateForWrite(doc *T) (string, string, error) {
 func (tx *Tx[T]) existsInIndex(id string) (bool, error) {
 	var exists bool
 
-	query := fmt.Sprintf("SELECT 1 FROM %s WHERE id = ? LIMIT 1", tx.store.schema.tableName)
-	row := tx.store.sql.QueryRowContext(tx.ctx, query, id)
+	query := fmt.Sprintf("SELECT 1 FROM %s WHERE id = ? LIMIT 1", tx.mddb.schema.tableName)
+	row := tx.mddb.sql.QueryRowContext(tx.ctx, query, id)
 
 	err := row.Scan(&exists)
 	if err == nil {
@@ -193,9 +193,9 @@ func (tx *Tx[T]) existsInIndex(id string) (bool, error) {
 
 // fileExists checks if a document file exists on disk.
 func (tx *Tx[T]) fileExists(path string) (bool, error) {
-	absPath := filepath.Join(tx.store.dataDir, path)
+	absPath := filepath.Join(tx.mddb.dataDir, path)
 
-	info, err := tx.store.fs.Stat(absPath)
+	info, err := tx.mddb.fs.Stat(absPath)
 	if err == nil {
 		if !info.Mode().IsRegular() {
 			return false, fmt.Errorf("fs: path %s is not a regular file", absPath)
@@ -226,29 +226,29 @@ func (tx *Tx[T]) bufferPut(id, path string, doc *T) {
 // Returns [ErrNotFound] if the document file does not exist.
 func (tx *Tx[T]) Delete(id string) error {
 	if tx == nil {
-		return withContext(errors.New("tx is nil"), id, "")
+		return errors.New("tx is nil")
 	}
 
 	if tx.closed {
-		return withContext(errors.New("transaction closed"), id, "")
+		return errors.New("transaction closed")
 	}
 
 	if id == "" {
-		return withContext(ErrEmptyID, "", "")
+		return errEmptyID
 	}
 
-	if tx.store.cfg.RelPathFromID == nil {
-		return withContext(errors.New("RelPathFromID is nil"), id, "")
+	if tx.mddb.cfg.RelPathFromID == nil {
+		return errors.New("RelPathFromID is nil")
 	}
 
-	path := tx.store.cfg.RelPathFromID(id)
+	path := tx.mddb.cfg.RelPathFromID(id)
 	if path == "" {
-		return withContext(ErrEmptyPath, id, "")
+		return withContext(errEmptyPath, id, "")
 	}
 
-	err := tx.store.validateRelPath(path)
+	err := tx.mddb.validateRelPath(path)
 	if err != nil {
-		return withContext(fmt.Errorf("%w: path %q", err, path), id, "")
+		return withContext(fmt.Errorf("validating path: %w", err), id, path)
 	}
 
 	if existing, ok := tx.ops[id]; ok {
@@ -256,15 +256,15 @@ func (tx *Tx[T]) Delete(id string) error {
 		case walOpPut:
 			// Allow delete-after-put without touching disk; preserves atomic intent.
 			if existing.Path != "" && existing.Path != path {
-				return withContext(fmt.Errorf("path mismatch %q != %q", existing.Path, path), id, path)
+				return withContext(fmt.Errorf("path mismatch for existing buffered document %q != %q", existing.Path, path), id, path)
 			}
 		case walOpDelete:
 			return nil
 		}
 	} else {
-		absPath := filepath.Join(tx.store.dataDir, path)
+		absPath := filepath.Join(tx.mddb.dataDir, path)
 
-		_, statErr := tx.store.fs.Stat(absPath)
+		_, statErr := tx.mddb.fs.Stat(absPath)
 		if statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
 				return withContext(ErrNotFound, id, path)
@@ -291,18 +291,18 @@ func (tx *Tx[T]) Delete(id string) error {
 // Returns [ErrCommitIncomplete] if WAL was durable but apply/index failed.
 func (tx *Tx[T]) Commit(ctx context.Context) error {
 	if tx == nil {
-		return withContext(errors.New("tx is nil"), "", "")
+		return errors.New("tx is nil")
 	}
 
 	if tx.closed {
-		return withContext(errors.New("transaction closed"), "", "")
+		return errors.New("transaction closed")
 	}
 
 	tx.closed = true
 
 	defer func() {
 		if tx.release != nil {
-			tx.release()
+			_ = tx.release()
 			tx.release = nil
 		}
 	}()
@@ -319,29 +319,29 @@ func (tx *Tx[T]) Commit(ctx context.Context) error {
 	// Snapshot markdown content before WAL write so recovery replays exact bytes.
 	err := tx.materializeOps(ops)
 	if err != nil {
-		return withContext(err, "", "")
+		return fmt.Errorf("materializing ops: %w", err)
 	}
 
 	err = tx.writeWAL(ops)
 	if err != nil {
-		return withContext(err, "", "")
+		return fmt.Errorf("writing wal: %w", err)
 	}
 
 	// WAL fsync is the durable commit point; finish apply even if ctx is canceled.
 	applyCtx := context.WithoutCancel(ctx)
 
-	err = tx.store.applyOpsToFS(applyCtx, ops)
+	err = tx.mddb.applyOpsToFS(applyCtx, ops)
 	if err != nil {
-		return withContext(fmt.Errorf("wal: %w: %w", ErrCommitIncomplete, err), "", "")
+		return fmt.Errorf("%w: applying ops to fs: %w", ErrCommitIncomplete, err)
 	}
 
-	err = tx.store.updateSqliteIndexFromOps(applyCtx, ops)
+	err = tx.mddb.updateSqliteIndexFromOps(applyCtx, ops)
 	if err != nil {
-		return withContext(fmt.Errorf("wal: %w: %w", ErrCommitIncomplete, err), "", "")
+		return fmt.Errorf("%w: updating index: %w", ErrCommitIncomplete, err)
 	}
 
 	// Ignore truncate errors - commit already succeeded, replay is idempotent.
-	_ = truncateWal(tx.store.wal)
+	_ = truncateWal(tx.mddb.wal)
 
 	return nil
 }
@@ -358,12 +358,12 @@ func (tx *Tx[T]) materializeOps(ops []walOp[T]) error {
 		}
 
 		if op.Doc == nil {
-			return fmt.Errorf("wal: missing document for %s", op.ID)
+			return fmt.Errorf("missing document (doc_id=%s)", op.ID)
 		}
 
-		content, err := tx.store.marshalDocument(*op.Doc)
+		content, err := tx.mddb.marshalDocument(*op.Doc)
 		if err != nil {
-			return err
+			return fmt.Errorf("marshaling document: %w (doc_id=%s)", err, op.ID)
 		}
 
 		op.Content = string(content)
@@ -399,7 +399,7 @@ func (tx *Tx[T]) materializeOps(ops []walOp[T]) error {
 //   - Use [Tx.Create], [Tx.Update], and [Tx.Delete] for document operations.
 //   - Direct reads are safe.
 func (tx *Tx[T]) DB() *sql.DB {
-	return tx.store.sql
+	return tx.mddb.sql
 }
 
 // Rollback discards buffered operations and releases the lock.
@@ -417,7 +417,7 @@ func (tx *Tx[T]) Rollback() error {
 	tx.ops = nil
 
 	if tx.release != nil {
-		tx.release()
+		_ = tx.release()
 		tx.release = nil
 	}
 
@@ -427,36 +427,42 @@ func (tx *Tx[T]) Rollback() error {
 func (tx *Tx[T]) writeWAL(ops []walOp[T]) error {
 	content, err := encodeWalContent(ops)
 	if err != nil {
-		return err
+		return fmt.Errorf("encoding: %w", err)
 	}
 
-	err = truncateWal(tx.store.wal)
+	err = truncateWal(tx.mddb.wal)
 	if err != nil {
-		return err
+		return fmt.Errorf("truncating existing wal: %w", err)
 	}
 
-	_, err = tx.store.wal.Seek(0, io.SeekStart)
+	_, err = tx.mddb.wal.Seek(0, io.SeekStart)
 	if err != nil {
-		return fmt.Errorf("wal: seek: %w", err)
+		return fmt.Errorf("fs: seek: %w", err)
 	}
 
-	n, err := tx.store.wal.Write(content)
+	n, err := tx.mddb.wal.Write(content)
 	if err != nil {
-		truncErr := truncateWal(tx.store.wal)
+		truncErr := truncateWal(tx.mddb.wal)
+		if truncErr != nil {
+			truncErr = fmt.Errorf("truncating wal on rollback: %w", truncErr)
+		}
 
-		return errors.Join(fmt.Errorf("wal: write: %w", err), truncErr)
+		return errors.Join(fmt.Errorf("fs: write: %w", err), truncErr)
 	}
 
 	if n != len(content) {
-		truncErr := truncateWal(tx.store.wal)
+		truncErr := truncateWal(tx.mddb.wal)
+		if truncErr != nil {
+			truncErr = fmt.Errorf("truncating wal on rollback: %w", truncErr)
+		}
 
-		return errors.Join(fmt.Errorf("wal: short write %d/%d bytes", n, len(content)), truncErr)
+		return errors.Join(fmt.Errorf("fs: short write %d/%d bytes", n, len(content)), truncErr)
 	}
 
-	err = tx.store.wal.Sync()
+	err = tx.mddb.wal.Sync()
 	if err != nil {
 		// On fsync failures, don't try any further file ops.
-		return fmt.Errorf("wal: sync: %w", err)
+		return fmt.Errorf("fs: sync: %w", err)
 	}
 
 	return nil
