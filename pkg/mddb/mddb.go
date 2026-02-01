@@ -107,8 +107,8 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 	}
 
 	// If schema has user columns, SQLColumnValues is required
-	userColCount := schema.userColumnCount()
-	if userColCount > 0 && cfg.SQLColumnValues == nil {
+	customColCount := schema.customColumnCount()
+	if customColCount > 0 && cfg.SQLColumnValues == nil {
 		return nil, errors.New("Config.SQLColumnValues is required when SQLSchema has user columns")
 	}
 
@@ -188,25 +188,21 @@ func Open[T Document](ctx context.Context, cfg Config[T]) (*MDDB[T], error) {
 		return mddb, nil
 	}
 
-	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
-	defer cancel()
+	if !versionMismatch && walSize > 0 {
+		release, lockErr := mddb.acquireWriteLockWithWalRecover(ctx)
+		if lockErr != nil {
+			closeErr := mddb.Close()
 
-	release, err := mddb.acquireWriteLockWithWalRecover(lockCtx)
-	if err != nil {
-		closeErr := mddb.Close()
+			return nil, errors.Join(fmt.Errorf("recovering wal: %w", lockErr), closeErr)
+		}
 
-		return nil, errors.Join(fmt.Errorf("acquiring write lock: %w", err), closeErr)
+		_ = release()
 	}
-	// At this point, a leftover wal is already replayed (inside acquireWriteLock).
-	defer func() { _ = release() }()
 
 	if versionMismatch {
-		_, err = mddb.reindexLocked(ctx)
+		// wal is already replayed inside Reindex, if it exists.
+		_, err = mddb.Reindex(ctx)
 		if err != nil {
-			// !! must release writer lock before close, because close locks mddb.mu (deadlock)
-			// release is idempotent.
-			_ = release()
-
 			closeErr := mddb.Close()
 
 			return nil, errors.Join(fmt.Errorf("reindexing: %w", err), closeErr)

@@ -293,6 +293,7 @@ func readFileString(t *testing.T, path string) string {
 
 type walRecord struct {
 	Op      string `json:"op"`
+	Kind    string `json:"kind,omitempty"`
 	ID      string `json:"id"`
 	Path    string `json:"path"`
 	Content string `json:"content,omitempty"`
@@ -441,11 +442,11 @@ func encodeWalFooter(body []byte) []byte {
 }
 
 func makeWalPutRecord(doc *TestDoc) walRecord {
-	return walRecord{Op: "put", ID: doc.DocID, Path: doc.DocPath, Content: renderDocContent(doc)}
+	return walRecord{Op: "put", Kind: "update", ID: doc.DocID, Path: doc.DocPath, Content: renderDocContent(doc)}
 }
 
 func makeWalDeleteRecord(id string, path string) walRecord {
-	return walRecord{Op: "delete", ID: id, Path: path}
+	return walRecord{Op: "delete", Kind: "delete", ID: id, Path: path}
 }
 
 func renderDocContent(doc *TestDoc) string {

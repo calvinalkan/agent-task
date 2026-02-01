@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
+	"sync/atomic"
 
 	"github.com/calvinalkan/fileproc"
 
@@ -17,7 +17,7 @@ import (
 
 // IndexableDocument holds parsed document data for indexing and document creation.
 //
-// Used by [Config.DocumentFrom], [Config.SQLColumnValues], and [Config.AfterBulkIndex].
+// Used by [Config.DocumentFrom] and [Config.SQLColumnValues].
 //
 // All data is BORROWED from the file read buffer. Do not retain any fields
 // after the callback returns.
@@ -46,6 +46,28 @@ type IndexableDocument struct {
 	Title       []byte                  // Document title (borrowed)
 	Body        []byte                  // Markdown body after frontmatter (borrowed)
 	Frontmatter frontmatter.Frontmatter // All frontmatter fields (borrowed)
+}
+
+// IndexRow holds owned data ready for SQLite indexing and hook consumption.
+//
+// Used by [Config.AfterIndexBatch].
+// All fields are owned and safe to retain beyond the callback. The batch slice
+// passed to hooks is reused between calls; copy it if you need to keep it.
+// CustomRowValues contains custom columns in the same order as defined in [SQLSchema].
+//
+// Note: CustomRowValues elements must be safe to retain. mddb normalizes []byte
+// values when building rows: TEXT columns are converted to string; BLOB columns
+// are copied. Other reference types are passed through as-is and must be owned.
+type IndexRow struct {
+	ID        string
+	ShortID   string
+	RelPath   string
+	MtimeNS   int64
+	SizeBytes int64
+	Title     string
+	// Values from [Config.SQLColumnValues] for custom columns,
+	// in order of definition per row.
+	CustomRowValues []any
 }
 
 // IndexScanError aggregates all issues encountered during [MDDB.Reindex].
@@ -120,7 +142,12 @@ func (mddb *MDDB[T]) ReindexIncremental(ctx context.Context) (IncrementalIndexRe
 
 	defer func() { _ = release() }()
 
-	result, err := mddb.reindexIncrementalLocked(ctx)
+	metaIndex, err := mddb.loadIndexMeta(ctx)
+	if err != nil {
+		return zero, fmt.Errorf("load index metadata: %w", err)
+	}
+
+	result, err := mddb.runReindex(ctx, mddb.sql, metaIndex)
 	if err != nil {
 		return zero, err
 	}
@@ -156,395 +183,21 @@ func (mddb *MDDB[T]) Reindex(ctx context.Context) (int, error) {
 
 	defer func() { _ = release() }()
 
-	indexed, err := mddb.reindexLocked(ctx)
-	if err != nil {
-		return 0, err
-	}
-
-	return indexed, nil
-}
-
-// reindexLocked rebuilds the index. Caller must hold exclusive WAL lock.
-// Assumes pending WAL has already been recovered.
-func (mddb *MDDB[T]) reindexLocked(ctx context.Context) (int, error) {
-	entries, scanErr := mddb.scanDocumentFiles(ctx)
-	if scanErr != nil {
-		return 0, fmt.Errorf("scan documents: %w", scanErr)
-	}
-
-	indexed, err := mddb.rebuildIndexTemp(ctx, entries)
-	if err != nil {
-		return 0, fmt.Errorf("rebuild index: %w", err)
-	}
-
-	return indexed, nil
-}
-
-type indexMeta struct {
-	id        string
-	mtimeNS   int64
-	sizeBytes int64
-}
-
-// reindexIncrementalLocked updates only changed files. Caller must hold exclusive WAL lock.
-func (mddb *MDDB[T]) reindexIncrementalLocked(ctx context.Context) (IncrementalIndexResult, error) {
-	result := IncrementalIndexResult{}
-
-	existing, err := mddb.loadIndexMeta(ctx)
-	if err != nil {
-		return result, fmt.Errorf("load index metadata: %w", err)
-	}
-
-	var (
-		seenMu   sync.Mutex
-		seen     = make(map[string]struct{}, len(existing))
-		inserted int
-		updated  int
-		skipped  int
-	)
-
-	opts := []fileproc.Option{
-		fileproc.WithRecursive(),
-		fileproc.WithSuffix(".md"),
-	}
-
-	root := []byte(mddb.dataDir)
-
-	// TODO: remove locking, instead, return values with a stat per res.
-	results, errs := fileproc.Process(ctx, mddb.dataDir, func(f *fileproc.File, w *fileproc.FileWorker) (*IndexableDocument, error) {
-		absPath := f.AbsPathBorrowed()
-
-		relBorrowed := relPathFromAbs(absPath, root)
-
-		if isInternalPathBytes(relBorrowed) {
-			return nil, fileproc.ErrSkip
-		}
-
-		pathStr := string(relBorrowed)
-
-		stat, statErr := f.Stat()
-		if statErr != nil {
-			return nil, fmt.Errorf("fs: %w", statErr)
-		}
-
-		seenMu.Lock()
-
-		seen[pathStr] = struct{}{}
-
-		seenMu.Unlock()
-
-		meta, ok := existing[pathStr]
-		if ok && meta.mtimeNS == stat.ModTime && meta.sizeBytes == stat.Size {
-			seenMu.Lock()
-
-			skipped++
-
-			seenMu.Unlock()
-
-			return nil, fileproc.ErrSkip
-		}
-
-		data, readErr := f.Bytes()
-		if readErr != nil {
-			return nil, fmt.Errorf("fs: %w", readErr)
-		}
-
-		// Retain relPath and data so parsed slices survive beyond callback.
-		relPath := w.RetainBytes(relBorrowed)
-		data = w.RetainBytes(data)
-
-		parsed, parseErr := mddb.parseIndexable(relPath, data, stat.ModTime, stat.Size, "")
-		if parseErr != nil {
-			return nil, fmt.Errorf("parsing document: %w", parseErr)
-		}
-
-		seenMu.Lock()
-
-		if ok {
-			updated++
-		} else {
-			inserted++
-		}
-
-		seenMu.Unlock()
-
-		return &parsed, nil
-	}, opts...)
-
-	if ctx.Err() != nil {
-		return result, fmt.Errorf("canceled: %w", context.Cause(ctx))
-	}
-
-	scanErr := buildIndexScanError(errs)
-	if scanErr != nil {
-		return result, scanErr
-	}
-
-	deleteIDs := make([]string, 0)
-
-	for path, meta := range existing {
-		if _, ok := seen[path]; ok {
-			continue
-		}
-
-		deleteIDs = append(deleteIDs, meta.id)
-	}
-
-	result.Inserted = inserted
-	result.Updated = updated
-	result.Deleted = len(deleteIDs)
-	result.Skipped = skipped
-	result.Total = len(existing) - result.Deleted + result.Inserted
-
-	if len(deleteIDs) == 0 && len(results) == 0 {
-		return result, nil
-	}
-
-	tx, err := mddb.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return IncrementalIndexResult{}, fmt.Errorf("sqlite: begin txn: %w", err)
-	}
-
-	committed := false
-
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if len(deleteIDs) > 0 {
-		deleteStmt, prepErr := mddb.prepareDeleteByIDStmt(ctx, tx, indexDeleteBatchSize)
-		if prepErr != nil {
-			return IncrementalIndexResult{}, fmt.Errorf("prepare delete: %w", prepErr)
-		}
-
-		defer func() { _ = deleteStmt.Close() }()
-
-		args := make([]any, indexDeleteBatchSize)
-
-		for i := 0; i < len(deleteIDs); i += indexDeleteBatchSize {
-			end := min(i+indexDeleteBatchSize, len(deleteIDs))
-			batch := deleteIDs[i:end]
-
-			stmt := deleteStmt
-			if len(batch) < indexDeleteBatchSize {
-				stmt, prepErr = mddb.prepareDeleteByIDStmt(ctx, tx, len(batch))
-				if prepErr != nil {
-					return IncrementalIndexResult{}, fmt.Errorf("prepare delete: %w", prepErr)
-				}
-			}
-
-			for j, id := range batch {
-				args[j] = id
-			}
-
-			_, execErr := stmt.ExecContext(ctx, args[:len(batch)]...)
-			if len(batch) < indexDeleteBatchSize {
-				_ = stmt.Close()
-			}
-
-			if execErr != nil {
-				return IncrementalIndexResult{}, fmt.Errorf("sqlite: %w", execErr)
-			}
-
-			if mddb.cfg.AfterDelete != nil {
-				for _, id := range batch {
-					callbackErr := mddb.cfg.AfterDelete(ctx, tx, id)
-					if callbackErr != nil {
-						return IncrementalIndexResult{}, fmt.Errorf("AfterDelete: %w (doc_id=%s)", callbackErr, id)
-					}
-				}
-			}
-
-			if mddb.cfg.AfterIncrementalIndex != nil {
-				callbackErr := mddb.cfg.AfterIncrementalIndex(ctx, tx, []IndexableDocument{}, batch)
-				if callbackErr != nil {
-					return IncrementalIndexResult{}, fmt.Errorf("AfterIncrementalIndex: %w", callbackErr)
-				}
-			}
-		}
-	}
-
-	if len(results) > 0 {
-		err = mddb.bulkInsertDocs(ctx, tx, results, true, func(batch []IndexableDocument) error {
-			if mddb.cfg.AfterIncrementalIndex == nil {
-				return nil
-			}
-
-			callbackErr := mddb.cfg.AfterIncrementalIndex(ctx, tx, batch, []string{})
-			if callbackErr != nil {
-				return fmt.Errorf("AfterIncrementalIndex: %w", callbackErr)
-			}
-
-			return nil
-		})
-		if err != nil {
-			return IncrementalIndexResult{}, fmt.Errorf("bulk insert: %w", err)
-		}
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return IncrementalIndexResult{}, fmt.Errorf("sqlite: commit txn: %w", err)
-	}
-
-	committed = true
-
-	return result, nil
-}
-
-func buildIndexScanError(errs []error) error {
-	if len(errs) == 0 {
-		return nil
-	}
-
-	issues := make([]*Error, 0, len(errs))
-	for _, err := range errs {
-		issue := &Error{Err: err}
-
-		// IOError: filesystem-level failure (permissions, missing file, etc.)
-		var ioErr *fileproc.IOError
-		if errors.As(err, &ioErr) {
-			issue.Path = ioErr.Path
-			issue.Err = fmt.Errorf("fs: %w", ioErr.Err)
-		}
-
-		// ProcessError: our callback returned an error.
-		var procErr *fileproc.ProcessError
-		if errors.As(err, &procErr) {
-			issue.Path = procErr.Path
-			issue.Err = procErr.Err
-
-			// If parseIndexable returned an *Error, extract context.
-			var mErr *Error
-			if errors.As(procErr.Err, &mErr) {
-				issue.ID = mErr.ID
-				issue.Err = mErr.Err
-			}
-		}
-
-		issues = append(issues, issue)
-	}
-
-	return &IndexScanError{Issues: issues}
-}
-
-// scanDocumentFiles walks the data directory and parses all .md files.
-// Returns parsed documents and any errors encountered. Errors are collected
-// rather than failing fast, so users see all issues at once.
-func (mddb *MDDB[T]) scanDocumentFiles(ctx context.Context) ([]*IndexableDocument, error) {
-	opts := []fileproc.Option{
-		fileproc.WithRecursive(),
-		fileproc.WithSuffix(".md"),
-	}
-
-	root := []byte(mddb.dataDir)
-
-	results, errs := fileproc.Process(ctx, mddb.dataDir, func(f *fileproc.File, w *fileproc.FileWorker) (*IndexableDocument, error) {
-		absPath := f.AbsPathBorrowed()
-
-		relPathEphemeral := relPathFromAbs(absPath, root)
-
-		if isInternalPathBytes(relPathEphemeral) {
-			return nil, fileproc.ErrSkip
-		}
-
-		// Stat before read so fileproc can size the read buffer appropriately.
-		stat, err := f.Stat()
-		if err != nil {
-			return nil, fmt.Errorf("fs: %w", err)
-		}
-
-		data, err := f.Bytes()
-		if err != nil {
-			return nil, fmt.Errorf("fs: %w", err)
-		}
-
-		// Retain relPath and data so parsed slices survive beyond callback.
-		relPath := w.RetainBytes(relPathEphemeral)
-		data = w.RetainBytes(data)
-
-		parsed, err := mddb.parseIndexable(relPath, data, stat.ModTime, stat.Size, "")
-		if err != nil {
-			return nil, fmt.Errorf("parsing document: %w", err)
-		}
-
-		return &parsed, nil
-	}, opts...)
-
-	// fileproc doesn't add cancellation to error slice - check explicitly.
-	if ctx.Err() != nil {
-		return nil, fmt.Errorf("canceled: %w", context.Cause(ctx))
-	}
-
-	if len(errs) == 0 {
-		return results, nil
-	}
-
-	return nil, buildIndexScanError(errs)
-}
-
-// loadIndexMeta returns path-indexed metadata used by incremental reindex.
-//
-// We keep this in-memory to avoid per-file SQLite lookups (which would require
-// a path index and add write overhead). Deletions are done by ID (PK), so
-// we store id alongside path for fast delete batching.
-func (mddb *MDDB[T]) loadIndexMeta(ctx context.Context) (map[string]indexMeta, error) {
-	rows, err := mddb.sql.QueryContext(ctx, mddb.schema.selectIndexMetaSQL())
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	meta := make(map[string]indexMeta, 1024)
-
-	for rows.Next() {
-		var (
-			id   string
-			path string
-			mt   int64
-			size int64
-		)
-
-		scanErr := rows.Scan(&id, &path, &mt, &size)
-		if scanErr != nil {
-			return nil, fmt.Errorf("sqlite: %w", scanErr)
-		}
-
-		meta[path] = indexMeta{id: id, mtimeNS: mt, sizeBytes: size}
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: %w", err)
-	}
-
-	return meta, nil
-}
-
-// rebuildIndexTemp rebuilds the index into a temp DB and atomically swaps it in.
-//
-// Why:
-//   - Rebuilds are fully derived from markdown files (source of truth).
-//   - We can use unsafe SQLite pragmas for speed without risking corruption.
-//   - The temp DB is swapped in atomically, so readers see either old or new index.
-func (mddb *MDDB[T]) rebuildIndexTemp(ctx context.Context, entries []*IndexableDocument) (int, error) {
 	mddbDir := filepath.Dir(mddb.lockPath)
 	indexPath := filepath.Join(mddbDir, "index.sqlite")
 	tmpPath := indexPath + ".tmp"
 
 	// Clean up any stale temp DB from a previous crash before rebuilding.
-	if err := mddb.removeFileIfExists(tmpPath); err != nil {
-		return 0, fmt.Errorf("remove temp index: %w", err)
+	if rmErr := mddb.removeFileIfExists(tmpPath); rmErr != nil {
+		return 0, fmt.Errorf("remove temp index: %w", rmErr)
 	}
 
-	if err := mddb.removeFileIfExists(tmpPath + "-wal"); err != nil {
-		return 0, fmt.Errorf("remove temp wal: %w", err)
+	if rmErr := mddb.removeFileIfExists(tmpPath + "-wal"); rmErr != nil {
+		return 0, fmt.Errorf("remove temp wal: %w", rmErr)
 	}
 
-	if err := mddb.removeFileIfExists(tmpPath + "-shm"); err != nil {
-		return 0, fmt.Errorf("remove temp shm: %w", err)
+	if rmErr := mddb.removeFileIfExists(tmpPath + "-shm"); rmErr != nil {
+		return 0, fmt.Errorf("remove temp shm: %w", rmErr)
 	}
 
 	// Build into a fresh temp DB with unsafe pragmas (fast, disposable).
@@ -553,15 +206,11 @@ func (mddb *MDDB[T]) rebuildIndexTemp(ctx context.Context, entries []*IndexableD
 		return 0, fmt.Errorf("open temp index: %w", err)
 	}
 
-	var removeErr error
+	defer func() { _ = mddb.fs.Remove(tmpPath) }()
 
-	defer func() {
-		removeErr = errors.Join(removeErr, mddb.fs.Remove(tmpPath))
-	}()
+	result, rebuildErr := mddb.runReindex(ctx, tmpDB, nil)
 
-	indexed, rebuildErr := mddb.rebuildIndexOnDB(ctx, tmpDB, entries, false)
 	closeErr := tmpDB.Close()
-
 	if rebuildErr != nil {
 		return 0, errors.Join(rebuildErr, closeErr)
 	}
@@ -595,19 +244,25 @@ func (mddb *MDDB[T]) rebuildIndexTemp(ctx context.Context, entries []*IndexableD
 
 	mddb.sql = newDB
 
-	return indexed, nil
+	return result.Total, nil
 }
 
-// rebuildIndexOnDB drops and recreates the index table, then bulk inserts all documents.
-// Runs in a single transaction so failures leave the target DB untouched.
-func (mddb *MDDB[T]) rebuildIndexOnDB(ctx context.Context, db *sql.DB, entries []*IndexableDocument, replace bool) (int, error) {
+// reindex runs a full or incremental reindex within a single transaction.
+// If metaIndex is nil, it rebuilds schema and skips delete batching.
+func (mddb *MDDB[T]) runReindex(
+	ctx context.Context,
+	db *sql.DB,
+	metaIndex *indexMetaIndex,
+) (IncrementalIndexResult, error) {
+	// ==================== 1. Setup + Transaction ====================
+	result := IncrementalIndexResult{}
+	incremental := metaIndex != nil
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("sqlite: begin txn: %w", err)
+		return result, fmt.Errorf("sqlite: begin txn: %w", err)
 	}
 
-	// Track commit state for deferred rollback. Using a flag instead of
-	// checking tx state because sql.Tx doesn't expose whether it's committed.
 	committed := false
 
 	defer func() {
@@ -616,54 +271,465 @@ func (mddb *MDDB[T]) rebuildIndexOnDB(ctx context.Context, db *sql.DB, entries [
 		}
 	}()
 
-	// Drop and recreate tables. This is atomic within the transaction.
-	err = mddb.schema.recreate(ctx, tx)
-	if err != nil {
-		return 0, fmt.Errorf("recreate schema: %w", err)
-	}
-
-	// Let user create related tables (e.g., FTS, lookup tables) in same transaction.
-	if mddb.cfg.AfterRecreateSchema != nil {
-		err = mddb.cfg.AfterRecreateSchema(ctx, tx)
+	// ==================== 2. Schema (full reindex only) ====================
+	if !incremental {
+		err = mddb.schema.recreate(ctx, tx)
 		if err != nil {
-			return 0, fmt.Errorf("AfterRecreateSchema: %w", err)
+			return result, fmt.Errorf("recreate schema: %w", err)
+		}
+
+		if mddb.cfg.AfterRecreateSchema != nil {
+			err = mddb.cfg.AfterRecreateSchema(ctx, tx)
+			if err != nil {
+				return result, fmt.Errorf("AfterRecreateSchema: %w", err)
+			}
 		}
 	}
 
-	if len(entries) > 0 {
-		err = mddb.bulkInsertDocs(ctx, tx, entries, replace, func(batch []IndexableDocument) error {
-			if mddb.cfg.AfterBulkIndex == nil {
-				return nil
+	// ==================== 3. Scan + Write Pipeline ====================
+	// seen tracks which indexed rows still exist on disk; atomics avoid locks in callbacks.
+	var seen []atomic.Bool
+	if incremental {
+		seen = make([]atomic.Bool, len(metaIndex.list))
+	}
+
+	var (
+		inserted atomic.Int64
+		updated  atomic.Int64
+		skipped  atomic.Int64
+	)
+
+	// Cancel the scan when the writer fails (and vice versa) so goroutines exit promptly.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
+	// Bounded channel provides backpressure so parsing doesn't outrun SQLite.
+	sqliteInsertChan := make(chan IndexRow, indexInsertBatchSize*indexInsertQueueBatches)
+	sqliteResultChan := make(chan struct {
+		count int
+		err   error
+	}, 1)
+
+	// Single writer goroutine owns SQLite writes + hook callbacks within the txn.
+	go func() {
+		count, writeErr := mddb.streamInserts(ctx, tx, sqliteInsertChan, incremental)
+		if writeErr != nil {
+			cancel(writeErr)
+		}
+
+		sqliteResultChan <- struct {
+			count int
+			err   error
+		}{count: count, err: writeErr}
+	}()
+
+	// Scan files in parallel and stream changed rows into the writer.
+	scanErr := mddb.scanFiles(ctx, metaIndex, seen, sqliteInsertChan, &inserted, &updated, &skipped)
+	close(sqliteInsertChan)
+
+	sqliteRes := <-sqliteResultChan
+
+	if scanErr != nil {
+		return result, fmt.Errorf("scan documents: %w", scanErr)
+	}
+
+	if sqliteRes.err != nil {
+		if errors.Is(sqliteRes.err, context.Canceled) || errors.Is(sqliteRes.err, context.DeadlineExceeded) {
+			return result, fmt.Errorf("canceled: %w", context.Cause(ctx))
+		}
+
+		return IncrementalIndexResult{}, fmt.Errorf("bulk insert: %w", sqliteRes.err)
+	}
+
+	if ctx.Err() != nil {
+		return IncrementalIndexResult{}, fmt.Errorf("canceled: %w", context.Cause(ctx))
+	}
+
+	// ==================== 4. Deletes (incremental only) ====================
+	// Delete after upserts to avoid buffering all changed docs; safe because
+	// path/ID mismatches are rejected during parsing.
+	if incremental {
+		deleteIDs := make([]string, 0)
+
+		for _, meta := range metaIndex.list {
+			if seen[meta.idx].Load() {
+				continue
 			}
 
-			callbackErr := mddb.cfg.AfterBulkIndex(ctx, tx, batch)
-			if callbackErr != nil {
-				return fmt.Errorf("AfterBulkIndex: %w", callbackErr)
+			deleteIDs = append(deleteIDs, meta.id)
+		}
+
+		result.Inserted = int(inserted.Load())
+		result.Updated = int(updated.Load())
+		result.Deleted = len(deleteIDs)
+		result.Skipped = int(skipped.Load())
+		result.Total = len(metaIndex.byPath) - result.Deleted + result.Inserted
+		// ==================== 5. Apply Deletes + Hooks (incremental only) ====================
+		if len(deleteIDs) > 0 {
+			deleteStmt, prepErr := mddb.prepareDeleteByIDStmt(ctx, tx, indexDeleteBatchSize)
+			if prepErr != nil {
+				return IncrementalIndexResult{}, fmt.Errorf("prepare delete: %w", prepErr)
 			}
 
-			return nil
-		})
+			defer func() { _ = deleteStmt.Close() }()
+
+			args := make([]any, indexDeleteBatchSize)
+
+			for i := 0; i < len(deleteIDs); i += indexDeleteBatchSize {
+				end := min(i+indexDeleteBatchSize, len(deleteIDs))
+				batch := deleteIDs[i:end]
+
+				stmt := deleteStmt
+				if len(batch) < indexDeleteBatchSize {
+					stmt, prepErr = mddb.prepareDeleteByIDStmt(ctx, tx, len(batch))
+					if prepErr != nil {
+						return IncrementalIndexResult{}, fmt.Errorf("prepare delete: %w", prepErr)
+					}
+				}
+
+				for j, id := range batch {
+					args[j] = id
+				}
+
+				_, execErr := stmt.ExecContext(ctx, args[:len(batch)]...)
+				if len(batch) < indexDeleteBatchSize {
+					_ = stmt.Close()
+				}
+
+				if execErr != nil {
+					return IncrementalIndexResult{}, fmt.Errorf("sqlite: %w", execErr)
+				}
+
+				if mddb.cfg.AfterDelete != nil {
+					for _, id := range batch {
+						callbackErr := mddb.cfg.AfterDelete(ctx, tx, id)
+						if callbackErr != nil {
+							return IncrementalIndexResult{}, fmt.Errorf("AfterDelete: %w (doc_id=%s)", callbackErr, id)
+						}
+					}
+				}
+
+				if mddb.cfg.AfterIndexBatch != nil {
+					callbackErr := mddb.cfg.AfterIndexBatch(ctx, tx, []IndexRow{}, batch)
+					if callbackErr != nil {
+						return IncrementalIndexResult{}, fmt.Errorf("AfterIndexBatch: %w", callbackErr)
+					}
+				}
+			}
+		}
+	} else {
+		result.Inserted = sqliteRes.count
+		result.Total = sqliteRes.count
+	}
+
+	// ==================== 6. Schema Fingerprint (full reindex only) ====================
+	if !incremental {
+		version := mddb.schema.fingerprint()
+
+		_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))
 		if err != nil {
-			return 0, fmt.Errorf("bulk insert: %w", err)
+			return result, fmt.Errorf("sqlite: set user_version: %w", err)
 		}
 	}
 
-	// Store schema fingerprint so Open() can detect mismatches.
-	version := mddb.schema.fingerprint()
-
-	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: set user_version: %w", err)
-	}
-
+	// ==================== 7. Commit ====================
 	err = tx.Commit()
 	if err != nil {
-		return 0, fmt.Errorf("sqlite: commit txn: %w", err)
+		return result, fmt.Errorf("sqlite: commit txn: %w", err)
 	}
 
+	// Important: if not set, defer() at the top will rollback the txn.
 	committed = true
 
-	return len(entries), nil
+	return result, nil
+}
+
+// scanFiles walks the data directory and streams rows.
+// If metaIndex is nil, it behaves like a full scan.
+func (mddb *MDDB[T]) scanFiles(
+	ctx context.Context,
+	metaIndex *indexMetaIndex,
+	seen []atomic.Bool,
+	sqliteInsertChan chan<- IndexRow,
+	inserted *atomic.Int64,
+	updated *atomic.Int64,
+	skipped *atomic.Int64,
+) error {
+	opts := []fileproc.Option{
+		fileproc.WithRecursive(),
+		fileproc.WithSuffix(".md"),
+	}
+	incremental := metaIndex != nil
+
+	_, errs := fileproc.Process(ctx, mddb.dataDir, func(f *fileproc.File, _ *fileproc.FileWorker) (*IndexRow, error) {
+		relPath := f.RelPath()
+		if isInternalPath(relPath) {
+			return nil, fileproc.ErrSkip
+		}
+
+		stat, err := f.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("fs: %w", err)
+		}
+
+		var (
+			meta indexMeta
+			ok   bool
+		)
+
+		if incremental {
+			meta, ok = metaIndex.byPath[string(relPath)]
+			if ok {
+				// Mark seen even when unchanged so deletes only include truly missing files.
+				seen[meta.idx].Store(true)
+
+				if meta.mtimeNS == stat.ModTime && meta.sizeBytes == stat.Size {
+					skipped.Add(1)
+
+					return nil, fileproc.ErrSkip
+				}
+			}
+		}
+
+		data, err := f.ReadAll()
+		if err != nil {
+			return nil, fmt.Errorf("fs: %w", err)
+		}
+
+		parsed, err := mddb.parseIndexable(relPath, data, stat.ModTime, stat.Size, "")
+		if err != nil {
+			return nil, fmt.Errorf("parsing document: %w", err)
+		}
+
+		row, err := mddb.buildIndexRow(&parsed)
+		if err != nil {
+			return nil, err
+		}
+
+		if ok {
+			updated.Add(1)
+		} else {
+			inserted.Add(1)
+		}
+
+		// Backpressure here keeps memory bounded while the writer catches up.
+		select {
+		case sqliteInsertChan <- row:
+		case <-ctx.Done():
+			return nil, fileproc.ErrSkip
+		}
+
+		return nil, fileproc.ErrSkip
+	}, opts...)
+
+	return toIndexScanError(errs)
+}
+
+// buildIndexRow converts a borrowed IndexableDocument into an owned IndexRow.
+// CustomRowValues are copied/normalized so they remain valid after the scan callback.
+func (mddb *MDDB[T]) buildIndexRow(doc *IndexableDocument) (IndexRow, error) {
+	row := IndexRow{
+		ID:        string(doc.ID),
+		ShortID:   string(doc.ShortID),
+		RelPath:   string(doc.RelPath),
+		MtimeNS:   doc.MtimeNS,
+		SizeBytes: doc.SizeBytes,
+		Title:     string(doc.Title),
+	}
+
+	customColCount := mddb.schema.customColumnCount()
+	if customColCount == 0 {
+		return row, nil
+	}
+
+	if mddb.cfg.SQLColumnValues == nil {
+		return IndexRow{}, errors.New("internal error: cfg.SQLColumnValues is nil")
+	}
+
+	userVals := mddb.cfg.SQLColumnValues(*doc)
+	if len(userVals) != customColCount {
+		return IndexRow{}, fmt.Errorf("SQLColumnValues: expected %d values, got %d", customColCount, len(userVals))
+	}
+
+	row.CustomRowValues = make([]any, customColCount)
+
+	for i, val := range userVals {
+		if val == nil {
+			row.CustomRowValues[i] = nil
+
+			continue
+		}
+
+		col := mddb.schema.columns[baseColumnCount+i]
+
+		switch v := val.(type) {
+		case []byte:
+			switch col.typ {
+			case ColBlob:
+				row.CustomRowValues[i] = append([]byte(nil), v...)
+			case ColText:
+				row.CustomRowValues[i] = string(v)
+			default:
+				row.CustomRowValues[i] = v
+			}
+		default:
+			row.CustomRowValues[i] = val
+		}
+	}
+
+	return row, nil
+}
+
+// streamInserts drains rowCh, batches rows, writes them to SQLite, and calls hooks.
+// It owns the transaction and must be called from the single writer goroutine.
+func (mddb *MDDB[T]) streamInserts(
+	ctx context.Context,
+	tx *sql.Tx,
+	sqliteInsertChan <-chan IndexRow,
+	withReplace bool,
+) (int, error) {
+	colCount := len(mddb.schema.columnNames())
+
+	// Pre-compile statement for full batches (common case) to avoid repeated parses.
+	batchStmt, err := mddb.prepareUpsertStmt(ctx, tx, indexInsertBatchSize, withReplace)
+	if err != nil {
+		return 0, fmt.Errorf("prepare upsert: %w", err)
+	}
+
+	defer func() { _ = batchStmt.Close() }()
+
+	args := make([]any, indexInsertBatchSize*colCount)
+	batch := make([]IndexRow, 0, indexInsertBatchSize)
+	total := 0
+
+	flush := func() error {
+		stmt := batchStmt
+
+		isRemainderStmt := len(batch) < indexInsertBatchSize
+		if isRemainderStmt {
+			// Remainder batch needs a smaller statement to match placeholder count.
+			stmt, err = mddb.prepareUpsertStmt(ctx, tx, len(batch), withReplace)
+			if err != nil {
+				return fmt.Errorf("prepare upsert: %w", err)
+			}
+		}
+
+		sqlArgs := args[:len(batch)*colCount]
+
+		err = mddb.fillBatchUpsertSQLArgs(batch, colCount, sqlArgs)
+		if err != nil {
+			if isRemainderStmt {
+				_ = stmt.Close()
+			}
+
+			return fmt.Errorf("build upsert args: %w", err)
+		}
+
+		_, err = stmt.ExecContext(ctx, sqlArgs...)
+		if isRemainderStmt {
+			_ = stmt.Close()
+		}
+
+		if err != nil {
+			return fmt.Errorf("sqlite: %w", err)
+		}
+
+		// Hook runs after successful insert; batch slice is reused after return.
+		if mddb.cfg.AfterIndexBatch != nil {
+			err = mddb.cfg.AfterIndexBatch(ctx, tx, batch, []string{})
+			if err != nil {
+				return fmt.Errorf("AfterIndexBatch: %w", err)
+			}
+		}
+
+		total += len(batch)
+		batch = batch[:0]
+
+		return nil
+	}
+
+	for {
+		select {
+		case row, ok := <-sqliteInsertChan:
+			if !ok {
+				// Channel closed: flush remainder and exit.
+				if len(batch) == 0 {
+					return total, nil
+				}
+
+				if err := flush(); err != nil {
+					return total, err
+				}
+
+				return total, nil
+			}
+
+			batch = append(batch, row)
+			if len(batch) >= indexInsertBatchSize {
+				if err := flush(); err != nil {
+					return total, err
+				}
+			}
+		case <-ctx.Done():
+			return total, fmt.Errorf("canceled: %w", context.Cause(ctx))
+		}
+	}
+}
+
+// indexMeta is lightweight metadata loaded from the index for incremental scans.
+// idx is the position in the list used for the seen bitmap.
+type indexMeta struct {
+	id        string
+	mtimeNS   int64
+	sizeBytes int64
+	idx       int
+}
+
+type indexMetaIndex struct {
+	byPath map[string]indexMeta
+	list   []indexMeta
+}
+
+// loadIndexMeta returns path-indexed metadata used by incremental reindex.
+//
+// We keep this in-memory to avoid per-file SQLite lookups (which would require
+// a path index and add write overhead). Deletions are done by ID (PK), so
+// we store id alongside path for fast delete batching. The list includes
+// stable idx values for the seen bitmap.
+func (mddb *MDDB[T]) loadIndexMeta(ctx context.Context) (*indexMetaIndex, error) {
+	rows, err := mddb.sql.QueryContext(ctx, mddb.schema.selectIndexMetaSQL())
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	meta := make(map[string]indexMeta, 1024)
+	metas := make([]indexMeta, 0, 1024)
+
+	for rows.Next() {
+		var (
+			id   string
+			path string
+			mt   int64
+			size int64
+		)
+
+		scanErr := rows.Scan(&id, &path, &mt, &size)
+		if scanErr != nil {
+			return nil, fmt.Errorf("sqlite: %w", scanErr)
+		}
+
+		entry := indexMeta{id: id, mtimeNS: mt, sizeBytes: size, idx: len(metas)}
+		metas = append(metas, entry)
+		meta[path] = entry
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: %w", err)
+	}
+
+	return &indexMetaIndex{byPath: meta, list: metas}, nil
 }
 
 // openSqliteUnsafe opens a temporary index DB for rebuilds using unsafe pragmas.
@@ -720,73 +786,8 @@ func openSqliteUnsafe(ctx context.Context, path string) (*sql.DB, error) {
 const indexInsertBatchSize = 50
 const indexDeleteBatchSize = 50
 
-// bulkInsertDocs inserts documents in batches for efficiency.
-// Uses prepared statements to reduce parse overhead.
-func (mddb *MDDB[T]) bulkInsertDocs(ctx context.Context, tx *sql.Tx, entries []*IndexableDocument, withReplace bool, afterBatch func([]IndexableDocument) error) error {
-	colCount := len(mddb.schema.columnNames())
-
-	// Pre-compile statement for full batches (the common case).
-	batchStmt, err := mddb.prepareUpsertStmt(ctx, tx, indexInsertBatchSize, withReplace)
-	if err != nil {
-		return fmt.Errorf("prepare upsert: %w", err)
-	}
-
-	defer func() { _ = batchStmt.Close() }()
-
-	// Reuse slices across iterations to reduce allocations.
-	args := make([]any, indexInsertBatchSize*colCount)
-	batch := make([]IndexableDocument, 0, indexInsertBatchSize)
-
-	for i := 0; i < len(entries); i += indexInsertBatchSize {
-		// Build batch by dereferencing entry values.
-		batch = batch[:0]
-
-		end := min(i+indexInsertBatchSize, len(entries))
-		for j := i; j < end; j++ {
-			batch = append(batch, *entries[j])
-		}
-
-		// Use pre-compiled statement for full batches, prepare lazily for remainder.
-		stmt := batchStmt
-
-		isRemainderStmt := len(batch) < indexInsertBatchSize
-		if isRemainderStmt {
-			stmt, err = mddb.prepareUpsertStmt(ctx, tx, len(batch), withReplace)
-			if err != nil {
-				return fmt.Errorf("prepare upsert: %w", err)
-			}
-		}
-
-		sqlArgs := args[:len(batch)*colCount]
-
-		err = mddb.fillBatchUpsertSQLArgs(batch, colCount, sqlArgs)
-		if err != nil {
-			if isRemainderStmt {
-				_ = stmt.Close()
-			}
-
-			return fmt.Errorf("build upsert args: %w", err)
-		}
-
-		_, err = stmt.ExecContext(ctx, sqlArgs...)
-		if isRemainderStmt {
-			_ = stmt.Close()
-		}
-
-		if err != nil {
-			return fmt.Errorf("sqlite: %w", err)
-		}
-
-		if afterBatch != nil {
-			err := afterBatch(batch)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
+// indexInsertQueueBatches controls channel depth in batches for scan→writer buffering.
+const indexInsertQueueBatches = 4
 
 func (mddb *MDDB[T]) removeFileIfExists(path string) error {
 	err := mddb.fs.Remove(path)
@@ -799,8 +800,8 @@ func (mddb *MDDB[T]) removeFileIfExists(path string) error {
 
 var internalmddbDirInDataDir = []byte(".mddb")
 
-// isInternalPathBytes checks if path is inside the .mddb directory.
-func isInternalPathBytes(path []byte) bool {
+// isInternalPath checks if path is inside the .mddb directory.
+func isInternalPath(path []byte) bool {
 	if bytes.Equal(path, internalmddbDirInDataDir) {
 		return true
 	}
@@ -815,13 +816,38 @@ func isInternalPathBytes(path []byte) bool {
 	return sep == '/' || sep == '\\'
 }
 
-// relPathFromAbs strips the root prefix from an absolute path.
-// Assumes absPath starts with root (guaranteed by fileproc walking from root).
-func relPathFromAbs(absPath []byte, root []byte) []byte {
-	rel := absPath[len(root):]
-	if len(rel) > 0 && rel[0] == os.PathSeparator {
-		rel = rel[1:]
+func toIndexScanError(errs []error) error {
+	if len(errs) == 0 {
+		return nil
 	}
 
-	return rel
+	issues := make([]*Error, 0, len(errs))
+	for _, err := range errs {
+		issue := &Error{Err: err}
+
+		// IOError: filesystem-level failure (permissions, missing file, etc.)
+		var ioErr *fileproc.IOError
+		if errors.As(err, &ioErr) {
+			issue.Path = ioErr.Path
+			issue.Err = fmt.Errorf("fs: %w", ioErr.Err)
+		}
+
+		// ProcessError: our callback returned an error.
+		var procErr *fileproc.ProcessError
+		if errors.As(err, &procErr) {
+			issue.Path = procErr.Path
+			issue.Err = procErr.Err
+
+			// If parseIndexable returned an *Error, extract context.
+			var mErr *Error
+			if errors.As(procErr.Err, &mErr) {
+				issue.ID = mErr.ID
+				issue.Err = mErr.Err
+			}
+		}
+
+		issues = append(issues, issue)
+	}
+
+	return &IndexScanError{Issues: issues}
 }

@@ -154,7 +154,7 @@ type Config[T Document] struct {
 	//
 	// Rebuilding is fast even for 1m+ documents. Do NOT store any
 	// long-term data in the index that isn't derived from the markdown files.
-	// Use [Config.AfterRecreateSchema] and [Config.AfterBulkIndex] to populate
+	// Use [Config.AfterRecreateSchema] and [Config.AfterIndexBatch] to populate
 	// related tables (tags, FTS, etc.) that need different structure than the main table.
 	//
 	// Base columns (id, short_id, path, mtime_ns, size_bytes, title) are included automatically.
@@ -180,7 +180,13 @@ type Config[T Document] struct {
 	//	SQLSchema.Text("status").Int("priority") → return []any{status, priority}
 	//
 	// All [IndexableDocument] data is borrowed from the file buffer and only valid
-	// during the callback.
+	// during the callback. Return values MUST be safe to retain beyond the callback
+	// since reindexing streams rows into SQLite asynchronously.
+	//
+	// mddb normalizes []byte values when building index rows:
+	//   - TEXT columns: []byte is converted to string
+	//   - BLOB columns: []byte is copied
+	// Other reference types are passed through as-is; ensure they are owned.
 	//
 	// Optional. Required only if SQLSchema has user columns.
 	//
@@ -254,17 +260,29 @@ type Config[T Document] struct {
 	// mddb drops and recreates the entire database on schema changes and reindex.
 	//
 
-	// AfterPut updates related tables after a document is written.
+	// AfterCreate updates related tables after a document is created.
 	//
 	// Called during [Tx.Commit] and mddb WAL replay (crash recovery). Use to sync
 	// related tables (tags, blockers, FTS) with the main document table. Must be
 	// idempotent since replay may call it multiple times for the same document.
 	//
-	// NOT called during [MDDB.Reindex] - use [Config.AfterBulkIndex] for that.
+	// NOT called during [MDDB.Reindex] - use [Config.AfterIndexBatch] for that.
 	// If you have related tables, implement both callbacks.
 	//
 	// Optional. Error triggers transaction rollback.
-	AfterPut func(ctx context.Context, tx *sql.Tx, doc *T) error
+	AfterCreate func(ctx context.Context, tx *sql.Tx, doc *T) error
+
+	// AfterUpdate updates related tables after a document is updated.
+	//
+	// Called during [Tx.Commit] and mddb WAL replay (crash recovery). Use to sync
+	// related tables (tags, blockers, FTS) with the main document table. Must be
+	// idempotent since replay may call it multiple times for the same document.
+	//
+	// NOT called during [MDDB.Reindex] - use [Config.AfterIndexBatch] for that.
+	// If you have related tables, implement both callbacks.
+	//
+	// Optional. Error triggers transaction rollback.
+	AfterUpdate func(ctx context.Context, tx *sql.Tx, doc *T) error
 
 	// AfterDelete cleans up related tables after a document is deleted.
 	//
@@ -280,7 +298,7 @@ type Config[T Document] struct {
 	// AfterRecreateSchema creates related tables after the main table is recreated.
 	//
 	// Called by [Open] on schema mismatch and [MDDB.Reindex]. Use to DROP and CREATE
-	// related tables (tags, FTS, etc.) that will be populated by [Config.AfterBulkIndex].
+	// related tables (tags, FTS, etc.) that will be populated by [Config.AfterIndexBatch].
 	// This runs BEFORE any documents are indexed.
 	//
 	// IMPORTANT: mddb only drops and recreates the MAIN table (defined by [Config.SQLSchema]).
@@ -303,33 +321,20 @@ type Config[T Document] struct {
 	// Optional. Error triggers transaction rollback.
 	AfterRecreateSchema func(ctx context.Context, tx *sql.Tx) error
 
-	// AfterBulkIndex populates related tables during full reindex.
+	// AfterIndexBatch populates related tables during reindexing.
 	//
-	// Called after each batch of documents is inserted into the main table during
-	// [MDDB.Reindex]. Batch size is exactly 50 documents (except final batch).
-	// Use to populate related tables (tags, FTS) from the indexed documents.
-	//
-	// NOT called during [Tx.Commit] - use [Config.AfterPut] for that.
-	// NOT called during [MDDB.ReindexIncremental] - use [Config.AfterIncrementalIndex]
-	// for incremental syncs.
-	//
-	// Receives [IndexableDocument] (not *T) to avoid parsing overhead and byte
-	// copying during bulk operations. Extract values directly from frontmatter.
-	//
-	// All [IndexableDocument] data is borrowed and valid only during the callback.
-	// Passing to sql.Stmt.Exec() is safe (driver copies bytes).
-	//
-	// Optional. Error triggers transaction rollback.
-	AfterBulkIndex func(ctx context.Context, tx *sql.Tx, batch []IndexableDocument) error
-
-	// AfterIncrementalIndex populates related tables during incremental reindex.
-	//
-	// Called after each incremental batch:
-	//   - Upsert batches: upserts populated, deletedIDs empty.
-	//   - Delete batches: deletedIDs populated, upserts empty.
+	// Called after each batch:
+	//   - Full reindex: upserts populated, deletedIDs empty.
+	//   - Incremental reindex:
+	//       - Upsert batches: upserts populated, deletedIDs empty.
+	//       - Delete batches: deletedIDs populated, upserts empty.
 	//
 	// Either slice may be empty. If there are no changes, the hook is not called.
+	// The upsert slice is reused between calls; copy it if you need to keep it.
+	// CustomRowValues follow the SQLSchema column order (after the base columns).
+	//
+	// NOT called during [Tx.Commit] - use [Config.AfterCreate] or [Config.AfterUpdate] for that.
 	//
 	// Optional. Error triggers transaction rollback.
-	AfterIncrementalIndex func(ctx context.Context, tx *sql.Tx, upserts []IndexableDocument, deletedIDs []string) error
+	AfterIndexBatch func(ctx context.Context, tx *sql.Tx, upserts []IndexRow, deletedIDs []string) error
 }

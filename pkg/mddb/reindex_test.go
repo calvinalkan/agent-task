@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -93,9 +94,7 @@ func Test_Reindex_Builds_SQLite_Index_When_Docs_Valid(t *testing.T) {
 func Test_Reindex_Binds_TextColumns_When_UsingBorrowedBytes(t *testing.T) {
 	t.Parallel()
 
-	// Guard: we rely on unsafe.String for TEXT binding (not BLOB) during inserts.
-	// go-sqlite3 currently uses sqlite3_bind_text + SQLITE_TRANSIENT for strings.
-	// If the driver ever changes this behavior, comparisons would break.
+	// Guard: ensure TEXT columns stay text when values originate as []byte.
 	dir := t.TempDir()
 
 	doc := newTestDoc(t, "Alpha")
@@ -137,7 +136,7 @@ func Test_Reindex_Binds_TextColumns_When_UsingBorrowedBytes(t *testing.T) {
 	}
 }
 
-func Test_Reindex_Calls_AfterBulkIndex_When_Reindexing(t *testing.T) {
+func Test_Reindex_Calls_AfterIndexBatch_When_Reindexing(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -156,11 +155,11 @@ func Test_Reindex_Calls_AfterBulkIndex_When_Reindexing(t *testing.T) {
 	)
 
 	cfg := testConfig(dir)
-	cfg.AfterBulkIndex = func(_ context.Context, _ *sql.Tx, batch []mddb.IndexableDocument) error {
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, batch []mddb.IndexRow, _ []string) error {
 		calls++
 
 		for _, doc := range batch {
-			gotIDs = append(gotIDs, string(append([]byte(nil), doc.ID...)))
+			gotIDs = append(gotIDs, doc.ID)
 		}
 
 		return nil
@@ -205,7 +204,127 @@ func Test_Reindex_Calls_AfterBulkIndex_When_Reindexing(t *testing.T) {
 	}
 }
 
-func Test_Reindex_Returns_Error_When_AfterBulkIndex_Fails(t *testing.T) {
+func Test_Reindex_AfterIndexBatch_Passes_IndexRows_With_CustomValues_When_CustomColumns_Configured(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	docA := newTestDoc(t, "Alpha")
+	docA.DocStatus = reindexStatusOpen
+	docA.DocPriority = 3
+	docA.DocBody = "alpha body\n"
+
+	docB := newTestDoc(t, "Beta")
+	docB.DocStatus = reindexStatusClosed
+	docB.DocPriority = 9
+	docB.DocBody = "beta body\n"
+
+	writeTestDocFile(t, dir, docA)
+	writeTestDocFile(t, dir, docB)
+
+	var (
+		mu  sync.Mutex
+		got = map[string]mddb.IndexRow{}
+	)
+
+	cfg := testConfig(dir)
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, batch []mddb.IndexRow, _ []string) error {
+		mu.Lock()
+		defer mu.Unlock()
+
+		for _, row := range batch {
+			if row.CustomRowValues != nil {
+				row.CustomRowValues = append([]any(nil), row.CustomRowValues...)
+			}
+
+			got[row.ID] = row
+		}
+
+		return nil
+	}
+
+	s, err := mddb.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	// Reset in case Open triggered a reindex.
+	mu.Lock()
+
+	got = map[string]mddb.IndexRow{}
+
+	mu.Unlock()
+
+	_, err = s.Reindex(t.Context())
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+
+	assertRow := func(doc *TestDoc) {
+		t.Helper()
+
+		mu.Lock()
+
+		row, ok := got[doc.DocID]
+
+		mu.Unlock()
+
+		if !ok {
+			t.Fatalf("missing row for %s", doc.DocID)
+		}
+
+		if row.ShortID != doc.DocShort {
+			t.Fatalf("short_id for %s = %q, want %q", doc.DocID, row.ShortID, doc.DocShort)
+		}
+
+		if row.RelPath != doc.DocPath {
+			t.Fatalf("path for %s = %q, want %q", doc.DocID, row.RelPath, doc.DocPath)
+		}
+
+		if row.Title != doc.DocTitle {
+			t.Fatalf("title for %s = %q, want %q", doc.DocID, row.Title, doc.DocTitle)
+		}
+
+		info, err := os.Stat(filepath.Join(dir, doc.DocPath))
+		if err != nil {
+			t.Fatalf("stat %s: %v", doc.DocPath, err)
+		}
+
+		if row.MtimeNS != info.ModTime().UnixNano() {
+			t.Fatalf("mtime for %s = %d, want %d", doc.DocID, row.MtimeNS, info.ModTime().UnixNano())
+		}
+
+		if row.SizeBytes != info.Size() {
+			t.Fatalf("size for %s = %d, want %d", doc.DocID, row.SizeBytes, info.Size())
+		}
+
+		if len(row.CustomRowValues) != 3 {
+			t.Fatalf("custom values for %s = %d, want 3", doc.DocID, len(row.CustomRowValues))
+		}
+
+		status, ok := row.CustomRowValues[0].(string)
+		if !ok || status != doc.DocStatus {
+			t.Fatalf("status for %s = %#v, want %q", doc.DocID, row.CustomRowValues[0], doc.DocStatus)
+		}
+
+		priority, ok := row.CustomRowValues[1].(int64)
+		if !ok || priority != doc.DocPriority {
+			t.Fatalf("priority for %s = %#v, want %d", doc.DocID, row.CustomRowValues[1], doc.DocPriority)
+		}
+
+		body, ok := row.CustomRowValues[2].(string)
+		if !ok || body != doc.DocBody {
+			t.Fatalf("body for %s = %#v, want %q", doc.DocID, row.CustomRowValues[2], doc.DocBody)
+		}
+	}
+
+	assertRow(docA)
+	assertRow(docB)
+}
+
+func Test_Reindex_Returns_Error_When_AfterIndexBatch_Fails(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -231,7 +350,7 @@ func Test_Reindex_Returns_Error_When_AfterBulkIndex_Fails(t *testing.T) {
 	writeRawDocFile(t, dir, docB.DocPath, docB)
 
 	cfg := testConfig(dir)
-	cfg.AfterBulkIndex = func(_ context.Context, _ *sql.Tx, _ []mddb.IndexableDocument) error {
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, _ []mddb.IndexRow, _ []string) error {
 		return errors.New("after bulk index failed")
 	}
 
@@ -244,7 +363,7 @@ func Test_Reindex_Returns_Error_When_AfterBulkIndex_Fails(t *testing.T) {
 
 	_, err = s.Reindex(t.Context())
 	if err == nil {
-		t.Fatal("expected error from AfterBulkIndex")
+		t.Fatal("expected error from AfterIndexBatch")
 	}
 
 	type row struct {

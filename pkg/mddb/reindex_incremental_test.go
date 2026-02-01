@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/calvinalkan/agent-task/pkg/mddb"
@@ -26,7 +27,7 @@ func Test_ReindexIncremental_Returns_No_Changes_When_Files_Unmodified(t *testing
 
 	calls := 0
 	cfg := testConfig(dir)
-	cfg.AfterIncrementalIndex = func(_ context.Context, _ *sql.Tx, _ []mddb.IndexableDocument, _ []string) error {
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, _ []mddb.IndexRow, _ []string) error {
 		calls++
 
 		return nil
@@ -102,9 +103,9 @@ func Test_ReindexIncremental_Updates_Inserts_Deletes_When_Files_Change(t *testin
 	)
 
 	cfg := testConfig(dir)
-	cfg.AfterIncrementalIndex = func(_ context.Context, _ *sql.Tx, upserts []mddb.IndexableDocument, deleted []string) error {
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, upserts []mddb.IndexRow, deleted []string) error {
 		for _, doc := range upserts {
-			gotUpserts = append(gotUpserts, string(append([]byte(nil), doc.ID...)))
+			gotUpserts = append(gotUpserts, doc.ID)
 		}
 
 		gotDeletes = append(gotDeletes, deleted...)
@@ -250,7 +251,7 @@ func Test_ReindexIncremental_Returns_Error_When_Path_Mismatches(t *testing.T) {
 	}
 }
 
-func Test_ReindexIncremental_Returns_Error_When_AfterIncrementalIndex_Fails(t *testing.T) {
+func Test_ReindexIncremental_Returns_Error_When_AfterIndexBatch_Fails(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -273,7 +274,7 @@ func Test_ReindexIncremental_Returns_Error_When_AfterIncrementalIndex_Fails(t *t
 	writeRawDocFile(t, dir, docAUpdated.DocPath, &docAUpdated)
 
 	cfg := testConfig(dir)
-	cfg.AfterIncrementalIndex = func(_ context.Context, _ *sql.Tx, _ []mddb.IndexableDocument, _ []string) error {
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, _ []mddb.IndexRow, _ []string) error {
 		return errors.New("after incremental index failed")
 	}
 
@@ -286,7 +287,7 @@ func Test_ReindexIncremental_Returns_Error_When_AfterIncrementalIndex_Fails(t *t
 
 	_, err = s.ReindexIncremental(t.Context())
 	if err == nil {
-		t.Fatal("expected error from AfterIncrementalIndex")
+		t.Fatal("expected error from AfterIndexBatch")
 	}
 
 	db := openIndex(t, dir)
@@ -353,7 +354,7 @@ func Test_ReindexIncremental_Calls_AfterDelete_When_File_Removed(t *testing.T) {
 	}
 }
 
-func Test_ReindexIncremental_Calls_AfterIncrementalIndex_With_Empty_Deletes_When_Upserts_Only(t *testing.T) {
+func Test_ReindexIncremental_Calls_AfterIndexBatch_With_Empty_Deletes_When_Upserts_Only(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -374,9 +375,9 @@ func Test_ReindexIncremental_Calls_AfterIncrementalIndex_With_Empty_Deletes_When
 	)
 
 	cfg := testConfig(dir)
-	cfg.AfterIncrementalIndex = func(_ context.Context, _ *sql.Tx, upserts []mddb.IndexableDocument, deleted []string) error {
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, upserts []mddb.IndexRow, deleted []string) error {
 		for _, doc := range upserts {
-			gotUpserts = append(gotUpserts, string(append([]byte(nil), doc.ID...)))
+			gotUpserts = append(gotUpserts, doc.ID)
 		}
 
 		gotDeletes = append(gotDeletes, deleted...)
@@ -409,7 +410,7 @@ func Test_ReindexIncremental_Calls_AfterIncrementalIndex_With_Empty_Deletes_When
 	}
 }
 
-func Test_ReindexIncremental_Calls_AfterIncrementalIndex_With_Empty_Upserts_When_Deletes_Only(t *testing.T) {
+func Test_ReindexIncremental_Calls_AfterIndexBatch_With_Empty_Upserts_When_Deletes_Only(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -433,9 +434,9 @@ func Test_ReindexIncremental_Calls_AfterIncrementalIndex_With_Empty_Upserts_When
 	)
 
 	cfg := testConfig(dir)
-	cfg.AfterIncrementalIndex = func(_ context.Context, _ *sql.Tx, upserts []mddb.IndexableDocument, deleted []string) error {
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, upserts []mddb.IndexRow, deleted []string) error {
 		for _, doc := range upserts {
-			gotUpserts = append(gotUpserts, string(append([]byte(nil), doc.ID...)))
+			gotUpserts = append(gotUpserts, doc.ID)
 		}
 
 		gotDeletes = append(gotDeletes, deleted...)
@@ -465,6 +466,126 @@ func Test_ReindexIncremental_Calls_AfterIncrementalIndex_With_Empty_Upserts_When
 
 	if len(gotDeletes) != 1 || gotDeletes[0] != docB.DocID {
 		t.Fatalf("deletes = %v, want %s", gotDeletes, docB.DocID)
+	}
+}
+
+func Test_ReindexIncremental_AfterIndexBatch_Passes_IndexRows_With_CustomValues_When_CustomColumns_Configured(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	doc := newTestDoc(t, "Alpha")
+	doc.DocStatus = reindexStatusOpen
+	doc.DocPriority = 1
+	doc.DocBody = "before body\n"
+
+	s := openTestStore(t, dir)
+	createTestDoc(t.Context(), t, s, doc)
+	_ = s.Close()
+
+	updated := *doc
+	updated.DocTitle = "Alpha Updated"
+	updated.DocStatus = reindexStatusClosed
+	updated.DocPriority = 7
+	updated.DocBody = "after body\n"
+	writeRawPath(t, dir, updated.DocPath, renderDocContent(&updated))
+
+	var (
+		mu  sync.Mutex
+		row *mddb.IndexRow
+	)
+
+	cfg := testConfig(dir)
+	cfg.AfterIndexBatch = func(_ context.Context, _ *sql.Tx, upserts []mddb.IndexRow, _ []string) error {
+		if len(upserts) == 0 {
+			return nil
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		copied := upserts[0]
+		if copied.CustomRowValues != nil {
+			copied.CustomRowValues = append([]any(nil), copied.CustomRowValues...)
+		}
+
+		row = &copied
+
+		return nil
+	}
+
+	s, err := mddb.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	result, err := s.ReindexIncremental(t.Context())
+	if err != nil {
+		t.Fatalf("reindex incremental: %v", err)
+	}
+
+	if result.Updated != 1 || result.Inserted != 0 || result.Deleted != 0 {
+		t.Fatalf("result = %+v, want updated=1", result)
+	}
+
+	mu.Lock()
+
+	got := row
+
+	mu.Unlock()
+
+	if got == nil {
+		t.Fatal("missing upsert row")
+	}
+
+	if got.ID != updated.DocID {
+		t.Fatalf("id = %q, want %q", got.ID, updated.DocID)
+	}
+
+	if got.ShortID != updated.DocShort {
+		t.Fatalf("short_id = %q, want %q", got.ShortID, updated.DocShort)
+	}
+
+	if got.RelPath != updated.DocPath {
+		t.Fatalf("path = %q, want %q", got.RelPath, updated.DocPath)
+	}
+
+	if got.Title != updated.DocTitle {
+		t.Fatalf("title = %q, want %q", got.Title, updated.DocTitle)
+	}
+
+	info, err := os.Stat(filepath.Join(dir, updated.DocPath))
+	if err != nil {
+		t.Fatalf("stat %s: %v", updated.DocPath, err)
+	}
+
+	if got.MtimeNS != info.ModTime().UnixNano() {
+		t.Fatalf("mtime = %d, want %d", got.MtimeNS, info.ModTime().UnixNano())
+	}
+
+	if got.SizeBytes != info.Size() {
+		t.Fatalf("size = %d, want %d", got.SizeBytes, info.Size())
+	}
+
+	if len(got.CustomRowValues) != 3 {
+		t.Fatalf("custom values = %d, want 3", len(got.CustomRowValues))
+	}
+
+	status, ok := got.CustomRowValues[0].(string)
+	if !ok || status != updated.DocStatus {
+		t.Fatalf("status = %#v, want %q", got.CustomRowValues[0], updated.DocStatus)
+	}
+
+	priority, ok := got.CustomRowValues[1].(int64)
+	if !ok || priority != updated.DocPriority {
+		t.Fatalf("priority = %#v, want %d", got.CustomRowValues[1], updated.DocPriority)
+	}
+
+	body, ok := got.CustomRowValues[2].(string)
+	if !ok || body != updated.DocBody {
+		t.Fatalf("body = %#v, want %q", got.CustomRowValues[2], updated.DocBody)
 	}
 }
 

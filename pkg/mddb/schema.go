@@ -9,7 +9,6 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"unsafe"
 )
 
 // ColumnType represents SQLite storage classes.
@@ -189,8 +188,8 @@ func (s *SQLSchema) columnNames() []string {
 	return names
 }
 
-// userColumnCount returns the number of user-defined columns (after base columns).
-func (s *SQLSchema) userColumnCount() int {
+// customColumnCount returns the number of user-defined columns (after base columns).
+func (s *SQLSchema) customColumnCount() int {
 	if len(s.columns) <= baseColumnCount {
 		return 0
 	}
@@ -469,14 +468,13 @@ func (mddb *MDDB[T]) prepareDeleteByIDStmt(ctx context.Context, tx *sql.Tx, rows
 	return stmt, nil
 }
 
-// fillBatchUpsertSQLArgs populates dest with SQL arguments for a batch of documents.
-// Each document fills colCount consecutive slots in dest.
-// Caller must ensure len(dest) >= len(docs) * colCount.
-func (mddb *MDDB[T]) fillBatchUpsertSQLArgs(docs []IndexableDocument, colCount int, dest []any) error {
-	for i := range docs {
-		docArgs := dest[i*colCount : (i+1)*colCount]
+// fillBatchUpsertSQLArgs populates dest with SQL arguments for a batch of rows.
+// Each row fills colCount consecutive slots in dest.
+func (mddb *MDDB[T]) fillBatchUpsertSQLArgs(rows []IndexRow, colCount int, dest []any) error {
+	for i := range rows {
+		rowArgs := dest[i*colCount : (i+1)*colCount]
 
-		err := mddb._fillDocUpsertSQLArgs(&docs[i], docArgs)
+		err := mddb._fillRowUpsertSQLArgs(&rows[i], rowArgs)
 		if err != nil {
 			return err
 		}
@@ -485,50 +483,27 @@ func (mddb *MDDB[T]) fillBatchUpsertSQLArgs(docs []IndexableDocument, colCount i
 	return nil
 }
 
-// _fillDocUpsertSQLArgs populates dest with SQL arguments for a single document.
-// First slots are base columns (id, short_id, path, mtime_ns, size_bytes, title),
-// remaining slots are filled by Config.SQLColumnValues for user columns.
-func (mddb *MDDB[T]) _fillDocUpsertSQLArgs(doc *IndexableDocument, dest []any) error {
-	// Use unsafe.String to avoid one allocation per field on hot-path inserts.
-	//
-	// Why unsafe.String:
-	//   - []byte binds as BLOB (wrong type affinity, breaks = comparisons with TEXT).
-	//   - string([]byte) allocates; unsafe.String creates a view without copying.
-	//   - go-sqlite3 still allocates internally ([]byte(string)), but we save one alloc per field.
-	//
-	// Why it's safe:
-	//   - doc fields are borrowed and remain valid for the duration of this batch.
-	//   - go-sqlite3 uses SQLITE_TRANSIENT, so SQLite copies before bind returns.
-	//   - The string views don't escape this function.
-	dest[0] = unsafe.String(unsafe.SliceData(doc.ID), len(doc.ID))
-	dest[1] = unsafe.String(unsafe.SliceData(doc.ShortID), len(doc.ShortID))
-	dest[2] = unsafe.String(unsafe.SliceData(doc.RelPath), len(doc.RelPath))
-	dest[3] = doc.MtimeNS
-	dest[4] = doc.SizeBytes
-	dest[5] = unsafe.String(unsafe.SliceData(doc.Title), len(doc.Title))
+// _fillRowUpsertSQLArgs populates dest with SQL arguments for a single row.
+// Assumes row.CustomRowValues already contains owned values.
+func (mddb *MDDB[T]) _fillRowUpsertSQLArgs(row *IndexRow, dest []any) error {
+	dest[0] = row.ID
+	dest[1] = row.ShortID
+	dest[2] = row.RelPath
+	dest[3] = row.MtimeNS
+	dest[4] = row.SizeBytes
+	dest[5] = row.Title
 
-	userColCount := mddb.schema.userColumnCount()
+	userColCount := mddb.schema.customColumnCount()
 	if userColCount == 0 {
 		return nil
 	}
 
-	if mddb.cfg.SQLColumnValues == nil {
-		return errors.New("internal error: cfg.SQLColumnValues is nil")
+	if len(row.CustomRowValues) != userColCount {
+		return fmt.Errorf("custom values: expected %d values, got %d", userColCount, len(row.CustomRowValues))
 	}
 
-	userVals := mddb.cfg.SQLColumnValues(*doc)
-	if len(userVals) != userColCount {
-		return fmt.Errorf("SQLColumnValues: expected %d values, got %d", userColCount, len(userVals))
-	}
-
-	for i, val := range userVals {
-		switch v := val.(type) {
-		case []byte:
-			// Convert borrowed []byte to TEXT (same reasoning as base columns above).
-			dest[baseColumnCount+i] = unsafe.String(unsafe.SliceData(v), len(v))
-		default:
-			dest[baseColumnCount+i] = val
-		}
+	for i, val := range row.CustomRowValues {
+		dest[baseColumnCount+i] = val
 	}
 
 	return nil

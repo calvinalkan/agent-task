@@ -1,10 +1,12 @@
 package mddb_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/calvinalkan/agent-task/pkg/mddb"
@@ -111,6 +113,85 @@ func Test_Open_Replays_Put_And_Delete_When_WAL_Committed(t *testing.T) {
 	}
 }
 
+func Test_Open_Replays_WAL_Calls_Hooks_When_Kind_Differs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	existing := newTestDoc(t, "Existing")
+	writeTestDocFile(t, dir, existing)
+
+	updated := *existing
+	updated.DocTitle = "Existing Updated"
+	updated.DocBody = "updated body\n"
+
+	created := newTestDoc(t, "Created")
+
+	walPath := filepath.Join(dir, ".mddb", "wal")
+	writeWalFile(t, walPath, []walRecord{
+		{
+			Op:      "put",
+			Kind:    "update",
+			ID:      updated.DocID,
+			Path:    updated.DocPath,
+			Content: renderDocContent(&updated),
+		},
+		{
+			Op:      "put",
+			Kind:    "create",
+			ID:      created.DocID,
+			Path:    created.DocPath,
+			Content: renderDocContent(created),
+		},
+	})
+
+	var (
+		mu         sync.Mutex
+		createdIDs []string
+		updatedIDs []string
+	)
+
+	cfg := testConfig(dir)
+	cfg.AfterCreate = func(_ context.Context, _ *sql.Tx, doc *TestDoc) error {
+		mu.Lock()
+		defer mu.Unlock()
+
+		createdIDs = append(createdIDs, doc.DocID)
+
+		return nil
+	}
+	cfg.AfterUpdate = func(_ context.Context, _ *sql.Tx, doc *TestDoc) error {
+		mu.Lock()
+		defer mu.Unlock()
+
+		updatedIDs = append(updatedIDs, doc.DocID)
+
+		return nil
+	}
+
+	s, err := mddb.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	_ = s.Close()
+
+	mu.Lock()
+
+	gotCreated := append([]string(nil), createdIDs...)
+	gotUpdated := append([]string(nil), updatedIDs...)
+
+	mu.Unlock()
+
+	if len(gotCreated) != 1 || gotCreated[0] != created.DocID {
+		t.Fatalf("after create ids = %v, want [%s]", gotCreated, created.DocID)
+	}
+
+	if len(gotUpdated) != 1 || gotUpdated[0] != updated.DocID {
+		t.Fatalf("after update ids = %v, want [%s]", gotUpdated, updated.DocID)
+	}
+}
+
 func Test_Open_Ignores_WAL_When_Footer_Missing(t *testing.T) {
 	t.Parallel()
 
@@ -123,7 +204,7 @@ func Test_Open_Ignores_WAL_When_Footer_Missing(t *testing.T) {
 	s := openTestStore(t, dir)
 	_ = s.Close()
 
-	// Write WAL without footer (uncommitted)
+	// Write WAL without footer (uncommitted).
 	uncommitted := newTestDoc(t, "Uncommitted")
 	walPath := filepath.Join(dir, ".mddb", "wal")
 	writeWalBodyOnly(t, walPath, []walRecord{makeWalPutRecord(uncommitted)})

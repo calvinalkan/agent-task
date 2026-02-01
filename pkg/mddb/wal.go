@@ -30,6 +30,53 @@ const (
 	walOpDelete = "delete"
 )
 
+type walKind uint8
+
+const (
+	walKindCreate walKind = iota + 1
+	walKindUpdate
+	walKindDelete
+)
+
+func walKindString(k walKind) string {
+	switch k {
+	case walKindCreate:
+		return "create"
+	case walKindUpdate:
+		return "update"
+	case walKindDelete:
+		return "delete"
+	default:
+		return fmt.Sprintf("unknown(%d)", k)
+	}
+}
+
+func (k *walKind) MarshalText() ([]byte, error) {
+	switch *k {
+	case walKindCreate, walKindUpdate, walKindDelete:
+		return []byte(walKindString(*k)), nil
+	default:
+		return nil, fmt.Errorf("unknown kind %d", *k)
+	}
+}
+
+func (k *walKind) UnmarshalText(text []byte) error {
+	switch string(text) {
+	case "":
+		*k = 0
+	case "create":
+		*k = walKindCreate
+	case "update":
+		*k = walKindUpdate
+	case "delete":
+		*k = walKindDelete
+	default:
+		return fmt.Errorf("unknown kind %q", text)
+	}
+
+	return nil
+}
+
 var walCRC32C = crc32.MakeTable(crc32.Castagnoli)
 
 // ErrWALCorrupt indicates the WAL file has invalid structure or checksum.
@@ -52,11 +99,12 @@ const (
 
 // walOp represents a single WAL operation.
 type walOp[T Document] struct {
-	Op      string `json:"op"`
-	ID      string `json:"id"`
-	Path    string `json:"path"`
-	Content string `json:"content,omitempty"`
-	Doc     *T     `json:"-"`
+	Op      string  `json:"op"`
+	Kind    walKind `json:"kind,omitempty"`
+	ID      string  `json:"id"`
+	Path    string  `json:"path"`
+	Content string  `json:"content,omitempty"`
+	Doc     *T      `json:"-"`
 }
 
 // recoverWalLocked recovers any pending WAL state.
@@ -312,8 +360,9 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 
 	var (
 		deleteStmt *sql.Stmt
-		putDocs    []IndexableDocument
-		afterDocs  []*T // for AfterPut callback only
+		putRows    []IndexRow
+		putKinds   []walKind
+		afterDocs  []*T // for AfterCreate/AfterUpdate callbacks only
 	)
 
 	for _, op := range ops {
@@ -369,9 +418,15 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 				return fmt.Errorf("parsing document: %w (doc_id=%s doc_path=%s)", parseErr, op.ID, op.Path)
 			}
 
-			putDocs = append(putDocs, parsed)
+			row, rowErr := mddb.buildIndexRow(&parsed)
+			if rowErr != nil {
+				return fmt.Errorf("index row: %w (doc_id=%s doc_path=%s)", rowErr, op.ID, op.Path)
+			}
 
-			if mddb.cfg.AfterPut != nil {
+			putRows = append(putRows, row)
+			putKinds = append(putKinds, op.Kind)
+
+			if mddb.cfg.AfterCreate != nil || mddb.cfg.AfterUpdate != nil {
 				if op.Doc != nil {
 					afterDocs = append(afterDocs, op.Doc)
 				} else {
@@ -392,9 +447,9 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 		defer func() { _ = deleteStmt.Close() }()
 	}
 
-	// Insert docs one-by-one so AfterPut callbacks fire immediately per doc.
+	// Insert docs one-by-one so AfterCreate/AfterUpdate callbacks fire immediately per doc.
 	// WAL recovery typically has few entries, so batching is unnecessary.
-	if len(putDocs) > 0 {
+	if len(putRows) > 0 {
 		colCount := len(mddb.schema.columnNames())
 
 		stmt, prepErr := mddb.prepareUpsertStmt(ctx, tx, 1, true)
@@ -406,22 +461,32 @@ func (mddb *MDDB[T]) updateSqliteIndexFromOps(ctx context.Context, ops []walOp[T
 
 		args := make([]any, colCount)
 
-		for i := range putDocs {
-			err = mddb.fillBatchUpsertSQLArgs([]IndexableDocument{putDocs[i]}, colCount, args)
+		for i := range putRows {
+			err = mddb.fillBatchUpsertSQLArgs([]IndexRow{putRows[i]}, colCount, args)
 			if err != nil {
-				return fmt.Errorf("adding upsert statement args: %w (doc_id=%s doc_path=%s)", err, putDocs[i].ID, putDocs[i].RelPath)
+				return fmt.Errorf("adding upsert statement args: %w (doc_id=%s doc_path=%s)", err, putRows[i].ID, putRows[i].RelPath)
 			}
 
 			_, err = stmt.ExecContext(ctx, args...)
 			if err != nil {
-				return fmt.Errorf("sqlite: %w (doc_id=%s doc_path=%s)", err, putDocs[i].ID, putDocs[i].RelPath)
+				return fmt.Errorf("sqlite: %w (doc_id=%s doc_path=%s)", err, putRows[i].ID, putRows[i].RelPath)
 			}
 
-			// Call AfterPut immediately after each insert.
-			if mddb.cfg.AfterPut != nil {
-				callbackErr := mddb.cfg.AfterPut(ctx, tx, afterDocs[i])
-				if callbackErr != nil {
-					return fmt.Errorf("AfterPut callback: %w (doc_id=%s doc_path=%s)", callbackErr, putDocs[i].ID, putDocs[i].RelPath)
+			// Call AfterCreate/AfterUpdate immediately after each insert.
+			if mddb.cfg.AfterCreate != nil || mddb.cfg.AfterUpdate != nil {
+				kind := putKinds[i]
+				if kind == walKindCreate {
+					if mddb.cfg.AfterCreate != nil {
+						callbackErr := mddb.cfg.AfterCreate(ctx, tx, afterDocs[i])
+						if callbackErr != nil {
+							return fmt.Errorf("AfterCreate callback: %w (doc_id=%s doc_path=%s)", callbackErr, putRows[i].ID, putRows[i].RelPath)
+						}
+					}
+				} else if mddb.cfg.AfterUpdate != nil {
+					callbackErr := mddb.cfg.AfterUpdate(ctx, tx, afterDocs[i])
+					if callbackErr != nil {
+						return fmt.Errorf("AfterUpdate callback: %w (doc_id=%s doc_path=%s)", callbackErr, putRows[i].ID, putRows[i].RelPath)
+					}
 				}
 			}
 		}
@@ -585,7 +650,26 @@ func encodeWalContent[T Document](ops []walOp[T]) ([]byte, error) {
 	var body bytes.Buffer
 
 	enc := json.NewEncoder(&body)
+
 	for _, op := range ops {
+		if op.Kind == 0 {
+			return nil, fmt.Errorf("missing kind (doc_id=%s doc_path=%s)", op.ID, op.Path)
+		}
+
+		switch op.Kind {
+		case walKindCreate, walKindUpdate, walKindDelete:
+		default:
+			return nil, fmt.Errorf("unknown kind %q (doc_id=%s doc_path=%s)", walKindString(op.Kind), op.ID, op.Path)
+		}
+
+		if op.Op == walOpPut && op.Kind == walKindDelete {
+			return nil, fmt.Errorf("invalid kind %q for put (doc_id=%s doc_path=%s)", walKindString(op.Kind), op.ID, op.Path)
+		}
+
+		if op.Op == walOpDelete && op.Kind != walKindDelete {
+			return nil, fmt.Errorf("invalid kind %q for delete (doc_id=%s doc_path=%s)", walKindString(op.Kind), op.ID, op.Path)
+		}
+
 		err := enc.Encode(op)
 		if err != nil {
 			return nil, fmt.Errorf("json: %w", err)
@@ -632,6 +716,24 @@ func decodeWalOps[T Document](body []byte) ([]walOp[T], error) {
 
 		if op.Op != walOpPut && op.Op != walOpDelete {
 			return nil, fmt.Errorf("unknown op %q (doc_id=%s doc_path=%s)", op.Op, op.ID, op.Path)
+		}
+
+		if op.Kind == 0 {
+			return nil, fmt.Errorf("missing kind (doc_id=%s doc_path=%s)", op.ID, op.Path)
+		}
+
+		switch op.Kind {
+		case walKindCreate, walKindUpdate, walKindDelete:
+		default:
+			return nil, fmt.Errorf("unknown kind %q (doc_id=%s doc_path=%s)", walKindString(op.Kind), op.ID, op.Path)
+		}
+
+		if op.Op == walOpPut && op.Kind == walKindDelete {
+			return nil, fmt.Errorf("invalid kind %q for put (doc_id=%s doc_path=%s)", walKindString(op.Kind), op.ID, op.Path)
+		}
+
+		if op.Op == walOpDelete && op.Kind != walKindDelete {
+			return nil, fmt.Errorf("invalid kind %q for delete (doc_id=%s doc_path=%s)", walKindString(op.Kind), op.ID, op.Path)
 		}
 
 		if op.Op == walOpPut && op.Content == "" {

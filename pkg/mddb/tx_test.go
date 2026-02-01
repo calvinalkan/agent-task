@@ -591,14 +591,14 @@ func Test_Tx_Returns_ErrCommitIncomplete_When_AfterDelete_Fails(t *testing.T) {
 	}
 }
 
-func Test_Tx_Returns_ErrCommitIncomplete_When_AfterPut_Fails(t *testing.T) {
+func Test_Tx_Returns_ErrCommitIncomplete_When_AfterCreate_Fails(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 
 	cfg := testConfig(dir)
-	cfg.AfterPut = func(_ context.Context, _ *sql.Tx, _ *TestDoc) error {
-		return errors.New("after put failed")
+	cfg.AfterCreate = func(_ context.Context, _ *sql.Tx, _ *TestDoc) error {
+		return errors.New("after create failed")
 	}
 
 	s, err := mddb.Open(t.Context(), cfg)
@@ -634,6 +634,69 @@ func Test_Tx_Returns_ErrCommitIncomplete_When_AfterPut_Fails(t *testing.T) {
 
 	if info.Size() == 0 {
 		t.Fatalf("wal size = %d, want > 0", info.Size())
+	}
+}
+
+func Test_Tx_Calls_AfterUpdate_When_Update_Commits(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	var (
+		gotID    string
+		gotTitle string
+		calls    int
+	)
+
+	cfg := testConfig(dir)
+	cfg.AfterUpdate = func(_ context.Context, _ *sql.Tx, doc *TestDoc) error {
+		calls++
+		gotID = doc.DocID
+		gotTitle = doc.DocTitle
+
+		return nil
+	}
+
+	s, err := mddb.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	defer func() { _ = s.Close() }()
+
+	doc := createTestDoc(t.Context(), t, s, newTestDoc(t, "Original"))
+	if calls != 0 {
+		t.Fatalf("after create calls = %d, want 0", calls)
+	}
+
+	updated := *doc
+	updated.DocTitle = "Updated"
+
+	tx, err := s.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	_, err = tx.Update(&updated)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	err = tx.Commit(t.Context())
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("after update calls = %d, want 1", calls)
+	}
+
+	if gotID != updated.DocID {
+		t.Fatalf("after update id = %q, want %q", gotID, updated.DocID)
+	}
+
+	if gotTitle != updated.DocTitle {
+		t.Fatalf("after update title = %q, want %q", gotTitle, updated.DocTitle)
 	}
 }
 

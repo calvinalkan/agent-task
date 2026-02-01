@@ -99,7 +99,7 @@ func (tx *Tx[T]) Create(doc *T) (*T, error) {
 		return nil, withContext(ErrAlreadyExists, id, path)
 	}
 
-	tx.bufferPut(id, path, doc)
+	tx.bufferPut(id, path, doc, walKindCreate)
 
 	return doc, nil
 }
@@ -135,7 +135,7 @@ func (tx *Tx[T]) Update(doc *T) (*T, error) {
 		return nil, withContext(ErrNotFound, id, path)
 	}
 
-	tx.bufferPut(id, path, doc)
+	tx.bufferPut(id, path, doc, walKindUpdate)
 
 	return doc, nil
 }
@@ -212,9 +212,10 @@ func (tx *Tx[T]) fileExists(path string) (bool, error) {
 }
 
 // bufferPut adds a put operation to the transaction buffer.
-func (tx *Tx[T]) bufferPut(id, path string, doc *T) {
+func (tx *Tx[T]) bufferPut(id, path string, doc *T, kind walKind) {
 	tx.ops[id] = walOp[T]{
 		Op:   walOpPut,
+		Kind: kind,
 		ID:   id,
 		Path: path,
 		Doc:  doc,
@@ -276,6 +277,7 @@ func (tx *Tx[T]) Delete(id string) error {
 
 	tx.ops[id] = walOp[T]{
 		Op:   walOpDelete,
+		Kind: walKindDelete,
 		ID:   id,
 		Path: path,
 	}
